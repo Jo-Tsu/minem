@@ -78,11 +78,15 @@ def prepare_python(skip_install: bool) -> Path:
     if not venv_python().is_file():
         run([sys.executable, "-m", "venv", str(VENV)], "creating Python virtual environment")
     python = venv_python()
-    requirements_hash = file_digest([ROOT / "requirements.txt"])
+    requirements_hash = file_digest([ROOT / "requirements.txt", ROOT / "pyproject.toml", ROOT / "minem"])
     if read_stamp(REQUIREMENTS_STAMP) != requirements_hash:
         run(
             [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(ROOT / "requirements.txt")],
             "installing Python dependencies",
+        )
+        run(
+            [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-deps", "-e", str(ROOT)],
+            "installing the MineM CLI",
         )
         write_stamp(REQUIREMENTS_STAMP, requirements_hash)
     return python

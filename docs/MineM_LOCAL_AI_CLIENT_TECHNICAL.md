@@ -1,6 +1,6 @@
 # MineM 本地 AI 客户端技术设计
 
-> 文档状态：草案，待技术与产品确认后实施
+> 文档状态：CLI v1 已实施，客户端能力网关仍在规划
 > 目标版本：MineM vNext
 > 更新日期：2026-07-19
 > 关联文档：[本地 AI 客户端 PRD](MineM_LOCAL_AI_CLIENT_PRD.md)、[现有 macOS 客户端技术设计](macos-desktop-client.md)
@@ -26,7 +26,7 @@
 | 前端 | React 构建产物随客户端发布 | 继续复用，无需复制实现 |
 | 后端 | `server.py` 与 `minem/` 通过 PyInstaller sidecar 打包 | 需要能力网关、鉴权、幂等和确认协议 |
 | 快捷浮窗 | 已有菜单栏、全局快捷键和操作包复制 | 需要能力发现、结果回链与 AI 接入配置 |
-| CLI | 已有 `scripts/minem_cli.py`，封装部分 HTTP API | 需要稳定协议、自动发现服务、认证和完整能力覆盖 |
+| CLI | 已有可安装的 `minem` CLI、`minem.cli/v1` 输出协议、运行时发现、诊断、引用解析与正式编排能力 | 后续随能力网关补充认证和服务端幂等协议 |
 | MCP | 尚未实现 | 需要新增本地 MCP Server，并复用能力网关 |
 | 预览渲染 | `minem/thumbnails.py` 搜索系统 Chrome/Chromium | 需要随客户端打包固定渲染器，消除系统依赖 |
 | 资源库 | 用户数据位于工作目录或 Application Support | 需要版本化内置资源包与用户资源覆盖层 |

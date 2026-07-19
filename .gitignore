@@ -1,5 +1,7 @@
 node_modules/
 dist/
+build/
+*.egg-info/
 .venv/
 .DS_Store
 __pycache__/

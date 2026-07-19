@@ -1,231 +1,203 @@
-# MineM CLI 首版能力定义
+# MineM CLI v1 产品与技术规范
 
-## 产品目标
+版本：CLI Schema v1 · 2026-07-19
+状态：已批准实施
 
-把 MineM 现有的“素材工作台 + 汇报生成流程”开放给 Agent 调用。首版只做以下四件事：
+## 1. 产品定位
 
-1. 导入外部材料；
-2. 创建和修改汇报材料；
-3. 创建页面素材；
-4. 将外部文档转成案例素材。
+MineM CLI 是平台面向开发者、自动化脚本和 AI Agent 的正式操作入口。它不是 HTTP API
+的薄包装，也不绑定任何一家模型。人可以在终端中使用，AI Agent 可以通过相同命令和
+稳定 JSON 契约创建、查询、编排和交付素材。
 
-素材检索、故事线、演讲台、资源治理等能力可以保留在产品内，但不作为 CLI 首版主能力。
+能力分为两层：
 
-CLI 是 MineM 面向 AI Agent 的正式产品接口，不绑定具体模型。Codex、Claude Code、
-Gemini CLI 或其他能够执行 Shell 命令并解析 JSON 的 Agent，都可以使用同一套命令完成
-素材创建和管理。模型负责理解意图、提炼内容和生成页面，MineM 负责素材分类、持久化、
-编号、版本、编排、预览与来源追踪。
+1. **确定性素材操作**：导入、分类、命名、查询、版本、汇报编排、导出和预览，由
+   MineM CLI 与平台负责，并且必须可重复验证。
+2. **内容生成**：模型理解需求并生成 HTML、Markdown 或结构化页面描述。模型可以在
+   MineM 外部运行，再把结果交给 CLI；只有真正配置模型提供方后，命令才能使用
+   `generate` 名称。
 
-## 命令总览
+因此，简单包装 Markdown 的行为只能叫 `case import`，不能宣传成 AI 提炼。
+
+## 2. 设计原则
+
+- 安装后直接使用 `minem`，不要求用户输入 `python3 scripts/minem_cli.py`。
+- 命令采用 `minem <resource> <action>`，资源名和动作在全平台保持一致。
+- 素材参数接受内部 ID、`RPT-*` / `CTRL-*` / `RES-*` 编号或 MineM 链接。
+- 默认输出适合人阅读；`--output json` 提供稳定的机器输出。
+- stdout 只输出最终结果；进度、提示和警告写入 stderr。
+- 写操作支持 `--dry-run`；高影响操作必须使用 `--confirm` 或 `--yes`。
+- 异步操作统一支持 `--wait/--no-wait` 和 `--timeout`。
+- Agent 可传入稳定的 `--request-id`，用于日志关联和结果追踪；当前版本不虚构服务端
+  幂等保证，重复写入仍由调用方在重试前查询任务或素材结果。
+- 不依赖隐式工作区；服务地址来自显式参数、环境变量、配置或桌面运行时清单。
+- 所有失败使用稳定错误码和非零退出码。
+
+## 3. 正式命令树
 
 ```text
-python3 scripts/minem_cli.py import ...  # 导入外部材料
-python3 scripts/minem_cli.py report ...  # 创建、修改汇报材料
-python3 scripts/minem_cli.py page ...    # 新增页面素材
-python3 scripts/minem_cli.py case ...    # 外部文档转案例素材
-python3 scripts/minem_cli.py task ...    # 查询异步任务和结果
+minem version
+minem status
+minem doctor
+minem config get|set|list|unset
+minem completion bash|zsh|fish
+
+minem asset list|get|search|versions|lineage|open|rename|delete
+minem import report|page <source>
+minem page import
+minem report create|get|pages|open|export
+minem report page add|replace|move|hide|show|remove
+minem case import
+minem task list|get|wait
+minem agent capabilities|schema
 ```
 
-所有命令支持 `--json`。任何会改写正式汇报的命令先支持 `--dry-run`；`apply`、`publish`、`delete` 等动作须加 `--yes`。
+`page create`、`case create`、`report page --add/--replace` 和 `--json` 作为旧版兼容入口保留
+一个大版本，并在 stderr 输出迁移提示。
 
-## 1. 导入外部材料
+## 4. 典型工作流
 
-### 用户要做的事
-
-将外部已有的汇报 HTML / 汇报 ZIP / 单页 HTML / 页面模板包导入 MineM，自动入库为汇报材料、页面素材及其关联资源，并得到可预览的 ID 和链接。
-
-### CLI
+### 4.1 导入与查询
 
 ```bash
-# 导入一份完整汇报；MineM 识别页面并抽取资源
-minem import report ./客户方案.zip \
-  --title "某客户数字化方案" \
-  --tags 制造业,客户方案 --wait --json
-
-# 导入一个已有页面；直接作为页面素材入库
-minem import page ./客户案例页.html \
-  --title "客户案例：降本提效" \
-  --tags 客户案例,案例页 --wait --json
-
-# 导入多个混合材料，由 MineM 判别汇报、页面和资源
-minem import files ./materials/ --description "Q3 汇报材料" --json
-
-# 查看导入是否完成；完成的标准是返回真实可打开的预览链接
-minem task get IMP-20260715-001 --json
+minem import report ./customer-report.zip --name "客户方案" --wait
+minem page import ./case-page.html --name "客户案例：交付成果" --wait
+minem asset list --type page --limit 30
+minem asset search "客户案例" --output json
+minem asset get CTRL-PAGE-001
+minem asset open CTRL-PAGE-001
 ```
 
-### 系统要包装的现有能力
+### 4.2 创建和修改汇报
 
-- 支持 HTML、ZIP，以及图片、SVG、GIF、视频等资源；
-- ZIP 安全解压、扫描入口 HTML、抽取素材资源；
-- 完整汇报入库为 `RPT-*`，单页入库为 `CTRL-*`；
-- 保存来源批次、来源路径、标签、资源关系和真实预览地址；
-- 导入为异步任务，返回成功/失败原因和可重试信息。
+```bash
+minem report create --name "2026 制造业方案" \
+  --page CTRL-PAGE-001 --page CTRL-PAGE-002
 
-### 返回结果
+minem report page add RPT-20260719-001 \
+  --page CTRL-PAGE-003 --after CTRL-PAGE-001 --dry-run
 
-默认异步返回任务；增加 `--wait` 后，CLI 会等待任务进入终态，并返回最终素材。此时
-`--title` 必须作用于最终素材，而不是只写入任务描述。若平台复用了历史相同内容，CLI
-不会擅自重命名已有素材。
+minem report page add RPT-20260719-001 \
+  --page CTRL-PAGE-003 --after CTRL-PAGE-001 --confirm
+
+minem report page replace RPT-20260719-001 \
+  --page CTRL-PAGE-001 --with CTRL-PAGE-004 --confirm
+
+minem report page hide RPT-20260719-001 --page CTRL-PAGE-003 --confirm
+minem report page remove RPT-20260719-001 --page CTRL-PAGE-003 --confirm
+```
+
+隐藏和移出只改变当前汇报，不删除页面素材。替换页面也不删除旧页面或历史版本。
+
+### 4.3 AI Agent 调用
+
+```bash
+minem agent capabilities --output json
+minem agent schema report.page.add --output json
+
+# 模型先生成单页 HTML，再调用确定性素材能力
+minem page import ./generated-page.html \
+  --name "客户价值" --wait --output json --no-input
+
+minem report page add RPT-20260719-001 \
+  --page CTRL-PAGE-009 --after CTRL-PAGE-004 \
+  --confirm --output json --no-input
+```
+
+Agent 不应解析人类表格输出，也不能依赖标题匹配唯一素材。写操作应保存返回的
+`requestId`、素材 `id` 和 `code`；发生网络中断时，应先按任务或素材查询结果，再决定
+是否重试，避免重复创建。
+
+## 5. 机器输出契约
 
 ```json
 {
+  "schemaVersion": "minem.cli/v1",
   "ok": true,
-  "task_id": "IMP-20260715-001",
-  "task": {"id": "task-20260715-001", "status": "queued"}
+  "command": "report.page.add",
+  "requestId": "req_01J...",
+  "resource": {
+    "id": "created-report-...",
+    "code": "RPT-20260719-001",
+    "type": "report",
+    "title": "2026 制造业方案"
+  },
+  "data": {},
+  "links": {
+    "preview": "http://127.0.0.1:8790/reports/.../index.html"
+  },
+  "warnings": [],
+  "meta": {
+    "durationMs": 84,
+    "serverUrl": "http://127.0.0.1:8790"
+  },
+  "error": null
 }
 ```
 
-## 2. 创建、修改汇报材料
+错误时 `ok=false`，`error` 至少包含 `code`、`message` 和可选 `details`。稳定错误码包括：
 
-### 用户要做的事
+- `CONNECTION_FAILED`
+- `INVALID_ARGUMENT`
+- `NOT_FOUND`
+- `AMBIGUOUS_REFERENCE`
+- `TYPE_MISMATCH`
+- `CONFIRMATION_REQUIRED`
+- `IMPORT_FAILED`
+- `TASK_TIMEOUT`
+- `SERVER_ERROR`
+- `AI_PROVIDER_NOT_CONFIGURED`
 
-创建一个新的汇报，或对已有汇报新增一页、替换某一页、修改某一页的内容，然后得到新的可预览汇报。
+退出码：成功 `0`、一般失败 `1`、参数错误 `2`、连接失败 `3`、需要确认 `4`。
 
-这里“修改某一页”分两种：
+## 6. 输出、配置与安全
 
-- **换页**：用已有或新建的页面素材替换汇报中的某页；
-- **改页**：对该页页面素材的 HTML/结构化内容进行编辑，并将新版本挂回该汇报。
-
-### CLI
-
-```bash
-# 创建空汇报，或以一个已有汇报作为起点
-python3 scripts/minem_cli.py report create --title "2026 制造业解决方案" --controls <CTRL页面内部ID>,<CTRL页面内部ID> --json
-
-# 查看当前汇报的页面和顺序
-python3 scripts/minem_cli.py report pages <RPT内部ID> --json
-
-# 在指定页后新增一页（引用一个已有页面素材）
-python3 scripts/minem_cli.py report page <RPT内部ID> \
-  --add <新CTRL内部ID>:<现有CTRL内部ID> --yes --json
-
-# 用另一张页面素材替换第 4 页
-python3 scripts/minem_cli.py report page <RPT内部ID> \
-  --replace <旧CTRL内部ID>:<新CTRL内部ID> --yes --json
-
-# “改页”的首版做法：先以新 HTML 创建一个新页面素材，再用 replace 替换旧页
-python3 scripts/minem_cli.py page create --file ./revised-page-4.html --title "新版第 4 页" --json
-python3 scripts/minem_cli.py report page <RPT内部ID> \
-  --replace <旧CTRL内部ID>:<新CTRL内部ID> --yes --json
-```
-
-### 必须遵守的 MineM 规则
-
-- 新增、替换或编辑页面只改变当前汇报的页面槽位和编排元数据；
-- 不改写原始来源汇报 HTML；
-- “改页”产生页面素材新版本，旧版本可追溯；
-- 不复制无关资源；页面引用关系必须可查询；
-- 编排提交成功后，公开汇报链接必须实际展示最新结果，而非仅 CLI 返回成功；
-- 不允许删除或编排为空汇报。
-
-## 3. 新增页面素材
-
-### 用户要做的事
-
-从零创建一页可复用的页面素材，或基于已有页面复制后修改；页面可独立预览，也能插入任何汇报。
-
-### CLI
-
-```bash
-# 从模板创建空白页面素材
-python3 scripts/minem_cli.py page create \
-  --file ./customer-case-page.html \
-  --title "客户案例：交付成果" --wait --json
-```
-
-### 页面输入契约（首版）
-
-首版以“预先生成单页 HTML 或标准页面模板 ZIP 后导入”为边界。页面渲染 schema 是下一阶段能力；建议届时使用 JSON，避免 Agent 直接拼接不受控 HTML：
-
-```json
-{
-  "layout": "case-study",
-  "title": "某制造客户：产线协同提效",
-  "sections": [
-    {"heading": "客户挑战", "body": "跨部门协同成本高"},
-    {"heading": "解决方案", "body": "通过统一协作平台串联流程"},
-    {"heading": "成果", "body": "审批周期缩短 40%"}
-  ],
-  "asset_ids": ["RES-20260701-018"]
-}
-```
-
-MineM 将其渲染为独立 HTML 页面、生成缩略图和预览链接，并保留输入 spec 与页面版本关系。
-
-## 4. 外部文档转案例素材
-
-### 用户要做的事
-
-输入一篇外部文档（Markdown、TXT、PDF；后续可接飞书文档内容），MineM 提取案例信息，形成一个案例组与若干可复用案例页面素材，而不是只保存原文。
-
-### CLI
-
-```bash
-# 从本地文档提炼案例素材
-python3 scripts/minem_cli.py case create --file ./客户访谈纪要.md \
-  --title "某制造客户协同提效案例" \
-  --industry 制造业 --wait --json
-
-# 从已取回的文档文本创建；适合 Agent 已获得文档内容的场景
-python3 scripts/minem_cli.py case create --file ./customer-case.txt \
-  --title "某制造客户协同提效案例" --wait --json
-
-# 查询案例页面导入任务
-python3 scripts/minem_cli.py task get <task-id> --json
-
-# 选择一个生成的案例页面，插入目标汇报
-python3 scripts/minem_cli.py report page <RPT内部ID> \
-  --add <案例CTRL内部ID>:<现有CTRL内部ID> --yes --json
-```
-
-### 文档转化链路
+所有叶子命令支持：
 
 ```text
-外部文档
-→ 提取客户、行业、背景、挑战、方案、关键动作、成果/数据、引用素材
-→ 生成首张 CTRL 案例页面素材
-→ 预览通过后可插入 RPT 汇报
+--output table|json|jsonl|yaml
+--json                         # --output json 的兼容别名
+--quiet
+--base-url URL
+--timeout SECONDS
+--no-input
 ```
 
-案例结构化 JSON 至少包含：客户名称、行业、案例标题、背景、挑战、解决方案、成果指标、可引用的原文片段及素材来源。若文档缺少数据，必须标记“待补充”，不得编造指标或客户事实。
+配置优先级：命令参数 > `MINEM_BASE_URL` > 用户配置 > macOS 客户端运行时清单 >
+`http://127.0.0.1:8790`。配置文件不存储模型密钥；密钥只能来自系统钥匙串或环境变量。
 
-首版默认生成“案例概览”页。后续升级为由结构化 JSON 驱动的三类页面：
+`doctor` 必须检查 CLI 版本、服务连接、服务版本、数据目录可用性和 API 兼容性，但不能
+修改数据。`delete`、合并、正式编排等动作必须支持预演和显式确认。
 
-1. 案例概览：客户背景、行业、核心成果；
-2. 挑战与方案：问题、关键动作、产品/服务能力；
-3. 价值成果：量化成果、客户引语、可复用结论。
-
-## 首版验收闭环
+## 7. 实现结构
 
 ```text
-导入一份外部汇报
-→ 找到其页面或新建一张案例页
-→ 将该页插入/替换到目标汇报
-→ 得到更新后的正式预览链接
+minem/cli/
+  client.py       HTTP、上传、下载、超时和错误映射
+  config.py       配置与桌面运行时发现
+  contracts.py    输出 Schema、错误码和退出码
+  resolver.py     ID、编号和链接解析
+  commands.py     领域命令
+  parser.py       命令树和兼容参数
+  main.py         执行入口与输出
+scripts/minem_cli.py  旧入口兼容层
 ```
 
-以及：
+CLI 调用现有 MineM HTTP API，不建立第二套数据库或素材目录。复杂业务逻辑属于后端领域
+服务，CLI 只负责参数解析、引用解析、用户确认和稳定协议转换。
 
-```text
-导入外部案例文档
-→ 生成案例组和案例页面
-→ 人工/Agent 校验事实与预览
-→ 插入目标汇报
-```
+## 8. 验收要求
 
-本文定义的是 MineM 对外 CLI 产品范围。实现应复用现有 SQLite、上传目录、`extracted/`、缩略图和预览链路，不建立第二套素材库。
+隔离环境测试必须真实验证：
 
-### AI / CLI 可执行性验收
+1. `minem` 安装入口、`--help`、`version`、`status` 和 `doctor`；
+2. 人类表格与 JSON 输出互不污染；全局输出参数放在命令前后都可解析；
+3. 使用编号、内部 ID 和链接能解析到同一素材；
+4. 页面与案例导入返回最终编号、标题和有效预览；
+5. 汇报创建、插入、替换、移动、隐藏、显示和移出正确；
+6. `--dry-run` 不写数据，缺少确认不会写数据；
+7. 正式汇报链接展示已确认编排，原页面仍然存在；
+8. 错误 JSON、错误码和进程退出码稳定；
+9. README 展示的每条命令均由自动化测试覆盖。
 
-发布前必须在隔离数据目录运行 `python3 scripts/test_cli_workflow.py`，真实完成以下动作：
-
-1. 创建并命名三张页面素材和一张案例页面，取得 `CTRL-*` 编号与可访问预览链接；
-2. 使用页面素材创建一份 `RPT-*` 汇报；
-3. 将案例页面插入汇报，再以新页面替换旧页面；
-4. 查询最终编排并确认页数、顺序与引用正确；
-5. 访问每张页面和正式汇报链接，确认不是 404、空白响应或仅有任务成功状态；
-6. 确认插入、替换不会删除原页面素材和历史版本。
-
-该测试使用临时数据库和临时素材，不写入用户素材库。GitHub CI 对每次提交执行同一条
-链路，保证 README 中展示的 AI 能力是可运行的产品能力。
+GitHub CI 使用临时数据目录执行完整链路，不写入用户素材库。

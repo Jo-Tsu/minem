@@ -24,7 +24,7 @@ RUN apt-get update \
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY requirements.txt pyproject.toml README.md LICENSE ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 ARG MINEM_VERSION=0.0.0-dev
@@ -38,6 +38,9 @@ COPY minem ./minem
 COPY scripts ./scripts
 COPY templates ./templates
 COPY --from=frontend-build /build/public ./public
+
+RUN pip install --no-cache-dir --no-deps . \
+    && minem --help >/dev/null
 
 RUN mkdir -p data uploads extracted thumbnails report-exports
 
