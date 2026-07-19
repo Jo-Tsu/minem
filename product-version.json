@@ -1,0 +1,16 @@
+{
+  "product": "MineM",
+  "version": "0.4.0",
+  "channel": "stable",
+  "releasedAt": "2026-07-19",
+  "apiVersion": 1,
+  "databaseSchemaVersion": 1,
+  "headline": "MineM 首个公开源码版本",
+  "releaseNotes": [
+    "macOS 新增仅包含汇报和页面双模式的 MineM 创作助手，不引入素材模式。",
+    "支持识别当前 MineM 页面与剪贴板中的汇报、页面编号和真实链接，生成结构化 Codex 操作包。",
+    "新增全局快捷键、上下文必填校验、自定义指令和创作助手核心回归测试。",
+    "采用 Apache-2.0 许可证发布源码，并补齐 GitHub 社区、安全和贡献文档。",
+    "新增本机一键启动、公开安全的 Docker 默认配置、CI、CodeQL、Dependabot 和干净源码导出门禁。"
+  ]
+}

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MineM 创作助手</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+        color: #12202f;
+        background: transparent;
+        --brand: #168fd5;
+        --brand-soft: #e9f7ff;
+        --line: #d7e3ec;
+        --muted: #6c7d8d;
+        --surface: #ffffff;
+        --canvas: #f5f9fc;
+        --danger: #d84d4d;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 10px; background: transparent; }
+      button, input, textarea { font: inherit; }
+      button { -webkit-app-region: no-drag; cursor: pointer; }
+      main {
+        min-height: 620px;
+        max-height: calc(100vh - 20px);
+        padding: 14px;
+        overflow-x: hidden;
+        overflow-y: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, .985);
+        box-shadow: 0 18px 44px rgba(25, 54, 78, .2);
+      }
+      .top { display: flex; align-items: center; justify-content: space-between; height: 32px; -webkit-app-region: drag; }
+      .brand { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; font-weight: 720; }
+      .mark { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: #fff; background: var(--brand); font-weight: 800; }
+      .top-actions { display: flex; gap: 2px; }
+      .icon-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 6px; color: #566a7c; background: transparent; font-size: 18px; }
+      .icon-button:hover { color: #142331; background: #edf4f8; }
+      .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; height: 36px; margin-top: 10px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: #f1f6f9; }
+      .mode-button { border: 0; border-radius: 5px; color: #607284; background: transparent; font-size: 13px; font-weight: 700; }
+      .mode-button.active { color: #0a6fae; background: #fff; box-shadow: 0 1px 4px rgba(35, 75, 104, .13); }
+      .actions { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
+      .action { height: 58px; min-width: 0; padding: 6px 2px; border: 1px solid var(--line); border-radius: 7px; color: #586b7d; background: var(--surface); font-size: 11px; font-weight: 650; }
+      .action .glyph { display: block; height: 23px; color: #203345; font-size: 18px; line-height: 22px; }
+      .action:hover, .action.active { border-color: #55b6eb; color: #0877b8; background: var(--brand-soft); }
+      .action.active .glyph { color: #0877b8; }
+      .context-bar { display: flex; align-items: center; gap: 6px; min-height: 34px; margin-top: 10px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); }
+      .context-title { flex: 1; min-width: 0; overflow: hidden; color: #536778; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+      .mini-button { height: 24px; padding: 0 8px; border: 1px solid #cbdbe6; border-radius: 5px; color: #426074; background: #fff; font-size: 11px; font-weight: 650; }
+      .form { display: grid; gap: 9px; margin-top: 10px; }
+      .field[hidden], .reference-field[hidden], .template-panel[hidden] { display: none; }
+      .field-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px; gap: 8px; }
+      label { display: block; margin: 0 0 5px; color: #67798a; font-size: 11px; font-weight: 680; }
+      input, textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px 9px; color: #172735; background: #fff; outline: none; }
+      input { height: 34px; }
+      textarea { min-height: 56px; max-height: 100px; resize: vertical; line-height: 1.4; }
+      input:focus, textarea:focus, select:focus { border-color: #45aee7; box-shadow: 0 0 0 3px rgba(69, 174, 231, .12); }
+      .refs { display: flex; flex-wrap: wrap; gap: 5px; min-height: 35px; padding: 6px; border: 1px dashed #c6d9e6; border-radius: 6px; background: var(--canvas); }
+      .ref { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; height: 23px; padding: 0 6px; border-radius: 5px; color: #146e9e; background: #ddf2fe; font-size: 11px; }
+      .ref span { max-width: 315px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ref button { width: 16px; padding: 0; border: 0; color: #5c8aa3; background: transparent; }
+      .empty { align-self: center; color: #8493a1; font-size: 11px; }
+      .reference-tools { display: flex; gap: 5px; margin-top: 5px; }
+      .template-panel { padding-top: 8px; border-top: 1px solid #e5edf3; }
+      .template-row { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; }
+      .footer { display: flex; align-items: center; gap: 7px; margin-top: 11px; }
+      .secondary, .primary { height: 36px; border-radius: 6px; padding: 0 12px; font-weight: 700; }
+      .secondary { border: 1px solid #d0dee8; color: #4e6577; background: #fff; }
+      .primary { flex: 1; border: 1px solid #168acb; color: #fff; background: #1997dc; }
+      .primary:disabled { border-color: #d8e1e8; color: #8d9ba7; background: #edf2f5; cursor: not-allowed; }
+      .status { min-height: 17px; margin-top: 5px; overflow: hidden; color: #6e8191; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+      .status.error { color: var(--danger); }
+      @media (max-height: 670px) {
+        main { min-height: 0; }
+        .form { gap: 7px; }
+        textarea { min-height: 46px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="top">
+        <div class="brand"><span class="mark">M</span><span>MineM 创作助手</span></div>
+        <div class="top-actions">
+          <button class="icon-button" id="clear" type="button" title="清空当前上下文" aria-label="清空当前上下文">↺</button>
+          <button class="icon-button" id="close" type="button" title="隐藏浮窗" aria-label="隐藏浮窗">×</button>
+        </div>
+      </header>
+
+      <div class="mode-switch" role="tablist" aria-label="创作模式">
+        <button class="mode-button active" data-mode="report" role="tab" aria-selected="true">汇报</button>
+        <button class="mode-button" data-mode="page" role="tab" aria-selected="false">页面</button>
+      </div>
+
+      <div class="actions" id="actions" aria-label="快捷操作"></div>
+
+      <div class="context-bar">
+        <span class="context-title" id="context-title">尚未识别页面上下文</span>
+        <button class="mini-button" id="read-current" type="button" title="识别 MineM 当前页面">当前</button>
+        <button class="mini-button" id="read-clipboard" type="button" title="识别剪贴板中的链接和编号">粘贴</button>
+      </div>
+
+      <div class="form">
+        <div class="field" id="report-field">
+          <label for="report">汇报链接或编号</label>
+          <input id="report" autocomplete="off" placeholder="RPT-... 或真实汇报链接" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label id="source-label" for="source">外部汇报</label>
+            <input id="source" autocomplete="off" />
+          </div>
+          <div class="field" id="target-field">
+            <label for="target-page">目标页</label>
+            <input id="target-page" type="number" min="1" placeholder="页码" />
+          </div>
+        </div>
+
+        <div class="reference-field" id="reference-field">
+          <label>页面引用</label>
+          <div class="refs" id="refs"></div>
+          <div class="reference-tools">
+            <button class="mini-button" id="add-reference" type="button" title="从来源输入中添加页面引用">＋ 引用</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="requirements">补充要求</label>
+          <textarea id="requirements" placeholder="内容、顺序、版本或交付要求"></textarea>
+        </div>
+
+        <section class="template-panel" id="template-panel" hidden>
+          <label for="template-select">自定义指令</label>
+          <div class="template-row">
+            <select id="template-select"><option value="">新建指令</option></select>
+            <button class="icon-button" id="delete-template" type="button" title="删除当前指令" aria-label="删除当前指令">⌫</button>
+          </div>
+          <div class="field-row" style="grid-template-columns: 128px minmax(0, 1fr); margin-top: 6px;">
+            <input id="template-name" maxlength="40" placeholder="名称" />
+            <button class="secondary" id="save-template" type="button">保存指令</button>
+          </div>
+          <textarea id="template-body" maxlength="8000" placeholder="支持 {{report_ref}}、{{page_refs}}、{{target_page}}、{{source_ref}}、{{requirements}}" style="margin-top: 6px;"></textarea>
+        </section>
+      </div>
+
+      <div class="footer">
+        <button class="secondary" id="preview" type="button" title="检查当前上下文">检查</button>
+        <button class="primary" id="copy" type="button">复制操作包</button>
+      </div>
+      <div class="status" id="status" aria-live="polite"></div>
+    </main>
+    <script type="module" src="./quick-actions.js"></script>
+  </body>
+</html>

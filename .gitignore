@@ -1,0 +1,36 @@
+node_modules/
+dist/
+.venv/
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+
+# Runtime data and user-imported material. These are local state, not source code.
+/data/
+/uploads/
+/extracted/
+/thumbnails/
+/report-exports/
+/artifacts/
+/public/
+import-sources.json
+import-sources.docker.json
+docker-compose.override.yml
+
+# Local TTS runtime artifacts and downloaded model weights.
+local-tts/models/
+local-tts/*.wav
+local-tts/*.log
+local-tts/*.pid
+
+# Generated macOS desktop runtime and installers.
+desktop/.build/
+desktop/node_modules/
+desktop/src-tauri/binaries/minem-server-*
+desktop/src-tauri/gen/
+desktop/src-tauri/target/
+desktop/*.app/
+desktop/*.dmg

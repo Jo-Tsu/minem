@@ -1,0 +1,16 @@
+{
+  "name": "minem-desktop",
+  "private": true,
+  "version": "0.4.0",
+  "description": "MineM macOS desktop client",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build && node scripts/package-macos-dmg.mjs",
+    "sidecar:build": "node scripts/build-sidecar.mjs",
+    "test:creator": "node --test tests/quick-actions-core.test.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

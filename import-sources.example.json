@@ -1,0 +1,11 @@
+{
+  "roots": [],
+  "excludes": [
+    ".git",
+    "__pycache__",
+    "node_modules",
+    "minem",
+    "deepagents-main"
+  ],
+  "maxDepth": 5
+}

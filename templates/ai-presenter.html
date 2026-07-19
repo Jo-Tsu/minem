@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MineM AI Presenter</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; overflow: hidden; background: #02050c; color: #fff; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .icon {
+      width: 18px;
+      height: 18px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .viewer { position: relative; width: 100vw; height: 100vh; display: grid; place-items: center; }
+    .slide-viewport { position: relative; width: calc(1920px * var(--deck-scale, 1)); height: calc(1080px * var(--deck-scale, 1)); }
+    .slide-shell { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #030712; transform: scale(var(--deck-scale, 1)); transform-origin: left top; }
+    iframe { position: absolute; inset: 0; width: 1920px; height: 1080px; border: 0; background: #030712; }
+    .control-hotzone { display: none; }
+    .page-pill { display: none; }
+    .viewer.controls-visible .page-pill,
+    .page-pill:hover,
+    .page-pill:focus-within { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); border-color: rgba(153,180,209,.26); background: rgba(2,5,12,.58); }
+    .nav-btn, .tool-btn { width: 32px; height: 32px; border: 1px solid rgba(153,180,209,.34); border-radius: 999px; color: #fff; background: rgba(255,255,255,.08); cursor: pointer; font: inherit; }
+    .tool-btn { width: auto; min-width: 32px; padding: 0 12px; }
+    .nav-btn:disabled { opacity: .35; cursor: default; }
+    .page-jump { width: 54px; height: 32px; border: 1px solid rgba(153,180,209,.34); border-radius: 999px; color: #fff; background: rgba(255,255,255,.08); text-align: center; font: inherit; outline: none; }
+    .page-select { width: 186px; height: 32px; border: 1px solid rgba(153,180,209,.34); border-radius: 999px; color: #fff; background: rgba(8,18,40,.94); padding: 0 10px; font: inherit; outline: none; }
+    .viewer.is-fullscreen .page-pill { bottom: 14px; }
+    .side-nav {
+      position: fixed;
+      z-index: 20;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 34px;
+      height: 74px;
+      border: 1px solid rgba(153,180,209,.22);
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: rgba(2,5,12,.42);
+      color: rgba(248,251,255,.46);
+      font-size: 34px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 18px 54px rgba(0,0,0,.32);
+      backdrop-filter: blur(16px);
+      transition: background .16s ease, color .16s ease, border-color .16s ease, transform .16s ease;
+    }
+    .side-nav:hover:not(:disabled) {
+      background: rgba(51,112,255,.20);
+      border-color: rgba(35,212,255,.48);
+      color: #fff;
+      transform: translateY(-50%) scale(1.02);
+    }
+    .side-nav:disabled { opacity: .25; cursor: default; }
+    .side-nav.prev { left: 14px; }
+    .side-nav.next { right: 14px; }
+    .cast-button {
+      position: fixed;
+      top: 20px;
+      right: 26px;
+      z-index: 20;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      height: 52px;
+      width: 52px;
+      padding: 0;
+      border: 1px solid rgba(177,197,226,.26);
+      border-radius: 999px;
+      background: linear-gradient(145deg, rgba(6,10,20,.72), rgba(4,8,17,.42));
+      color: rgba(248,251,255,.9);
+      font-size: 13px;
+      line-height: 1;
+      font-weight: 780;
+      cursor: pointer;
+      box-shadow: 0 20px 54px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.08);
+      backdrop-filter: blur(22px);
+      transition: transform .16s ease, background .16s ease, border-color .16s ease, color .16s ease;
+    }
+    .cast-button:hover {
+      transform: translateY(-1px);
+      background: rgba(51,112,255,.20);
+      border-color: rgba(35,212,255,.48);
+      color: #fff;
+    }
+    .cast-button svg {
+      width: 17px;
+      height: 17px;
+      flex: 0 0 auto;
+      stroke: currentColor;
+    }
+    .cast-button span { display: none; }
+    .viewer.is-fullscreen .cast-button {
+      background: linear-gradient(90deg, rgba(51,112,255,.82), rgba(35,212,255,.52));
+      border-color: rgba(161,224,255,.68);
+      color: #fff;
+    }
+    .ai-button {
+      position: fixed;
+      top: 20px;
+      right: 92px;
+      z-index: 20;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 52px;
+      min-width: 52px;
+      padding: 0 16px;
+      border: 1px solid rgba(35,212,255,.50);
+      border-radius: 999px;
+      background:
+        radial-gradient(circle at 50% 0%, rgba(35,212,255,.28), transparent 58%),
+        linear-gradient(145deg, rgba(9,28,56,.88), rgba(4,8,18,.58));
+      color: rgba(248,251,255,.96);
+      font-size: 16px;
+      font-weight: 780;
+      cursor: pointer;
+      box-shadow: 0 20px 54px rgba(0,0,0,.34), 0 0 0 1px rgba(35,212,255,.12) inset;
+      backdrop-filter: blur(22px);
+      transition: transform .16s ease, background .16s ease, border-color .16s ease, color .16s ease;
+    }
+    .ai-button:hover,
+    .viewer.ai-mode .ai-button {
+      transform: translateY(-1px);
+      background: rgba(51,112,255,.24);
+      border-color: rgba(35,212,255,.56);
+      color: #fff;
+    }
+    .ai-panel {
+      position: fixed;
+      z-index: 30;
+      top: clamp(70px, 8vh, 88px);
+      right: clamp(12px, 3vw, 28px);
+      width: min(430px, calc(100vw - 24px));
+      max-height: calc(100dvh - 92px);
+      display: none;
+      grid-template-rows: auto auto minmax(150px, 1fr) auto;
+      gap: 14px;
+      padding: 18px;
+      overflow: hidden;
+      border: 1px solid rgba(164,186,216,.24);
+      border-radius: 24px;
+      background:
+        linear-gradient(160deg, rgba(12,17,31,.90), rgba(5,9,18,.76) 56%, rgba(3,7,16,.68)),
+        radial-gradient(circle at 100% 0%, rgba(35,212,255,.16), transparent 42%);
+      box-shadow: 0 26px 84px rgba(0,0,0,.48), inset 0 1px 0 rgba(255,255,255,.08);
+      backdrop-filter: blur(28px) saturate(125%);
+    }
+    .ai-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      background: linear-gradient(90deg, rgba(35,212,255,.38), transparent 34%, rgba(255,255,255,.08));
+      height: 1px;
+    }
+    .viewer.ai-mode .ai-panel { display: grid; }
+    .viewer.ai-compact .ai-panel { display: none; }
+    .viewer.ai-compact .ai-button::after {
+      content: "";
+      position: absolute;
+      right: 5px;
+      bottom: 5px;
+      width: 9px;
+      height: 9px;
+      border: 2px solid rgba(2,5,12,.92);
+      border-radius: 999px;
+      background: #23d4ff;
+      box-shadow: 0 0 14px rgba(35,212,255,.82);
+    }
+    .ai-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: rgba(248,251,255,.94);
+      font-weight: 820;
+    }
+    .ai-title {
+      min-width: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .ai-title strong {
+      font-size: 16px;
+      letter-spacing: .08em;
+    }
+    .ai-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 11px;
+      color: #f8fbff;
+      font-size: 12px;
+      font-weight: 850;
+      background: linear-gradient(135deg, rgba(51,112,255,.82), rgba(35,212,255,.52));
+      box-shadow: 0 10px 24px rgba(35,128,255,.22), inset 0 1px 0 rgba(255,255,255,.22);
+    }
+    .ai-head-actions { display: inline-flex; align-items: center; gap: 8px; }
+    .ai-page-meta {
+      color: rgba(199,213,232,.76);
+      font-size: 13px;
+      line-height: 1.45;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .ai-notes {
+      width: 100%;
+      min-height: 0;
+      height: clamp(180px, 38dvh, 295px);
+      max-height: 38dvh;
+      overflow: auto;
+      resize: vertical;
+      border: 1px solid rgba(139,166,206,.24);
+      border-radius: 20px;
+      padding: 16px 17px;
+      background:
+        linear-gradient(180deg, rgba(8,15,31,.94), rgba(5,11,24,.90)),
+        radial-gradient(circle at 0% 0%, rgba(35,212,255,.10), transparent 35%);
+      color: rgba(248,251,255,.94);
+      font: 16px/1.78 "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      outline: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 14px 34px rgba(0,0,0,.18);
+    }
+    .ai-notes:focus {
+      border-color: rgba(35,212,255,.62);
+      box-shadow: 0 0 0 3px rgba(35,212,255,.12);
+    }
+    .ai-actions {
+      display: grid;
+      gap: 12px;
+    }
+    .ai-action-group { display: inline-flex; gap: 9px; align-items: center; }
+    .ai-primary-actions {
+      justify-content: space-between;
+      padding: 8px;
+      border: 1px solid rgba(139,166,206,.18);
+      border-radius: 20px;
+      background: rgba(255,255,255,.045);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .ai-settings {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .ai-provider-wrap,
+    .ai-voice-wrap {
+      flex: 1 1 92px;
+      min-width: 0;
+    }
+    .ai-control {
+      position: relative;
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(153,180,209,.26);
+      border-radius: 14px;
+      padding: 0;
+      background: rgba(255,255,255,.07);
+      color: #fff;
+      cursor: pointer;
+      font: inherit;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+      transition: transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease;
+    }
+    .ai-control.primary {
+      width: 46px;
+      height: 46px;
+      border-radius: 17px;
+      background: linear-gradient(135deg, rgba(51,112,255,.96), rgba(35,212,255,.62));
+      border-color: rgba(161,224,255,.68);
+      box-shadow: 0 12px 30px rgba(35,128,255,.30), inset 0 1px 0 rgba(255,255,255,.20);
+    }
+    .ai-control:hover:not(:disabled) {
+      transform: translateY(-1px);
+      border-color: rgba(35,212,255,.52);
+      background: rgba(35,212,255,.12);
+    }
+    .ai-control:disabled { opacity: .42; cursor: default; }
+    .ai-control::after {
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 8px);
+      transform: translate(-50%, 4px);
+      padding: 5px 8px;
+      border: 1px solid rgba(153,180,209,.26);
+      border-radius: 9px;
+      background: rgba(4,8,17,.90);
+      color: rgba(248,251,255,.92);
+      font-size: 12px;
+      line-height: 1;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .12s ease, transform .12s ease;
+      box-shadow: 0 10px 26px rgba(0,0,0,.30);
+    }
+    .ai-control:hover::after { opacity: 1; transform: translate(-50%, 0); }
+    .ai-play[aria-pressed="true"] .icon-play { display: none; }
+    .ai-play[aria-pressed="false"] .icon-pause { display: none; }
+    .ai-minimize[data-compact="true"] .icon-minimize { display: none; }
+    .ai-minimize[data-compact="false"] .icon-expand { display: none; }
+    .ai-rate {
+      width: 70px;
+      flex: 0 0 70px;
+      min-width: 0;
+      accent-color: #23d4ff;
+    }
+    .ai-provider,
+    .ai-voice {
+      width: 100%;
+      height: 38px;
+      border: 1px solid rgba(153,180,209,.26);
+      border-radius: 14px;
+      padding: 0 32px 0 12px;
+      background: rgba(8,18,40,.82);
+      color: #fff;
+      font: 13px/1 "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      outline: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .ai-status {
+      min-width: 54px;
+      flex: 0 0 auto;
+      min-height: 28px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: rgba(199,213,232,.76);
+      font-size: 12px;
+    }
+    .ai-status::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #23d4ff;
+      box-shadow: 0 0 12px rgba(35,212,255,.78);
+    }
+    @media (max-width: 760px) {
+      .ai-button { right: 76px; padding: 0 12px; }
+      .ai-panel { top: 72px; right: 12px; width: calc(100vw - 24px); }
+      .ai-rate { flex-basis: 100%; width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M9 5v14"/><path d="M15 5v14"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></symbol>
+    <symbol id="icon-reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v6h6"/></symbol>
+    <symbol id="icon-minimize" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+    <symbol id="icon-expand" viewBox="0 0 24 24"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M16 21h5v-5"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></symbol>
+  </svg>
+  <main class="viewer" aria-label="MineM AI Presenter">
+    <button class="ai-button" type="button" aria-label="AI 演讲模式">AI</button>
+    <button class="cast-button fullscreen" type="button" aria-label="投屏全屏演示">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M8 5H5v3M16 5h3v3M8 19H5v-3M16 19h3v-3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M9 8h6v8H9z" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+      <span>投屏全屏</span>
+    </button>
+    <button class="side-nav prev" type="button" aria-label="上一页">‹</button>
+    <div class="slide-viewport"><section class="slide-shell"><iframe class="deck-frame" title="Page 01" src="" allow="autoplay; fullscreen; picture-in-picture"></iframe></section></div>
+    <button class="side-nav next" type="button" aria-label="下一页">›</button>
+    <div class="control-hotzone" aria-hidden="true"></div>
+    <div class="page-pill">
+      <button class="nav-btn first" type="button" aria-label="第一页">«</button>
+      <button class="nav-btn prev" type="button" aria-label="上一页">‹</button>
+      <span class="page-count">1 / 48</span>
+      <span>·</span>
+      <span class="page-title">Page 01</span>
+      <input class="page-jump" type="number" min="1" value="1" aria-label="跳转页码">
+      <select class="page-select" aria-label="选择页面"></select>
+      <button class="nav-btn next" type="button" aria-label="下一页">›</button>
+      <button class="nav-btn last" type="button" aria-label="最后一页">»</button>
+      <button class="tool-btn fullscreen" type="button" aria-label="全屏">全屏</button>
+    </div>
+    <section class="ai-panel" aria-label="AI 演讲模式">
+      <div class="ai-panel-head">
+        <div class="ai-title">
+          <span class="ai-mark">AI</span>
+          <strong>LIVE</strong>
+        </div>
+        <div class="ai-head-actions">
+          <button class="ai-control ai-minimize" type="button" aria-label="最小化 AI 演讲台" data-tip="最小化" data-compact="false">
+            <svg class="icon icon-minimize"><use href="#icon-minimize"></use></svg>
+            <svg class="icon icon-expand"><use href="#icon-expand"></use></svg>
+            <span class="sr-only">最小化</span>
+          </button>
+          <button class="ai-control ai-close" type="button" aria-label="关闭 AI 模式" data-tip="关闭">
+            <svg class="icon"><use href="#icon-close"></use></svg>
+            <span class="sr-only">关闭</span>
+          </button>
+        </div>
+      </div>
+      <div class="ai-page-meta"></div>
+      <textarea class="ai-notes" aria-label="当前页讲稿"></textarea>
+      <div class="ai-actions">
+        <div class="ai-action-group ai-primary-actions">
+          <button class="ai-control primary ai-play" type="button" aria-label="开始朗读" aria-pressed="false" data-tip="开始">
+            <svg class="icon icon-play"><use href="#icon-play"></use></svg>
+            <svg class="icon icon-pause"><use href="#icon-pause"></use></svg>
+            <span class="sr-only">开始</span>
+          </button>
+          <button class="ai-control ai-stop" type="button" aria-label="停止朗读" data-tip="停止">
+            <svg class="icon"><use href="#icon-stop"></use></svg>
+            <span class="sr-only">停止</span>
+          </button>
+          <button class="ai-control ai-reset" type="button" aria-label="还原本页讲稿" data-tip="还原">
+            <svg class="icon"><use href="#icon-reset"></use></svg>
+            <span class="sr-only">还原本页</span>
+          </button>
+        </div>
+        <div class="ai-action-group ai-settings">
+          <span class="ai-status"></span>
+          <label class="ai-provider-wrap">
+            <select class="ai-provider" aria-label="语音来源">
+              <option value="open-source">中文声音</option>
+              <option value="system">系统声音</option>
+            </select>
+          </label>
+          <label class="ai-voice-wrap">
+            <select class="ai-voice" aria-label="中文音色">
+              <option value="0">晓晓</option>
+              <option value="1">云扬</option>
+              <option value="2">晓伊</option>
+              <option value="3">云健</option>
+              <option value="4">云希</option>
+            </select>
+          </label>
+          <input class="ai-rate" type="range" min="0.8" max="1.25" step="0.05" value="1" aria-label="语速">
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const pages = [];
+    const defaultSpeakerNotes = {};
+    let currentIndex = 0;
+    const frame = document.querySelector(".deck-frame");
+    const pageCount = document.querySelector(".page-count");
+    const pageTitle = document.querySelector(".page-title");
+    const pageJump = document.querySelector(".page-jump");
+    const pageSelect = document.querySelector(".page-select");
+    const prevButton = document.querySelector(".prev");
+    const nextButton = document.querySelector(".next");
+    const firstButton = document.querySelector(".first");
+    const lastButton = document.querySelector(".last");
+    const fullscreenButton = document.querySelector(".fullscreen");
+    const viewer = document.querySelector(".viewer");
+    const controls = document.querySelector(".page-pill");
+    const aiButton = document.querySelector(".ai-button");
+    const aiCloseButton = document.querySelector(".ai-close");
+    const aiMinimizeButton = document.querySelector(".ai-minimize");
+    const aiPlayButton = document.querySelector(".ai-play");
+    const aiStopButton = document.querySelector(".ai-stop");
+    const aiResetButton = document.querySelector(".ai-reset");
+    const aiNotes = document.querySelector(".ai-notes");
+    const aiMeta = document.querySelector(".ai-page-meta");
+    const aiStatus = document.querySelector(".ai-status");
+    const aiRate = document.querySelector(".ai-rate");
+    const aiProvider = document.querySelector(".ai-provider");
+    const aiVoice = document.querySelector(".ai-voice");
+    let controlsTimer = 0;
+    let aiSpeaking = false;
+    let currentUtterance = null;
+    let currentAudioSource = null;
+    let silentTimer = 0;
+    let speechRunId = 0;
+    let speechQueue = [];
+    let speechQueueIndex = 0;
+    let openSourceTts = null;
+    let openSourceTtsFailed = false;
+    let audioContext = null;
+    const audioBufferCache = new Map();
+    const maxAudioBufferCache = 8;
+    const localTtsEndpoint = "http://127.0.0.1:8765/tts";
+    const notesStorageKey = `minem-ai-presenter-notes:${window.location.pathname.replace(/\/ai-presenter\.html$/, "")}`;
+    const savedSpeakerNotes = loadSavedSpeakerNotes();
+    let preferredVoice = null;
+    function pickPreferredVoice() {
+      const voices = window.speechSynthesis?.getVoices?.() || [];
+      const zhVoices = voices.filter((voice) => /zh|cmn|Chinese|中文|普通话/i.test(`${voice.lang} ${voice.name}`));
+      preferredVoice = zhVoices.find((voice) => /Ting|Meijia|Sinji|Xiaoxiao|Xiaoyi|云希|晓晓|美佳|婷婷/i.test(voice.name))
+        || zhVoices.find((voice) => /female|woman|女/i.test(voice.name))
+        || zhVoices[0]
+        || voices.find((voice) => /zh|Chinese/i.test(`${voice.lang} ${voice.name}`))
+        || null;
+    }
+    pickPreferredVoice();
+    window.speechSynthesis?.addEventListener?.("voiceschanged", pickPreferredVoice);
+    function setAiPlayState(isPlaying) {
+      aiPlayButton.setAttribute("aria-pressed", isPlaying ? "true" : "false");
+      aiPlayButton.setAttribute("aria-label", isPlaying ? "暂停朗读" : "开始朗读");
+      aiPlayButton.dataset.tip = isPlaying ? "暂停" : "开始";
+      const label = aiPlayButton.querySelector(".sr-only");
+      if (label) label.textContent = isPlaying ? "暂停" : "开始";
+    }
+    function setAiCompactState(isCompact) {
+      aiMinimizeButton.dataset.compact = isCompact ? "true" : "false";
+      aiMinimizeButton.setAttribute("aria-label", isCompact ? "展开 AI 演讲台" : "最小化 AI 演讲台");
+      aiMinimizeButton.dataset.tip = isCompact ? "展开" : "最小化";
+      const label = aiMinimizeButton.querySelector(".sr-only");
+      if (label) label.textContent = isCompact ? "展开" : "最小化";
+    }
+    function loadSavedSpeakerNotes() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(notesStorageKey) || "{}");
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    function noteForPage(page) {
+      return savedSpeakerNotes[page.id] ?? defaultSpeakerNotes[page.id] ?? "";
+    }
+    function saveCurrentNote() {
+      const page = pages[currentIndex] || pages[0];
+      if (!page || !aiNotes) return;
+      savedSpeakerNotes[page.id] = aiNotes.value;
+      localStorage.setItem(notesStorageKey, JSON.stringify(savedSpeakerNotes));
+      aiStatus.textContent = "已保存";
+    }
+    function updateAiPanel() {
+      const page = pages[currentIndex] || pages[0];
+      if (!page || !aiNotes || !aiMeta) return;
+      aiMeta.textContent = `${page.label} · ${page.title}`;
+      aiNotes.value = noteForPage(page);
+      aiStatus.textContent = aiSpeaking ? "朗读中" : "待机";
+    }
+    function stopAiSpeech(status = "已停止") {
+      aiSpeaking = false;
+      speechRunId += 1;
+      currentUtterance = null;
+      stopCurrentAudioSource();
+      clearTimeout(silentTimer);
+      window.speechSynthesis?.cancel();
+      setAiPlayState(false);
+      aiStatus.textContent = status;
+    }
+    function buildSpeechSegments(text) {
+      const splitLongSegment = (segment) => {
+        if (segment.length <= 90) return [segment];
+        const pieces = segment
+          .replace(/([，、：])/g, "$1\n")
+          .split(/\n+/)
+          .map((piece) => piece.trim())
+          .filter(Boolean);
+        const groups = [];
+        let current = "";
+        pieces.forEach((piece) => {
+          if (current && `${current}${piece}`.length > 90) {
+            groups.push(current);
+            current = piece;
+          } else {
+            current += piece;
+          }
+        });
+        if (current) groups.push(current);
+        return groups;
+      };
+      return text
+        .replace(/\s+/g, " ")
+        .replace(/([。！？；])/g, "$1\n")
+        .split(/\n+/)
+        .map((segment) => segment.trim())
+        .filter(Boolean)
+        .flatMap(splitLongSegment);
+    }
+    function segmentDelay(segment) {
+      if (/[。！？]$/.test(segment)) return 260;
+      if (/[；：]$/.test(segment)) return 180;
+      if (/[，、]$/.test(segment)) return 90;
+      return 70;
+    }
+    function segmentRate(segment) {
+      const base = Number(aiRate?.value || 1);
+      if (/谢谢|最终|回到MineM|下面|因此|所以/.test(segment)) return Math.max(0.82, base - 0.06);
+      if (/150|75|97%|40%|AI PMO|ERP|CRM|SOP/.test(segment)) return Math.max(0.86, base - 0.04);
+      return base;
+    }
+    function segmentPitch(segment) {
+      if (/[？?]$/.test(segment)) return 1.08;
+      if (/不是|而是|真正|最终|更快|更高效/.test(segment)) return 1.04;
+      return 1;
+    }
+    function stopCurrentAudioSource() {
+      if (!currentAudioSource) return;
+      try { currentAudioSource.stop?.(); } catch {}
+      try { currentAudioSource.pause?.(); } catch {}
+      currentAudioSource = null;
+    }
+    function ensureAudioContext() {
+      audioContext ||= new (window.AudioContext || window.webkitAudioContext)();
+      return audioContext;
+    }
+    function unlockAudioForSpeech() {
+      try {
+        const context = ensureAudioContext();
+        context.resume?.().catch?.(() => {});
+        const source = context.createBufferSource();
+        source.buffer = context.createBuffer(1, 1, 22050);
+        source.connect(context.destination);
+        source.start(0);
+      } catch (error) {
+        window.__localTtsError = `${error?.name || "Error"}: ${error?.message || error}`;
+      }
+    }
+    async function ensureOpenSourceTts() {
+      if (openSourceTts) return openSourceTts;
+      if (openSourceTtsFailed) throw new Error("open-source-tts-unavailable");
+      aiStatus.textContent = "备用本地声音加载中";
+      try {
+        const { KokoroTTS, env } = await import("./assets/ai-tts/kokoro-js/kokoro.web.js");
+        env.wasmPaths = "./assets/ai-tts/kokoro-js/";
+        openSourceTts = await KokoroTTS.from_pretrained("./assets/ai-tts/kokoro-zh", {
+          dtype: "q4",
+          device: "wasm",
+          progress_callback: (progress) => {
+            if (progress?.status === "progress") {
+              const total = progress.total || 0;
+              const loaded = progress.loaded || 0;
+              const pct = total ? Math.round((loaded / total) * 100) : 0;
+              aiStatus.textContent = pct ? `备用模型加载 ${pct}%` : "备用模型加载中";
+            }
+          }
+        });
+        return openSourceTts;
+      } catch (error) {
+        window.__localTtsError = `${error?.name || "Error"}: ${error?.message || error}`;
+        console.error("local kokoro tts load failed", error);
+        openSourceTtsFailed = true;
+        throw error;
+      }
+    }
+    function rememberAudioBuffer(text, promise) {
+      audioBufferCache.set(text, promise);
+      if (audioBufferCache.size > maxAudioBufferCache) {
+        audioBufferCache.delete(audioBufferCache.keys().next().value);
+      }
+      return promise;
+    }
+    async function fetchOpenSourceBuffer(text) {
+      const cached = audioBufferCache.get(text);
+      if (cached) return cached;
+      const context = ensureAudioContext();
+      const promise = (async () => {
+        const response = await fetch(localTtsEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            voice: Number(aiVoice?.value || 0),
+            speed: Number(aiRate?.value || 1)
+          })
+        });
+        if (!response.ok) {
+          let detail = "";
+          try {
+            const payload = await response.json();
+            detail = payload?.error ? `：${payload.error}` : "";
+          } catch {}
+          throw new Error(`local-tts-service-error${detail}`);
+        }
+        return context.decodeAudioData(await response.arrayBuffer());
+      })();
+      promise.catch(() => audioBufferCache.delete(text));
+      return rememberAudioBuffer(text, promise);
+    }
+    function prefetchOpenSourceAudio(text) {
+      if (!text || aiProvider?.value !== "open-source") return;
+      fetchOpenSourceBuffer(text).catch(() => {});
+    }
+    async function playOpenSourceAudio(text) {
+      aiStatus.textContent = "高质量中文声音生成中";
+      const context = ensureAudioContext();
+      if (context.state === "suspended") {
+        await Promise.race([
+          context.resume?.() || Promise.resolve(),
+          new Promise((resolve) => window.setTimeout(resolve, 800))
+        ]);
+      }
+      const buffer = await fetchOpenSourceBuffer(text);
+      return new Promise((resolve, reject) => {
+        if (!aiSpeaking) return resolve();
+        stopCurrentAudioSource();
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(context.destination);
+        source.onended = () => {
+          if (currentAudioSource === source) currentAudioSource = null;
+          resolve();
+        };
+        currentAudioSource = source;
+        aiStatus.textContent = "高质量中文声音朗读中";
+        try {
+          source.start();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+    function buildSpeechQueue(startIndex = currentIndex) {
+      return pages.slice(startIndex).flatMap((page, offset) => {
+        const pageIndex = startIndex + offset;
+        return buildSpeechSegments(noteForPage(page)).map((text) => ({ pageIndex, text }));
+      });
+    }
+    function advanceSpeechQueue(runId) {
+      if (!aiSpeaking || runId !== speechRunId) return;
+      speechQueueIndex += 1;
+      window.setTimeout(() => playSpeechQueueItem(runId), segmentDelay(speechQueue[speechQueueIndex - 1]?.text || ""));
+    }
+    function playSilentQueueItem(item, runId, status = "静音自动播放") {
+      const duration = Math.max(1200, Math.min(5200, item.text.length * 135));
+      aiStatus.textContent = status;
+      setAiPlayState(true);
+      clearTimeout(silentTimer);
+      silentTimer = window.setTimeout(() => {
+        if (!aiSpeaking || runId !== speechRunId) return;
+        advanceSpeechQueue(runId);
+      }, duration);
+    }
+    function speakSystemQueueItem(item, runId) {
+      const synth = window.speechSynthesis;
+      if (!synth) {
+        playSilentQueueItem(item, runId);
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(item.text);
+      utterance.lang = preferredVoice?.lang || "zh-CN";
+      utterance.voice = preferredVoice;
+      utterance.rate = segmentRate(item.text);
+      utterance.pitch = segmentPitch(item.text);
+      utterance.volume = 1;
+      utterance.onend = () => {
+        if (!aiSpeaking || currentUtterance !== utterance || runId !== speechRunId) return;
+        advanceSpeechQueue(runId);
+      };
+      utterance.onerror = () => playSilentQueueItem(item, runId, "语音不可用，静音续播");
+      currentUtterance = utterance;
+      aiStatus.textContent = "连续朗读中";
+      setAiPlayState(true);
+      synth.speak(utterance);
+    }
+    async function playOpenSourceQueueItem(item, runId) {
+      try {
+        const playPromise = playOpenSourceAudio(item.text);
+        window.setTimeout(() => {
+          prefetchOpenSourceAudio(speechQueue[speechQueueIndex + 1]?.text);
+        }, 180);
+        await playPromise;
+        if (!aiSpeaking || runId !== speechRunId || aiProvider?.value !== "open-source") return;
+        advanceSpeechQueue(runId);
+      } catch (error) {
+        window.__localTtsError = `${error?.name || "Error"}: ${error?.message || error}`;
+        console.error("local open-source tts playback failed", error);
+        aiStatus.textContent = `高质量中文声音不可用，已切到系统声音：${error?.message || "请启动本地服务"}`;
+        aiProvider.value = "system";
+        window.setTimeout(() => playSpeechQueueItem(runId), 260);
+      }
+    }
+    function playSpeechQueueItem(runId = speechRunId) {
+      stopCurrentAudioSource();
+      window.speechSynthesis?.cancel();
+      clearTimeout(silentTimer);
+      if (!aiSpeaking || runId !== speechRunId) return;
+      const item = speechQueue[speechQueueIndex];
+      if (!item) {
+        stopAiSpeech("已完成");
+        return;
+      }
+      if (item.pageIndex !== currentIndex) showPage(item.pageIndex);
+      if (aiProvider?.value === "open-source") {
+        aiStatus.textContent = "准备高质量中文声音";
+        setAiPlayState(true);
+        playOpenSourceQueueItem(item, runId);
+        return;
+      }
+      speakSystemQueueItem(item, runId);
+    }
+    function startContinuousSpeech() {
+      stopCurrentAudioSource();
+      window.speechSynthesis?.cancel();
+      clearTimeout(silentTimer);
+      speechQueue = buildSpeechQueue(currentIndex);
+      speechQueueIndex = 0;
+      const runId = ++speechRunId;
+      if (!speechQueue.length) {
+        stopAiSpeech("没有可朗读讲稿");
+        return;
+      }
+      playSpeechQueueItem(runId);
+    }
+    function toggleAiMode(force) {
+      if (viewer.classList.contains("ai-compact") && force !== false) {
+        viewer.classList.remove("ai-compact");
+        setAiCompactState(false);
+        viewer.classList.add("ai-mode");
+        updateAiPanel();
+        return;
+      }
+      const enabled = force ?? !viewer.classList.contains("ai-mode");
+      viewer.classList.toggle("ai-mode", enabled);
+      if (!enabled) {
+        viewer.classList.remove("ai-compact");
+        setAiCompactState(false);
+      }
+      if (enabled) {
+        updateAiPanel();
+        aiNotes?.focus();
+      } else {
+        stopAiSpeech("待机");
+      }
+    }
+    function toggleAiPlay() {
+      viewer.classList.add("ai-mode");
+      saveCurrentNote();
+      if (aiSpeaking) {
+        stopAiSpeech("已暂停");
+        return;
+      }
+      aiSpeaking = true;
+      unlockAudioForSpeech();
+      startContinuousSpeech();
+    }
+    function updateDeckScale() {
+      const scale = Math.min((window.innerWidth - 96) / 1920, (window.innerHeight - 72) / 1080, 1);
+      document.documentElement.style.setProperty("--deck-scale", String(scale));
+    }
+    function pageFromHash() {
+      const id = decodeURIComponent(location.hash.replace(/^#/, ""));
+      const index = pages.findIndex((page) => page.id === id || page.aliases?.includes(id));
+      return index >= 0 ? index : 0;
+    }
+    function showPage(index, updateHash = true) {
+      currentIndex = Math.max(0, Math.min(index, pages.length - 1));
+      const page = pages[currentIndex] || pages[0];
+      frame.src = page.src;
+      frame.title = `${page.label} - ${page.title}`;
+      pageCount.textContent = `${currentIndex + 1} / ${pages.length}`;
+      pageTitle.textContent = page.label;
+      pageJump.value = String(currentIndex + 1);
+      pageSelect.value = String(currentIndex);
+      firstButton.disabled = currentIndex === 0;
+      prevButton.disabled = currentIndex === 0;
+      nextButton.disabled = currentIndex >= pages.length - 1;
+      lastButton.disabled = currentIndex >= pages.length - 1;
+      if (updateHash) {
+        history.replaceState(null, "", `#${page.id}`);
+      }
+      updateAiPanel();
+    }
+    function populatePageSelect() {
+      pageSelect.innerHTML = pages.map((page, index) => {
+        const title = page.title.length > 18 ? `${page.title.slice(0, 18)}…` : page.title;
+        return `<option value="${index}">${page.label} · ${title}</option>`;
+      }).join("");
+    }
+    async function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen?.();
+      } else {
+        await document.exitFullscreen?.();
+      }
+    }
+    function revealControls(duration = 1800) {
+      viewer.classList.add("controls-visible");
+      clearTimeout(controlsTimer);
+      controlsTimer = window.setTimeout(() => {
+        if (!controls.matches(":hover") && !controls.contains(document.activeElement)) {
+          viewer.classList.remove("controls-visible");
+        }
+      }, duration);
+    }
+    function hideControlsSoon() {
+      clearTimeout(controlsTimer);
+      controlsTimer = window.setTimeout(() => {
+        if (!controls.matches(":hover") && !controls.contains(document.activeElement)) {
+          viewer.classList.remove("controls-visible");
+        }
+      }, 650);
+    }
+    updateDeckScale();
+    populatePageSelect();
+    showPage(pageFromHash(), false);
+    window.addEventListener("resize", updateDeckScale);
+    window.addEventListener("hashchange", () => showPage(pageFromHash(), false));
+    firstButton.addEventListener("click", () => { revealControls(); showPage(0); });
+    prevButton.addEventListener("click", () => { revealControls(); showPage(currentIndex - 1); });
+    nextButton.addEventListener("click", () => { revealControls(); showPage(currentIndex + 1); });
+    lastButton.addEventListener("click", () => { revealControls(); showPage(pages.length - 1); });
+    pageJump.addEventListener("change", () => { revealControls(); showPage(Number(pageJump.value) - 1); });
+    pageJump.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { revealControls(); showPage(Number(pageJump.value) - 1); }
+    });
+    pageSelect.addEventListener("change", () => { revealControls(); showPage(Number(pageSelect.value)); });
+    fullscreenButton.addEventListener("click", () => { revealControls(); toggleFullscreen().catch(() => {}); });
+    aiButton.addEventListener("click", () => toggleAiMode());
+    aiCloseButton.addEventListener("click", () => toggleAiMode(false));
+    aiMinimizeButton.addEventListener("click", () => {
+      const compact = !viewer.classList.contains("ai-compact");
+      viewer.classList.toggle("ai-compact", compact);
+      viewer.classList.add("ai-mode");
+      setAiCompactState(compact);
+    });
+    aiPlayButton.addEventListener("click", toggleAiPlay);
+    aiStopButton.addEventListener("click", () => stopAiSpeech("已停止"));
+    aiResetButton.addEventListener("click", () => {
+      const page = pages[currentIndex] || pages[0];
+      aiNotes.value = defaultSpeakerNotes[page.id] || "";
+      saveCurrentNote();
+    });
+    aiNotes.addEventListener("input", saveCurrentNote);
+    aiRate.addEventListener("change", () => {
+      audioBufferCache.clear();
+      if (aiSpeaking) playSpeechQueueItem(speechRunId);
+    });
+    aiProvider.addEventListener("change", () => {
+      audioBufferCache.clear();
+      if (aiSpeaking) playSpeechQueueItem(speechRunId);
+    });
+    aiVoice.addEventListener("change", () => {
+      audioBufferCache.clear();
+      if (aiSpeaking && aiProvider?.value === "open-source") playSpeechQueueItem(speechRunId);
+    });
+    document.addEventListener("fullscreenchange", () => {
+      const isFullscreen = Boolean(document.fullscreenElement);
+      viewer.classList.toggle("is-fullscreen", isFullscreen);
+      const fullscreenText = fullscreenButton.querySelector("span");
+      if (fullscreenText) fullscreenText.textContent = isFullscreen ? "退出全屏" : "投屏全屏";
+      else fullscreenButton.textContent = isFullscreen ? "退出" : "全屏";
+      updateDeckScale();
+    });
+    window.addEventListener("keydown", (event) => {
+      if (["INPUT", "SELECT"].includes(document.activeElement?.tagName)) return;
+      if (event.key === "ArrowLeft") { revealControls(); showPage(currentIndex - 1); }
+      if (event.key === "ArrowRight") { revealControls(); showPage(currentIndex + 1); }
+      if (event.key === "Home") { revealControls(); showPage(0); }
+      if (event.key === "End") { revealControls(); showPage(pages.length - 1); }
+      if (event.key.toLowerCase() === "f") { revealControls(); toggleFullscreen().catch(() => {}); }
+      if (event.key.toLowerCase() === "a") { toggleAiMode(); }
+    });
+    window.addEventListener("mousemove", (event) => {
+      if (window.innerHeight - event.clientY <= 96) revealControls(1600);
+      else if (!controls.matches(":hover") && !controls.contains(document.activeElement)) hideControlsSoon();
+    });
+    window.addEventListener("click", () => revealControls(1800));
+    window.addEventListener("touchstart", () => revealControls(2400), { passive: true });
+    controls.addEventListener("mouseenter", () => revealControls(3000));
+    controls.addEventListener("mouseleave", () => hideControlsSoon());
+    controls.addEventListener("focusin", () => revealControls(3000));
+    controls.addEventListener("focusout", () => hideControlsSoon());
+  </script>
+</body>
+</html>

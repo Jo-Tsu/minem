@@ -1,0 +1,79 @@
+name: "数据或预览问题 / Data or preview issue"
+description: "报告分类、去重、导入、尺寸或预览异常 / Report classification, deduplication, import, sizing, or preview problems"
+title: "[Data/Preview] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        仅提供脱敏后的素材编号、页面链接和截图。不要附加原始客户材料。
+        Provide only sanitized asset IDs, page links, and screenshots. Never attach original customer material.
+  - type: input
+    id: version
+    attributes:
+      label: "MineM 版本 / Version"
+      placeholder: "例如 / Example: 0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: material_type
+    attributes:
+      label: "素材类型 / Material type"
+      options:
+        - "汇报素材 / Report"
+        - "页面素材 / Page"
+        - "案例素材 / Case"
+        - "资源素材 / Resource"
+        - "故事线 / Storyline"
+        - "不确定 / Unsure"
+    validations:
+      required: true
+  - type: dropdown
+    id: problem_type
+    attributes:
+      label: "问题类型 / Problem type"
+      multiple: true
+      options:
+        - "分类错误 / Wrong classification"
+        - "重复数据 / Duplicate data"
+        - "导入失败或缺页 / Import failure or missing pages"
+        - "素材缺失 / Missing resource"
+        - "预览空白或过期 / Blank or stale preview"
+        - "尺寸或排版异常 / Sizing or layout issue"
+        - "链接或点击无效 / Broken link or action"
+    validations:
+      required: true
+  - type: input
+    id: asset_reference
+    attributes:
+      label: "脱敏素材编号或链接 / Sanitized asset ID or link"
+      description: "删除用户名、本机路径、令牌和客户标识 / Remove usernames, local paths, tokens, and customer identifiers"
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: "来源与导入方式 / Source and import method"
+      description: "说明文件类型、页数和操作入口，不上传原文件 / Describe type, page count, and entry point without uploading the source file"
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: "当前表现 / Observed behavior"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "正确表现 / Expected behavior"
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: "数据确认 / Data confirmation"
+      options:
+        - label: "我已确认问题在最新版本仍可复现 / I reproduced this on the latest version"
+          required: true
+        - label: "我未上传客户数据、数据库、导入包或凭据 / I did not upload customer data, databases, import packages, or credentials"
+          required: true

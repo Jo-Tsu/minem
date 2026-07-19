@@ -1,0 +1,24 @@
+MineM
+Copyright 2026 MineM contributors
+
+本产品包含由 MineM 贡献者开发的软件，并依据 Apache License, Version 2.0
+授权使用。
+
+This product includes software developed by MineM contributors and is licensed
+under the Apache License, Version 2.0.
+
+Apache License 不授予 MineM 名称、产品标识和 Logo 的使用权，但为说明软件
+来源所必需的合理使用除外。
+
+The MineM name, product identity, and logos are not granted for use by the
+Apache License, except as required to describe the origin of the software.
+
+用户数据、导入的汇报、解析素材、缩略图、客户内容、语音模型和生成的桌面端
+二进制文件不属于开源发行内容。
+
+User data, imported reports, extracted materials, thumbnails, customer content,
+speech models, and generated desktop binaries are not part of the open-source
+distribution.
+
+第三方软件声明见 THIRD_PARTY_NOTICES.md。
+Third-party software notices are listed in THIRD_PARTY_NOTICES.md.

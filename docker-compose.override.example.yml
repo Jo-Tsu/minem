@@ -1,0 +1,9 @@
+services:
+  minem-platform:
+    environment:
+      MINEM_IMPORT_ROOTS: /sources/materials
+    volumes:
+      - type: bind
+        source: ${MINEM_IMPORT_ROOT:?Set MINEM_IMPORT_ROOT to a local material directory}
+        target: /sources/materials
+        read_only: true

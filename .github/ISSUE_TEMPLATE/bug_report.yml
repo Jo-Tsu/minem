@@ -1,0 +1,72 @@
+name: "缺陷报告 / Bug report"
+description: "报告可复现的软件缺陷 / Report a reproducible software defect"
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请勿上传客户材料、数据库、凭据或包含私人路径的日志。
+        Thank you. Do not upload customer materials, databases, credentials, or logs containing private paths.
+  - type: input
+    id: version
+    attributes:
+      label: "MineM 版本 / Version"
+      placeholder: "例如 / Example: 0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: startup
+    attributes:
+      label: "启动方式 / Startup mode"
+      options:
+        - "本地源码 / Local source"
+        - "Docker"
+        - "macOS 客户端 / macOS client"
+        - "其他 / Other"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: "运行环境 / Environment"
+      description: "操作系统、浏览器和相关版本 / OS, browser, and relevant versions"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "复现步骤 / Reproduction steps"
+      description: "请提供最小、稳定的复现步骤 / Provide minimal and reliable steps"
+      placeholder: |
+        1. 打开 / Open ...
+        2. 点击 / Click ...
+        3. 观察 / Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "预期结果 / Expected behavior"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: "实际结果 / Actual behavior"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "脱敏日志 / Sanitized logs"
+      description: "请删除令牌、私人路径和客户内容 / Remove tokens, private paths, and customer content"
+      render: shell
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: "提交确认 / Confirmation"
+      options:
+        - label: "我已搜索已有 Issue / I searched existing issues"
+          required: true
+        - label: "我已删除私人数据，并遵守社区行为准则 / I removed private data and follow the Code of Conduct"
+          required: true

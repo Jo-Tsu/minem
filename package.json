@@ -1,0 +1,38 @@
+{
+  "name": "minem",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Local-first presentation material platform",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jo-Tsu/minem.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jo-Tsu/minem/issues"
+  },
+  "homepage": "https://github.com/Jo-Tsu/minem#readme",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "check": "tsc --noEmit && vite build",
+    "desktop:dev": "npm --prefix desktop run dev",
+    "desktop:sidecar": "npm --prefix desktop run sidecar:build",
+    "desktop:build": "npm run build && npm --prefix desktop run sidecar:build && npm --prefix desktop run build",
+    "version:show": "python3 scripts/version_control.py show",
+    "version:check": "python3 scripts/version_control.py check"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "kokoro-js": "^1.2.1",
+    "lucide-react": "^0.561.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3"
+  }
+}

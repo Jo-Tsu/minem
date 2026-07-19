@@ -1,0 +1,45 @@
+name: "功能建议 / Feature request"
+description: "提出可验证的产品或工程改进 / Propose a testable product or engineering improvement"
+title: "[Feature] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "需要解决的问题 / Problem to solve"
+      description: "描述用户、场景和当前障碍 / Describe the user, context, and current obstacle"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "建议方案 / Proposed solution"
+      description: "说明交互、数据变化和验收结果 / Explain interactions, data changes, and acceptance outcome"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "替代方案 / Alternatives considered"
+  - type: dropdown
+    id: scope
+    attributes:
+      label: "影响范围 / Scope"
+      multiple: true
+      options:
+        - "前端交互 / Frontend UX"
+        - "后端或 API / Backend or API"
+        - "数据模型或迁移 / Data model or migration"
+        - "导入或导出 / Import or export"
+        - "桌面客户端 / Desktop client"
+        - "文档或开发体验 / Documentation or developer experience"
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: "提交确认 / Confirmation"
+      options:
+        - label: "我已搜索已有 Issue / I searched existing issues"
+          required: true
+        - label: "我理解新能力应先更新 PRD 和技术文档 / I understand new capabilities require PRD and technical documentation first"
+          required: true

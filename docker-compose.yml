@@ -1,0 +1,38 @@
+services:
+  minem-platform:
+    build:
+      context: .
+      args:
+        MINEM_VERSION: ${MINEM_VERSION:-0.4.0}
+    image: minem-platform:${MINEM_VERSION:-0.4.0}
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8790
+      MINEM_DATA_DIR: /app
+      AUTO_IMPORT_ON_START: 0
+      SQLITE_JOURNAL_MODE: delete
+      MAX_UPLOAD_BYTES: 536870912
+      MAX_ZIP_FILES: 5000
+      MAX_ZIP_TOTAL_BYTES: 1073741824
+      MINEM_AGENT_INTERNAL_API: ${MINEM_AGENT_INTERNAL_API:-0}
+      MINEM_AGENT_API_TOKEN: ${MINEM_AGENT_API_TOKEN:-}
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./extracted:/app/extracted
+      - ./thumbnails:/app/thumbnails
+      - ./report-exports:/app/report-exports
+    restart: unless-stopped
+
+  ai-presenter-tts:
+    profiles: ["speech"]
+    build:
+      context: ./local-tts
+    image: ai-presenter-tts:latest
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./local-tts/models:/app/models:ro
+    restart: unless-stopped
