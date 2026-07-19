@@ -2,7 +2,9 @@
 !.dockerignore
 !LICENSE
 !NOTICE
+!README.md
 !requirements.txt
+!pyproject.toml
 !server.py
 !product-version.json
 !package.json

@@ -43,7 +43,14 @@ jobs:
         run: python3 scripts/version_control.py check
 
       - name: Install Python dependencies
-        run: python3 -m pip install -r requirements.txt
+        run: |
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install --no-deps -e .
+
+      - name: Verify installed CLI entry point
+        run: |
+          minem --help >/dev/null
+          minem completion bash | grep -q "_minem_completion"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -93,4 +100,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build public Docker image
-        run: docker build --build-arg MINEM_VERSION=0.4.0 -t minem:ci .
+        run: |
+          MINEM_VERSION=$(python3 -c 'import json; print(json.load(open("product-version.json"))["version"])')
+          docker build --build-arg MINEM_VERSION="$MINEM_VERSION" -t minem:ci .

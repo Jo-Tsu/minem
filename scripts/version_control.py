@@ -19,6 +19,7 @@ CARGO = ROOT / "desktop/src-tauri/Cargo.toml"
 CARGO_LOCK = ROOT / "desktop/src-tauri/Cargo.lock"
 PACKAGE_LOCK = ROOT / "package-lock.json"
 DOCKER_COMPOSE = ROOT / "docker-compose.yml"
+PYPROJECT = ROOT / "pyproject.toml"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
 
 
@@ -39,6 +40,22 @@ def cargo_version() -> str:
     return match.group(1) if match else ""
 
 
+def pyproject_version() -> str:
+    content = PYPROJECT.read_text(encoding="utf-8")
+    match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', content)
+    return match.group(1) if match else ""
+
+
+def python_package_version(version: str) -> str:
+    """Convert supported SemVer prereleases to their PEP 440 spelling."""
+    match = re.match(r"^([0-9]+\.[0-9]+\.[0-9]+)-(alpha|beta|rc)\.?([0-9]+)$", version)
+    if not match:
+        return version
+    base, phase, number = match.groups()
+    marker = {"alpha": "a", "beta": "b", "rc": "rc"}[phase]
+    return f"{base}{marker}{number}"
+
+
 def check(manifest: dict) -> list[str]:
     version = manifest["version"]
     issues = []
@@ -48,6 +65,9 @@ def check(manifest: dict) -> list[str]:
             issues.append(f"{path.relative_to(ROOT)}: {value!r} != {version!r}")
     if cargo_version() != version:
         issues.append(f"desktop/src-tauri/Cargo.toml: {cargo_version()!r} != {version!r}")
+    package_version = python_package_version(version)
+    if pyproject_version() != package_version:
+        issues.append(f"pyproject.toml: {pyproject_version()!r} != {package_version!r}")
     cargo_lock = CARGO_LOCK.read_text(encoding="utf-8")
     desktop_lock = re.search(r'(?ms)^name = "minem-desktop"\nversion = "([^"]+)"', cargo_lock)
     if not desktop_lock or desktop_lock.group(1) != version:
@@ -83,6 +103,12 @@ def synchronize(version: str) -> None:
     if count != 1:
         raise ValueError("无法同步 desktop/src-tauri/Cargo.toml 版本")
     CARGO.write_text(updated, encoding="utf-8")
+    pyproject = PYPROJECT.read_text(encoding="utf-8")
+    package_version = python_package_version(version)
+    pyproject, count = re.subn(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{package_version}"', pyproject, count=1)
+    if count != 1:
+        raise ValueError("无法同步 pyproject.toml 版本")
+    PYPROJECT.write_text(pyproject, encoding="utf-8")
     cargo_lock = CARGO_LOCK.read_text(encoding="utf-8")
     cargo_lock, count = re.subn(
         r'(?ms)(^name = "minem-desktop"\nversion = ")[^"]+("$)',
