@@ -1,6 +1,6 @@
 # MineM 公开版本边界 / Open-Source Release Boundary
 
-状态 / Status：已确认，可进入准备阶段 / Approved for preparation
+状态 / Status：已公开发布 / Published
 许可证 / License：Apache-2.0
 版权 / Copyright：MineM contributors
 首个公开版本目标 / First public release target：v0.4.0
