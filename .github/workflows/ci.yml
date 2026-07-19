@@ -82,6 +82,7 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:8790/api/version >/dev/null
           python3 scripts/check_api_contract.py --base-url http://127.0.0.1:8790
+          python3 scripts/test_cli_workflow.py --base-url http://127.0.0.1:8790
 
   docker:
     runs-on: ubuntu-latest

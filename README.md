@@ -4,9 +4,9 @@
 
 # MineM
 
-**把散落的汇报文件，变成可复用、可追溯、可重新编排的素材系统。**
+**让人和 AI 一起创建、复用、追溯并编排汇报素材。**
 
-**Turn scattered presentation files into a reusable, traceable material system.**
+**A local-first material system where people and AI build presentations together.**
 
 [![Release](https://img.shields.io/github/v/release/Jo-Tsu/minem?style=flat-square)](https://github.com/Jo-Tsu/minem/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/Jo-Tsu/minem/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/Jo-Tsu/minem/actions/workflows/ci.yml)
@@ -19,23 +19,66 @@
 
 MineM 是一个本地优先的开源汇报素材平台。它不只是保存文件，而是把完整汇报、
 单页、案例和媒体资源组织成彼此关联的素材资产，让团队可以持续复用、追踪来源、
-管理版本、重新编排并导出新的汇报。
+管理版本、重新编排并导出新的汇报。任何能够执行命令行的 AI Agent 都可以通过
+MineM CLI 创建页面、生成汇报、插入或替换页面，并把结果纳入同一套素材管理体系。
 
 MineM is a local-first, open-source presentation material platform. It turns
 complete reports, individual pages, cases, and media resources into connected
-assets that teams can reuse, trace, version, arrange, and export.
+assets that teams can reuse, trace, version, arrange, and export. Any AI agent
+that can run shell commands can use the JSON CLI to create and manage material.
 
 ```mermaid
 flowchart LR
-    A["Import HTML or ZIP"] --> B["Complete report"]
-    B --> C["Independent page materials"]
-    C --> D["Cases, resources, and storylines"]
-    C --> E["Non-destructive arrangement"]
-    D --> E
+    H["People · Web or macOS"] --> M["MineM Material Engine"]
+    A["AI Agent · CLI and JSON"] --> M
+    M --> R["Reports"]
+    M --> P["Pages"]
+    M --> C["Cases and resources"]
+    P --> E["Non-destructive arrangement"]
+    C --> E
     E --> F["Standalone HTML or PDF"]
 ```
 
 ## 中文
+
+### AI 可以真正操作素材，而不只是给建议
+
+MineM 把平台能力封装为稳定的 CLI 和 JSON 返回值。AI 模型负责理解用户意图、
+提炼文档和生成页面 HTML，MineM 负责完成可验证的产品动作：安全导入、正确分类、
+生成编号、创建缩略图、保存来源、建立版本、编排汇报并返回真实预览链接。
+
+它不绑定某一家模型。Codex、Claude Code、Gemini CLI 或任何能够执行 Shell 命令的
+Agent，都可以调用同一套能力：
+
+```bash
+# 1. AI 生成单页 HTML 后，创建并命名页面素材；等待真实入库完成
+python3 scripts/minem_cli.py --json page create \
+  --file ./generated-page.html --title "客户案例：交付成果" --wait
+
+# 2. 用多个页面素材创建一份完整汇报
+python3 scripts/minem_cli.py --json report create \
+  --title "2026 制造业解决方案" --controls <CTRL_ID_1>,<CTRL_ID_2>
+
+# 3. 把新页面插入指定页面之后；正式汇报会应用新的编排
+python3 scripts/minem_cli.py --json report page <REPORT_ID> \
+  --add <NEW_CTRL_ID>:<AFTER_CTRL_ID> --yes
+
+# 4. 修改某页时创建新页面版本，再替换当前汇报中的旧页
+python3 scripts/minem_cli.py --json report page <REPORT_ID> \
+  --replace <OLD_CTRL_ID>:<NEW_CTRL_ID> --yes
+
+# 5. 把 Markdown 文档提炼为案例页面素材
+python3 scripts/minem_cli.py --json case create \
+  --file ./customer-story.md --title "制造业协同案例" --industry 制造业 --wait
+```
+
+`--wait` 会等待导入完成，并返回最终 `assetId`、素材编号、名称和可访问预览链接；
+`--json` 让 Agent 可以稳定解析结果；`--yes` 用于确认会修改正式汇报的操作。原始
+页面和旧版本不会因插入或替换而被删除。
+
+完整命令边界见 [MineM CLI 能力范围](docs/MineM_CLI_能力范围.md)。这套端到端链路
+已经进入 GitHub CI，每次提交都会真实创建页面与案例、生成汇报、插入和替换页面，
+并验证正式预览链接。
 
 ### 为什么需要 MineM
 
@@ -176,6 +219,47 @@ python3 scripts/version_control.py check
 - [第三方软件声明](THIRD_PARTY_NOTICES.md)
 
 ## English
+
+### AI operates the material system instead of only suggesting changes
+
+MineM exposes product capabilities through a stable CLI with JSON output. The
+model interprets intent, extracts documents, and generates page HTML. MineM
+performs the verifiable product operations: safe import, classification, IDs,
+previews, lineage, versions, report arrangement, and real preview URLs.
+
+MineM is model-agnostic. Codex, Claude Code, Gemini CLI, or any agent that can
+run shell commands can use the same workflow:
+
+```bash
+# Create and name a page material, then wait for the final asset
+python3 scripts/minem_cli.py --json page create \
+  --file ./generated-page.html --title "Customer outcome" --wait
+
+# Create a report from existing page material IDs
+python3 scripts/minem_cli.py --json report create \
+  --title "2026 Manufacturing Solution" --controls <CTRL_ID_1>,<CTRL_ID_2>
+
+# Insert a page after an existing report page
+python3 scripts/minem_cli.py --json report page <REPORT_ID> \
+  --add <NEW_CTRL_ID>:<AFTER_CTRL_ID> --yes
+
+# Replace one report page with a newly created version
+python3 scripts/minem_cli.py --json report page <REPORT_ID> \
+  --replace <OLD_CTRL_ID>:<NEW_CTRL_ID> --yes
+
+# Turn a Markdown document into a case page material
+python3 scripts/minem_cli.py --json case create \
+  --file ./customer-story.md --title "Manufacturing collaboration case" --wait
+```
+
+`--wait` returns the final asset ID, code, title, and working preview URL.
+`--json` provides machine-readable results, while `--yes` explicitly confirms
+operations that update a formal report. Insert and replace operations never
+delete the source page or its previous versions.
+
+See the [MineM CLI capability scope](docs/MineM_CLI_能力范围.md). The complete
+workflow runs in GitHub CI and creates pages, case material, and a report before
+testing insert, replace, and the final public preview.
 
 ### Why MineM
 

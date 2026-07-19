@@ -90,8 +90,42 @@ def ids(value: str):
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def finalize_import(client, result, *, title="", wait=False, timeout=120):
+    if not result.get("ok") or not wait:
+        return result
+    task = result.get("task") or {}
+    task_id = task.get("id")
+    if not task_id:
+        return {"ok": False, "error": "导入任务没有返回任务 ID"}
+    deadline = time.monotonic() + max(1, timeout)
+    while time.monotonic() < deadline:
+        current = client.request("GET", f"/api/import-tasks/{urllib.parse.quote(task_id)}")
+        if not current.get("ok"):
+            return current
+        task = current.get("task") or {}
+        status = task.get("status")
+        if status == "success":
+            asset = None
+            if title and task.get("assetId") and not result.get("reused"):
+                renamed = client.request(
+                    "POST",
+                    f"/api/assets/{urllib.parse.quote(task['assetId'])}/title",
+                    {"title": title},
+                )
+                if not renamed.get("ok"):
+                    return renamed
+                asset = renamed.get("asset")
+                task["assetTitle"] = asset.get("title", title) if asset else title
+            return {"ok": True, "task": task, "asset": asset, "reused": bool(result.get("reused"))}
+        if status == "failed":
+            return {"ok": False, "task": task, "error": task.get("error") or "导入失败"}
+        time.sleep(0.25)
+    return {"ok": False, "task": task, "error": f"等待导入超时（{timeout} 秒）"}
+
+
 def import_file(client, args):
-    return client.upload(args.file, args.description or args.title or "")
+    result = client.upload(args.file, args.description or args.title or "")
+    return finalize_import(client, result, title=args.title or "", wait=args.wait, timeout=args.timeout)
 
 
 def report_create(client, args):
@@ -114,27 +148,37 @@ def report_arrange(client, args):
     if not current.get("ok"):
         return current
     arrangement = current.get("arrangement", current)
-    order = list(arrangement.get("pageOrder") or arrangement.get("page_order") or [])
-    hidden = list(arrangement.get("hiddenPageIds") or arrangement.get("hidden_page_ids") or [])
+    pages = arrangement.get("pages") if isinstance(arrangement.get("pages"), list) else []
+    order = list(arrangement.get("pageOrder") or arrangement.get("page_order") or [page.get("id") for page in pages if page.get("id")])
+    hidden = list(arrangement.get("hiddenPageIds") or arrangement.get("hidden_page_ids") or [page.get("id") for page in pages if page.get("id") and page.get("hidden")])
+    inserted = []
+    removed = []
     if args.replace:
         old, new = args.replace.split(":", 1)
         if old not in order:
             return {"ok": False, "error": f"当前汇报未引用页面素材：{old}"}
         order[order.index(old)] = new
+        inserted.append(new)
+        removed.append(old)
+        hidden = [item for item in hidden if item != old]
     if args.add:
         new, after = args.add.split(":", 1)
         if after not in order:
             return {"ok": False, "error": f"插入位置不存在：{after}"}
         order.insert(order.index(after) + 1, new)
+        inserted.append(new)
     return client.request("POST", f"/api/reports/{urllib.parse.quote(args.report_id)}/arrangement", {
         "pageOrder": order,
         "hiddenPageIds": hidden,
+        "insertedControlIds": inserted,
+        "removedPageIds": removed,
     })
 
 
 def page_create(client, args):
     # A page remains a first-class MineM asset by going through the normal importer.
-    return client.upload(args.file, args.title or "页面素材")
+    result = client.upload(args.file, args.title or "页面素材")
+    return finalize_import(client, result, title=args.title or "", wait=args.wait, timeout=args.timeout)
 
 
 def case_create(client, args):
@@ -147,9 +191,15 @@ def case_create(client, args):
         handle.write(document)
         generated = Path(handle.name)
     try:
-        return client.upload(generated, f"客户案例,案例页,{args.industry or ''}")
+        result = client.upload(generated, f"客户案例,案例页,{args.industry or ''}")
+        return finalize_import(client, result, title=title, wait=args.wait, timeout=args.timeout)
     finally:
         generated.unlink(missing_ok=True)
+
+
+def add_wait_options(parser):
+    parser.add_argument("--wait", action="store_true", help="等待入库完成并返回最终素材")
+    parser.add_argument("--timeout", type=int, default=120, help="等待入库的最长秒数，默认 120")
 
 
 def build_parser():
@@ -165,6 +215,7 @@ def build_parser():
         item.add_argument("file", type=require_file)
         item.add_argument("--title")
         item.add_argument("--description")
+        add_wait_options(item)
         item.set_defaults(handler=import_file)
 
     task = commands.add_parser("task", help="查看导入任务")
@@ -196,6 +247,7 @@ def build_parser():
     page_create_cmd = page_sub.add_parser("create")
     page_create_cmd.add_argument("--file", required=True, type=require_file, help="单页 HTML 或标准页面模板 ZIP")
     page_create_cmd.add_argument("--title")
+    add_wait_options(page_create_cmd)
     page_create_cmd.set_defaults(handler=page_create)
 
     case = commands.add_parser("case", help="外部文档转案例页面素材")
@@ -204,6 +256,7 @@ def build_parser():
     case_create_cmd.add_argument("--file", required=True, type=require_file, help="UTF-8 Markdown 或 TXT 文档")
     case_create_cmd.add_argument("--title")
     case_create_cmd.add_argument("--industry")
+    add_wait_options(case_create_cmd)
     case_create_cmd.set_defaults(handler=case_create)
     return parser
 

@@ -17,6 +17,7 @@
 - 资源合并、版本合并后出现资源丢失、空白图片或引用断裂。
 - 打开链接、复制链接、刷新、翻页出现重复控件或失效。
 - 平台构建、Docker 服务、API 契约与前端类型检查不一致。
+- AI/CLI 只返回任务成功，但最终素材未命名、预览不可访问或正式汇报未应用编排。
 
 测试脚本必须默认只读，不删除真实素材、不修改编排、不重新导入真实文件、不重建缩略图。涉及写入的验证统一使用临时目录、临时 SQLite 或专用测试数据。
 
@@ -116,6 +117,9 @@
 | CLICK-023 | B | 创作助手双模式 | MineM.app | 全局唤起、模式切换、动作集合 | `⌥⌘M` 和菜单栏均可唤起；只存在汇报/页面模式；无素材模式 |
 | CLICK-024 | B | 创作上下文识别 | 汇报链接、页面链接、通用 extracted 链接与编号 | 当前页面、剪贴板、引用列表 | `RPT` 与 `CTRL-PAGE` 正确分流；通用 extracted 链接只作为来源，不误判素材类型 |
 | CLICK-025 | B | Codex 操作包 | 插入、替换、页面复制、页面修改 | 必填校验、结构化字段、业务约束 | 缺少汇报/目标页/页面引用时不可复制；成功内容包含单页、多页归类、版本保留、16:9 和真实链接校验规则 |
+| CLI-001 | A | AI 创建页面与案例 | 隔离服务、临时 HTML/Markdown | `--json --wait`、最终命名、编号、预览 | 返回最终 `assetId` 与 `CTRL-*`；标题生效；预览链接可访问 |
+| CLI-002 | A | AI 创建汇报 | 两张临时页面素材 | `report create`、页面引用、正式链接 | 生成 `RPT-*`，初始页数和引用正确，正式链接可访问 |
+| CLI-003 | A | AI 插入与替换页面 | 临时汇报、案例页、新版本页 | `report page --add/--replace --yes` | 最终编排为预期 3 页；正式汇报应用结果；原页面仍存在 |
 
 ## 4. 脚本设计（确认后实施）
 
@@ -126,6 +130,7 @@ python3 scripts/run_core_tests.py --suite data
 python3 scripts/run_core_tests.py --suite click
 python3 scripts/run_core_tests.py --suite all
 python3 scripts/run_core_tests.py --suite all --full
+python3 scripts/test_cli_workflow.py --base-url http://127.0.0.1:8790
 npm --prefix desktop run test:creator
 ```
 
@@ -150,6 +155,8 @@ npm --prefix desktop run test:creator
 - 任何失败使用非零退出码；数据异常不会自动删除、合并、修复或刷新缩略图。
 - 支持 `--base-url`、`--timeout`、`--json-out` 与 `--strict` 参数，便于 Docker、CI 与本机使用。
 - `data` 不批量生成缩略图、不启动导入、不调用外部 AI/TTS。
+- `test_cli_workflow.py` 只允许连接隔离数据服务；它会真实写入临时素材，用于验证 AI/CLI
+  创建、命名、插入、替换和正式预览闭环，不得对用户素材库执行。
 
 ## 6. 执行频率与责任
 
