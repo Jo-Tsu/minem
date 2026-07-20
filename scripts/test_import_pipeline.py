@@ -42,6 +42,62 @@ def main():
         assert row and row["asset_type"] == "control", row
         assert row["tags"] == "", row
 
+        report_root = Path(temp_dir) / "report-with-supporting-html"
+        report_entry = report_root / "wrapped" / "site" / "index.html"
+        report_entry.parent.mkdir(parents=True)
+        report_entry.write_text(
+            """<!doctype html><html><head><title>完整汇报</title>
+            <meta name="fs-deck-generator" content="render-deck"></head><body>
+            <div class="deck">
+              <div class="slide-frame"><div class="slide" data-slide-key="cover">封面</div></div>
+              <div class="slide-frame"><div class="slide" data-slide-key="summary">总结</div></div>
+            </div></body></html>""",
+            encoding="utf-8",
+        )
+        supporting = report_root / "wrapped" / "site" / "prototypes" / "index.html"
+        supporting.parent.mkdir(parents=True)
+        supporting.write_text("<!doctype html><html><body>辅助原型</body></html>", encoding="utf-8")
+        manifest, manifest_kind = server.load_report_package_manifest(report_root)
+        assert manifest_kind == "html-report", (manifest, manifest_kind)
+        assert manifest["entry"] == "wrapped/site/index.html", manifest
+        page_items = server.report_manifest_page_items(report_root, manifest, manifest_kind)
+        assert len(page_items) == 2, page_items
+        assert all(item["path"].exists() for item in page_items), page_items
+        with conn:
+            conn.execute(
+                "insert into uploads (id, filename, stored_path, extract_path, created_at) values ('test-report', 'report.zip', '', ?, 2)",
+                (str(report_root),),
+            )
+            original_thumbnail_writer = server.copy_package_preview_thumbnail
+            server.copy_package_preview_thumbnail = lambda *args, **kwargs: True
+            try:
+                server.scan_upload("test-report", report_root, conn=conn)
+            finally:
+                server.copy_package_preview_thumbnail = original_thumbnail_writer
+        report_types = conn.execute(
+            "select asset_type, count(*) as count from assets where upload_id = 'test-report' group by asset_type"
+        ).fetchall()
+        assert {row["asset_type"]: row["count"] for row in report_types} == {"control": 2, "report": 1}, report_types
+        report_id = conn.execute(
+            "select id from assets where upload_id = 'test-report' and asset_type = 'report'"
+        ).fetchone()["id"]
+        linked_pages = conn.execute(
+            "select count(*) from report_page_slots where report_id = ? and control_id <> ''",
+            (report_id,),
+        ).fetchone()[0]
+        assert linked_pages == 2, linked_pages
+        with conn:
+            original_thumbnail_writer = server.copy_package_preview_thumbnail
+            server.copy_package_preview_thumbnail = lambda *args, **kwargs: True
+            try:
+                server.scan_upload("test-report", report_root, conn=conn)
+            finally:
+                server.copy_package_preview_thumbnail = original_thumbnail_writer
+        repeated_types = conn.execute(
+            "select asset_type, count(*) as count from assets where upload_id = 'test-report' group by asset_type"
+        ).fetchall()
+        assert {row["asset_type"]: row["count"] for row in repeated_types} == {"control": 2, "report": 1}, repeated_types
+
         multi_root = Path(temp_dir) / "independent-pages"
         for name in ("alpha", "beta"):
             page_root = multi_root / name

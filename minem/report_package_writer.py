@@ -259,7 +259,11 @@ def sync_report_material_package(
                 pages_to_sync_index.append(page_number)
         changed += 1
 
-    if pages_to_sync_index:
+    # Inline external reports are the immutable source used to derive their
+    # page controls. Rewriting that source makes the next startup scan observe
+    # different page hashes and create a fresh candidate version for every
+    # page. Manifest-driven packages can still synchronize their viewer entry.
+    if pages_to_sync_index and manifest_kind != "html-report":
         sync_report_index_from_slots(conn, report_asset_id, pages_to_sync_index, "自动同步页面素材后更新最新汇报 index")
 
     changed += sync_report_package_resources(conn, upload_id, extract_root, report_code, report_title)

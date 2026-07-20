@@ -2811,7 +2811,6 @@ def scan_upload(upload_id, extract_root, description="", conn=None):
         invalidate_stats_cache()
         expected_pages = report_manifest_page_items(extract_root, manifest, manifest_kind)
         if expected_pages:
-            sync_report_material_package(conn, upload_id, extract_root)
             report = conn.execute(
                 "select id from assets where upload_id = ? and asset_type = 'report' order by created_at limit 1",
                 (upload_id,),
