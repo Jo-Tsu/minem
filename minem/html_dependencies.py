@@ -19,10 +19,16 @@ class DependencyParser(HTMLParser):
         super().__init__()
         self.base_href = ""
         self.references: list[tuple[str, str]] = []
+        self._style_depth = 0
+        self._style_chunks: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
         tag = tag.lower()
+        if tag == "style":
+            if self._style_depth == 0:
+                self._style_chunks = []
+            self._style_depth += 1
         if tag == "base" and values.get("href"):
             self.base_href = values["href"]
         for name in ("src", "poster", "data-fs-src"):
@@ -37,6 +43,28 @@ class DependencyParser(HTMLParser):
                     self.references.append(("srcset", source))
         if values.get("style"):
             self.references.extend(("css-url", value) for value in css_references(values["style"]))
+
+    def handle_data(self, data):
+        if self._style_depth:
+            self._style_chunks.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() != "style" or not self._style_depth:
+            return
+        self._style_depth -= 1
+        if self._style_depth == 0:
+            self._flush_style()
+
+    def finish(self):
+        # Keep malformed-but-renderable HTML auditable when </style> is absent.
+        if self._style_chunks:
+            self._flush_style()
+        self._style_depth = 0
+
+    def _flush_style(self):
+        text = "".join(self._style_chunks)
+        self.references.extend(("css-url", value) for value in css_references(text))
+        self._style_chunks = []
 
 
 def css_references(text: str):
@@ -94,9 +122,8 @@ def _refs_for(path: Path):
     parser = DependencyParser()
     parser.feed(text[:4_000_000])
     parser.close()
-    refs = list(parser.references)
-    refs.extend(("css-url", value) for value in css_references(text))
-    return parser.base_href, refs
+    parser.finish()
+    return parser.base_href, list(parser.references)
 
 
 def audit_dependency_closure(root: Path) -> dict:

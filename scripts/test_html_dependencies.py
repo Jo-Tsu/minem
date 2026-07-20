@@ -39,6 +39,30 @@ def main() -> None:
         (root / "nested.html").write_text('<iframe src="/extracted/demo/nested.html"></iframe>', encoding="utf-8")
         # Platform URLs pointing at another package are intentionally ignored by this package audit.
         assert not audit_dependency_closure(root)["missing"]
+
+        script_case = root / "script-case"
+        (script_case / "assets").mkdir(parents=True)
+        (script_case / "assets" / "ok.png").write_bytes(b"png")
+        (script_case / "index.html").write_text(
+            """
+            <script>
+              function url(t) { return t; }
+              const image = URL.createObjectURL(new Blob([finalBytes], { type: entry.mime }));
+            </script>
+            <style>.hero { background-image: url("assets/ok.png"); }</style>
+            <div style="mask-image: url('assets/ok.png')"></div>
+            """,
+            encoding="utf-8",
+        )
+        assert not audit_dependency_closure(script_case)["missing"]
+
+        (script_case / "index.html").write_text(
+            '<script>URL.createObjectURL(new Blob([], { type: entry.mime }));</script>'
+            '<style>.hero { background: url("assets/missing.png") }</style>',
+            encoding="utf-8",
+        )
+        missing = audit_dependency_closure(script_case)["missing"]
+        assert len(missing) == 1 and missing[0]["resolved"] == "assets/missing.png", missing
     print("html dependency checks passed")
 
 
