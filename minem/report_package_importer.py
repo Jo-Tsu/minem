@@ -71,31 +71,40 @@ def load_report_package_manifest(extract_root, *, read_json_file):
     if (extract_root / "report" / "index.html").exists() or any((extract_root / "controls").glob("slide-*/index.html")):
         return {}, "legacy"
 
-    # A downloaded Deck is commonly a single, self-contained HTML file whose
-    # name is not index.html. Treat it as a report only when it exposes more
-    # than one slide root, so ordinary one-page HTML stays a page material.
+    # A downloaded Deck is commonly a self-contained HTML file, but its ZIP can
+    # also carry supporting demos and prototypes. Detect the shallowest deck
+    # entry with multiple slide roots instead of requiring the entire package
+    # to contain exactly one HTML file.
     html_files = sorted(
         path for path in extract_root.rglob("*")
         if path.is_file()
         and path.suffix.lower() in {".html", ".htm"}
         and "_minem_pages" not in path.relative_to(extract_root).parts
     )
-    if len(html_files) == 1:
-        inline_html = html_files[0]
+    inline_candidates = []
+    for inline_html in html_files:
         try:
             content = inline_html.read_text(encoding="utf-8", errors="ignore")
         except OSError:
-            content = ""
+            continue
         slide_frames = len(re.findall(r'<(?:div|section|article)\b[^>]*\bslide-frame\b', content, re.IGNORECASE))
         slide_nodes = len(re.findall(r'<(?:div|section|article)\b[^>]*\bdata-(?:slide|page)\b', content, re.IGNORECASE))
         is_deck = bool(re.search(r'<meta\b[^>]*\bfs-deck-generator\b', content, re.IGNORECASE) or slide_frames)
         if is_deck and max(slide_frames, slide_nodes) > 1:
-            title_match = re.search(r"<title\b[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
-            title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else inline_html.stem.replace("-", " ")
-            return {
-                "entry": inline_html.relative_to(extract_root).as_posix(),
-                "title": title,
-            }, "html-report"
+            rel = inline_html.relative_to(extract_root)
+            inline_candidates.append((
+                len(rel.parts),
+                0 if inline_html.name.lower() in {"index.html", "index.htm"} else 1,
+                -max(slide_frames, slide_nodes),
+                rel.as_posix(),
+                inline_html,
+                content,
+            ))
+    if inline_candidates:
+        _, _, _, entry, inline_html, content = min(inline_candidates)
+        title_match = re.search(r"<title\b[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else inline_html.stem.replace("-", " ")
+        return {"entry": entry, "title": title}, "html-report"
 
     if (extract_root / "index.html").exists():
         package_manifest = read_json_file(extract_root / "package-manifest.json")
