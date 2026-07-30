@@ -63,10 +63,10 @@ def normalize_report_page_canvases(
     report = conn.execute("select * from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone()
     if not report:
         return {"normalized": 0, "reused": 0, "created": [], "replacements": {}}
-    report_path = _source_path(extracted_root, report)
-    target_width, target_height = detect_dimensions(report_path) if report_path else (1920, 1080)
-    if not target_width or not target_height:
-        target_width, target_height = 1920, 1080
+    # MineM's current presentation canvas is always 1920x1080. Source files
+    # keep their original dimensions in version history; reports reference a
+    # derived page version when conversion is required.
+    target_width, target_height = 1920, 1080
     timestamp = now_ms()
     replacements = {}
     created = []

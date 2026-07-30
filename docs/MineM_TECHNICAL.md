@@ -1,6 +1,6 @@
 # MineM 技术文档
 
-版本：0.4.0 · 2026-07-19
+版本：0.5.0 · 2026-07-26
 
 ## 1. 技术栈
 
@@ -11,14 +11,15 @@
 - 容器化：Docker Compose
 - macOS 客户端：Tauri 2 + 系统 WebView；创作助手使用独立静态前端与官方全局快捷键插件
 
-### 标签迁移状态
+### 标签系统状态
 
-- `assets.tags`、`asset_history.tags`、`report_storyline_collections.tags` 为已退役的平铺旧字段；P0 已清空，且服务端不再写入。
+- `assets.tags` 是已确认受控标签的兼容缓存；正式关系、来源、维度和证据保存在 `asset_tags`。`asset_history.tags` 与 `report_storyline_collections.tags` 不参与新标签写入。
 - 类型、媒体、资源分类、编号、来源、版本、页槽位和编排继续使用各自的结构化字段，不能用标签替代。
-- 旧 `POST /api/assets/{id}/tags` 与 `POST /api/ai-tag` 在 P1 新词表上线前返回停用提示；核心数据测试持续验证旧标签没有回填。
+- `GET /api/tag-taxonomy` 返回 `taxonomy-v1` 词表；`POST /api/assets/{id}/tags` 只接受词表内标签并记为 `manual`；`POST /api/ai-tag` 创建按类型执行的异步批量确认任务。
 - P1 AI 标签建议按“人工确认 > 页面自身内容 > 汇报上下文 > 演讲稿/妙记/外部文档 > 结构化来源 > 文件名路径”聚合证据；每条候选需保存 `dimension`、`tag`、`confidence`、`evidence`、`priority`、`conflict_status`，冲突或低置信度不写入正式标签。
 - 标签分析使用独立任务队列，与导入和同步服务分离。任务字段至少包括：`scope`、`trigger_type(manual|scheduled|retry)`、`status`、`content_fingerprint`、`model_version`、`taxonomy_version`、`progress`、`error`、`created_at`、`updated_at`。幂等键为“素材版本/内容指纹 + 模型版本 + 词表版本”；定时调度只选择待分析、内容变化或可重试失败项。
-- 当前执行器为 `evidence-v1`：仅提取页面 HTML 文本、标题/图片替代文本、页面元数据、汇报页槽上下文和结构化来源证据，并写入 `asset_tag_evidence`；候选标签数组固定为空，不写 `assets.tags`。服务内调度器在本地时区每日 `00:00` 发起 changed-assets 任务；`scripts/run_tag_analysis.py` 可供外部 cron/运维调度调用。
+- 当前执行器为 `rules-v1`、词表为 `taxonomy-v1`：提取页面 HTML、元数据、汇报页槽和同批次业务上下文，写入 `asset_tag_evidence`，再生成 `asset_tag_suggestions`。普通和定时任务只更新候选；管理员显式 `apply_mode=confirmed` 时确认置信度不低于 `0.70` 的无冲突候选，写入 `asset_tags` 并同步 `assets.tags`，但不修改 `assets.updated_at`。
+- `tag_definitions` 保存受控标签和维度；`asset_tag_suggestions` 以 `(asset_id, tag)` 幂等；`asset_tags` 以 `(asset_id, tag)` 幂等。资源素材会读取同一 `upload_id` 下页面和汇报的 P2 上下文，不以文件名作为高置信证据。
 
 ## 2. 系统架构
 
@@ -52,7 +53,9 @@ minem/
   frontend/                     # React + TypeScript 源码
   minem/                        # Python 领域模块
     agent/                      # 可选自动化能力，默认不开放 HTTP
+    html_page_builder.py        # JSON 页面规范到自包含 1920×1080 HTML
   desktop/                      # macOS 客户端源码
+  skills/minem-html-page/       # AI 生成并发布 HTML 页面素材的 Skill
   scripts/                      # 测试、校验、治理、版本与 CLI
   docs/                         # 产品和工程文档
   templates/                    # 运行时 HTML 模板
@@ -69,27 +72,49 @@ minem/
 
 说明：`frontend/` 是管理平台源码；`public/` 由构建任务生成并由后端静态托管。运行数据与源码分离，公开仓库和 CI 均以空素材库启动。`minem/agent/` 不进入前端导航，其 HTTP API 默认关闭。
 
-## 3.1 导入资源闭包
+### 3.1 HTML 页面构建器
+
+`minem/html_page_builder.py` 读取 UTF-8 JSON 页面规范，对全部文本进行 HTML 转义，对布局、主题和颜色做白名单校验，并将本地 PNG、JPEG、WebP、GIF 或 SVG 编码为 data URI。输出不包含脚本、远程资源或查看器控件，画布固定为 1920×1080。
+
+CLI `minem page build` 默认只写本地 HTML；使用 `--publish` 后继续调用既有上传接口和异步导入任务，不直接写 SQLite、`extracted/` 或缩略图目录。Agent 能力清单与 Schema 暴露 `page.build`，Skill 只负责组织 JSON 规范和调用 CLI，不建立第二套生成服务。
+
+## 3.2 导入资源闭包
 
 导入任务在解压或复制文件后、写入 `uploads` 和 `assets` 前执行 `minem/html_dependencies.py` 的只读递归审计。审计以 HTML 页面为入口，解析 `src`、`poster`、`data-fs-src`、`srcset`、样式表链接、内联 CSS `url()` 与 iframe；HTML/CSS 引用继续递归，直到本地依赖闭合。外部 URL、data URI、锚点和协议链接不纳入本地缺失判断。
 
 审计不尝试以其他素材的同名文件替代缺失资源，避免错误内容被静默展示。发现缺失时任务在入库前失败，`extracted/{upload_id}/.minem-dependency-audit.json` 保留诊断；已存在历史包通过治理脚本检出并进入修复清单，不能再被误判为“预览正常”。
 
+解压完成后、依赖闭包审计前增加 `normalize_ephemeral_runtime_references()`。该阶段只处理 HTML 标签中路径形态为 `/decks/<deck-id>/.runtime/<signed-token>/assets/<runtime-path>` 的临时 CSS/JavaScript：优先依据受控映射查找包内等价资源并改写相对路径；没有等价文件时移除对应 `link` 或 `script` 标签。处理结果写入 `.minem-import-normalization.json`，记录来源文件、原引用、动作和原因。该规则不得匹配图片、视频、音频、字体、iframe 或普通相对路径，也不得从其他历史批次借用同名文件。
+
 ### 导入事务与重建
 
-所有 HTTP 上传、异步任务和自动扫描必须共用同一个导入编排器，禁止上传接口绕过依赖校验后直接调用目录扫描。导入编排器的阶段为 `received -> extracted -> validated -> classified -> rendered -> published`；只有 `published` 才写入正式 `assets`、`report_page_slots`、资源关系和缩略图。
+所有 HTTP 上传、异步任务和自动扫描必须共用同一个导入编排器，禁止上传接口绕过依赖校验后直接调用目录扫描。导入编排器的阶段为 `received -> extracted -> normalized -> validated -> classified -> published -> preview-ready`；`published` 在单一短事务内写入正式 `assets`、`report_page_slots` 和资源关系，`preview-ready` 仅处理可再生缩略图缓存，不得持有数据库发布事务。
 
 历史批次重建先输出引用清单和 dry-run，再在单一事务中更新数据库，并将旧批次派生目录移入任务级临时隔离区；成功后删除隔离区，失败则回滚事务并恢复目录。项目运行目录不创建 SQLite 副本。清理范围仅限 `upload_id` 对应的资产、候选页、页面槽、尺寸适配映射、缩略图和旧导入任务；重建读取原始 ZIP/HTML，生成新的批次 ID，避免旧 `_minem_pages`、`candidate-*`、`current-*`、`_minem_normalized` 再次参与源文件扫描。
 
 HTTP 导入在依赖闭包通过后计算 `package-v1` 规范化指纹：按相对路径排序，并组合每个文件的字节内容。该指纹不受 ZIP 压缩参数和上传文件名影响。批次记录、素材、页槽和资源关系使用同一 SQLite 事务发布；页面完整性校验失败时整笔回滚。缩略图在事务提交后异步生成，不参与素材分类与正式数据提交。
 
+汇报包写入器注入的 `copy_package_preview_thumbnail()` 在发布事务中必须保持无 I/O；事务提交后的 `generate_upload_thumbnails()` 只选择当前批次的代表素材，优先汇报、其次首张页面。其余页面由 `asset_thumbnail_url()` 写入既有单工作线程队列，按列表可见性懒生成，禁止为一个大包并行拉起大量 Chromium。
+
+Chromium 单页渲染以截图文件稳定写入为完成信号，而不是等待浏览器主进程自然退出。渲染器轮询输出大小，连续稳定后终止独立进程组；12 秒仍无有效截图才失败。该机制避免 macOS Chrome 已写出图片但进程延迟退出时每页固定等待 24 秒。
+
 `AUTO_IMPORT_ON_START` 默认值为 `0`；只有显式设置为 `1` 才允许启动扫描。普通 HTML 没有汇报 Manifest 或多页 Deck 结构时按页面素材处理。
 
-## 3.2 macOS 创作助手
+导入工作线程属于当前服务进程，不能跨进程恢复。`init_db()` 完成 Schema 初始化后调用 `ImportTaskStore.recover_interrupted()`，将数据库中遗留的 `queued/running` 任务原子更新为 `failed`，进度置为 `100`，并写入可操作的中断原因。`POST /api/import-tasks/{id}/retry` 只允许重试已结束任务，校验私有 `stored_path` 仍位于当前运行目录的 `uploads/` 后，复用原 `task_id`、`upload_id` 和原文件重新启动完整导入编排；路径缺失或越界时拒绝重试。
 
-创作助手由 `desktop/ui/quick-actions.html`、`quick-actions.js` 和 `quick-actions-core.mjs` 组成。UI 只维护汇报/页面双模式、当前上下文和自定义指令；核心模块负责动作定义、编号与链接分类、必填校验和 `minem.codex-operation.v1` 操作包生成，可由 Node 内置测试独立验证。
+React 任务浮窗只在 API 成功响应后覆盖后台状态。轮询失败进入独立 `connectionLost` 状态，保留最后数据但将进行中标签改为“连接中断”，每 2.5 秒有限请求一次恢复；连接成功后重新以服务端任务为准。该状态允许关闭卡片，不把网络异常写入共享数据库。
 
-Tauri 原生层使用 `tauri-plugin-global-shortcut` 注册 `Option + Command + M`，并记录客户端最近成功导航的 MineM URL。创作助手只暴露剪贴板读写、最近 URL 查询和窗口隐藏命令，不调用 MineM 写 API，也不读取数据库、素材目录或其他应用浏览历史。详细交互与安全边界以 `docs/macos-desktop-client.md` 为准。
+## 3.3 macOS 创作助手
+
+创作助手由 `desktop/ui/quick-actions.html`、`quick-actions.js` 和 `quick-actions-core.mjs` 组成。UI 只维护汇报/页面/案例三组场景和复制状态；核心模块是唯一场景注册表，负责场景元数据、固定技能、对话采集项、执行协议和跨 AI 指令生成，可由 Node 内置测试独立验证。
+
+Tauri 原生层使用 `tauri-plugin-global-shortcut` 注册 `Option + Command + M` 与备用键 `Control + Option + M`。透明助手窗口必须同时启用 `app.macOSPrivateApi` 与 Tauri `macos-private-api` feature，缺一即视为构建门禁失败。创作助手只使用剪贴板写入与本次写入的即时复核、CLI 路径发现与修复、右侧抽屉展开/收起和窗口隐藏命令，不调用 MineM 写 API，也不读取数据库、素材目录、剪贴板历史或其他应用浏览历史。详细交互与安全边界以 `docs/macos-desktop-client.md` 为准。
+
+macOS 剪贴板写入直接使用 AppKit `NSPasteboard.generalPasteboard` 和 `NSPasteboardTypeString`，不再创建 `pbcopy`/`pbpaste` 子进程。原生层清空 Pasteboard、写入 `NSString`，随后从同一 Pasteboard 回读；比较前只统一 CRLF/CR 换行，不裁剪业务文本。写入返回值与完整内容校验同时通过才可返回成功。
+
+前端在原生命令成功后再次调用 `clipboard_read` 复核；原生失败或超时时自动尝试 WebView Clipboard API/选择区回退，并对回退结果执行相同系统级复核。两层均失败才恢复入口并显示一个明确错误。平台头部通过 `POST /api/desktop/creator-assistant` 启动已安装客户端的 `--assistant` 单实例入口，不复制场景注册表。前端不接收业务参数，因此没有字段校验、草稿或模板状态；复制只校验场景存在、CLI 已就绪与系统剪贴板完整性。
+
+`buildScenarioInstruction` 生成可直接填写的短自然语言指令，只包含动作、固定 Skill、2–3 个空白信息项、一个关键约束和完成结果要求。复杂分类、版本、幂等和验收协议由 Skill 维护；模板不包含 CLI 绝对路径、诊断命令或能力清单。AI 在后续对话中补全附件和引用并实际执行 CLI，浮窗不保存业务输入。
 
 ## 4. 数据模型
 
@@ -231,6 +256,14 @@ Tauri 原生层使用 `tauri-plugin-global-shortcut` 注册 `Option + Command + 
 | GET | `/api/reports/{id}/arrangement` | 获取汇报页面、缩略图和当前排序/隐藏状态 |
 | POST | `/api/reports/{id}/arrangement` | 用户确认后提交汇报页面排序和隐藏状态，并更新真实公开入口 |
 | DELETE | `/api/assets/{id}` | 删除素材 |
+
+删除接口采用“引用校验 -> 记录保留页面 -> 关联数据清理 -> 主记录删除 -> 事务提交 -> 文件清理”的固定顺序。删除汇报时清理其页槽、编排、尺寸适配、候选页、导出任务、标签和故事线关联，但不删除被引用的页面或资源；保留页面原子更新为 `source_type=retained-report-page`，来源说明不得残留已删除汇报编号。删除页面时若仍被页槽、候选页或尺寸适配关系引用，返回 `409` 和引用汇报清单，不允许把引用改为空字符串。文件只在数据库事务成功后删除，事务失败不得出现记录仍在但预览文件已经丢失的状态。
+
+无显式 Manifest 的 HTML Deck 使用 `extract_page_node_spans` 计算真实页面根。优先以 `.slide-frame` 顶层节点为页，不以同一页内层的 `data-slide` / `data-page` 组件或业务 iframe 数量推断页数；仅当来源本身是明确的 iframe 页面查看器时才允许 iframe 表示页面。真实页面根少于两个时进入单页页面素材扫描，不创建 `RPT`。
+
+启动历史治理采用保守门禁：仅当 `source_type=report-material-sync`、存在且仅存在一个有效页面槽、入口检测结果严格等于一页时，才删除误生成的 `RPT` 外壳并保留其 `CTRL` 页面。零页槽、孤儿页槽、多页槽及非同步来源全部跳过，由数据审计报告处理；禁止根据一个 viewer 入口的 DOM 结构直接重分类正常汇报。
+
+客户端删除流程不得调用 `window.confirm`。React 维护待删除素材和提交状态，平台内确认弹窗展示影响范围；确认后只发送一次 `DELETE /api/assets/{id}`，等待服务端事务成功再关闭详情并刷新列表。`409` 引用冲突和其他错误必须原位显示，不得静默关闭。
 | GET | `/api/assets/{id}/export` | 导出控件模板包 |
 | POST | `/api/reports/{id}/exports` | 创建完整汇报 HTML/PDF 导出任务，参数 `format: html|pdf` |
 | GET | `/api/report-exports/{taskId}` | 查询导出任务状态、进度、失败页面与下载地址 |
@@ -238,14 +271,18 @@ Tauri 原生层使用 `tauri-plugin-global-shortcut` 注册 `Option + Command + 
 | GET | `/api/assets/{id}/history` | 获取控件历史 |
 | GET | `/api/assets/{id}/versions` | 获取相似版本 |
 | GET | `/api/assets/{id}/lineage` | 获取原数据链路详情，供双抽屉列表和详情使用 |
-| POST | `/api/assets/{id}/tags` | 旧标签接口，P0 停用，待维度化词表上线后替换 |
+| POST | `/api/assets/{id}/tags` | 写入人工确认的受控业务标签，不接受自由文本 |
 | POST | `/api/uploads` | 同步导入 zip |
 | POST | `/api/import-tasks` | 创建异步导入任务，支持 HTML、ZIP、图片、SVG、GIF 和视频 |
 | GET | `/api/import-tasks` | 获取最近导入任务 |
 | GET | `/api/import-tasks/{id}` | 查询导入任务 |
+| POST | `/api/import-tasks/{id}/retry` | 复用仍在本机上传目录中的原文件重试已失败或中断任务 |
 | POST | `/api/auto-import` | 自动扫描本机素材 |
 | POST | `/api/sync-report-materials` | 显式同步 extracted 中的汇报材料包 |
-| POST | `/api/ai-tag` | 旧自动打标接口，P0 停用，待 AI 候选标签能力上线后替换 |
+| POST | `/api/ai-tag` | 按素材类型创建高置信标签批量确认任务 |
+| GET | `/api/tag-taxonomy` | 获取受控标签维度、标准词和版本 |
+| GET | `/api/tag-analysis/tasks` | 获取标签任务列表 |
+| POST | `/api/tag-analysis/tasks` | 创建候选或批量确认任务，支持 `scopeType` 与 `apply` |
 | POST | `/api/merge-similar` | 合并相似图片 |
 | GET | `/api/storylines` | 获取故事线模板与汇报收藏产生的故事线；收藏故事线按最新版本返回并包含版本历史 |
 | GET | `/api/case-groups` | 从已导入案例 manifest 与真实 `CTRL-*` 主版本生成案例组；过滤未入库或无预览页面 |
@@ -253,7 +290,7 @@ Tauri 原生层使用 `tauri-plugin-global-shortcut` 注册 `Option + Command + 
 | POST | `/api/reports/{id}/pages` | 创建或更新汇报页槽 |
 | POST | `/api/reports/{id}/controls` | 将汇报页面导入为控件 |
 | POST | `/api/reports/{id}/storyline-collections` | 将汇报新建为故事线或作为已有故事线的新版本 |
-| GET | `/api/reports/{id}/trusted-entry` | 校验完整汇报入口文件 |
+| GET | `/api/reports/{id}/trusted-entry` | 强制重新校验完整汇报入口文件并写回可信状态 |
 | POST | `/api/report-page-candidates/{id}/adopt` | 采纳候选页面并同步到最新汇报 |
 
 ### 6.1 原数据链路接口
@@ -303,6 +340,8 @@ Tauri 原生层使用 `tauri-plugin-global-shortcut` 注册 `Option + Command + 
 
 前端当前主素材库使用 `page_size=30`，采用滚动加载下一批；工作台每类只拉取前 8 条作为概览样本。素材查询统一按最近业务活动时间倒序返回：汇报取编辑/更新，页面取编辑、版本或引用更新，资源取新增、编辑、复用或版本更新。该顺序由 `ASSET_ACTIVITY_SQL` 统一计算，API 和前端不得再次按标题或创建时间覆盖排序。
 
+列表加载状态必须区分 `loading` 与 `empty`。请求开始时才显示加载提示；成功响应且 `assets=[]` 后立即进入空状态，停止加载动画，不因统计值为 `0` 重试请求。该逻辑位于共享 React 前端，浏览器、Docker 与 macOS WebView 使用同一实现。
+
 ### 6.3 外部资源导入
 
 `POST /api/import-tasks` 支持资源素材页的“导入外部资源”入口。
@@ -332,10 +371,12 @@ sequenceDiagram
   API->>FS: 保存原始文件
   API->>FS: 解压到 extracted/upload_id
   API->>API: 识别 report/control/resource
-  API->>DB: 写入 assets
-  API->>DB: 写入 report_page_slots
-  API->>FS: 生成缩略图
+  API->>DB: 单一短事务写入 assets/page_slots/关系
+  API->>DB: 提交发布事务
+  API->>FS: 生成一张代表缩略图
   API->>UI: 返回任务成功和可预览资产
+  UI->>API: 浏览页面列表
+  API->>FS: 按可见页面懒生成其余缩略图
 ```
 
 ## 8. 预览一致性
@@ -350,13 +391,18 @@ sequenceDiagram
 - 汇报和页面平台查看器的外层预览容器固定为 `1920×1080` 逻辑画布，使用 `contain` 计算 iframe 显示区域；来源素材的 `preview_meta.width/height` 只用于裸来源 HTML、资源预览和尺寸版本生成，不能再次缩放统一查看器。`ResizeObserver` 驱动尺寸重算，避免轮询和重复加载。
 - 对固定尺寸来源 HTML，Preview Shell 必须以检测到的来源逻辑画布宽高创建内层 viewport，并对该 viewport 应用单一 `transform: scale()`；不得只放大 iframe 外框，否则会产生左上角内容和大面积空白。来源比例为 16:9 时缩放后应填满标准容器。
 - 无法可靠检测逻辑画布时，预览壳以 iframe 文档根节点的 `scrollWidth/scrollHeight` 与 `getBoundingClientRect()` 进行一次性握手测量；测量失败回退 16:9，并记录预览诊断结果供数据走查。
-- 汇报页槽写入前执行 `report_canvas_normalize`：读取当前汇报的目标逻辑画布（默认 `1920×1080`，或来源汇报已声明的尺寸）与页面素材的逻辑画布。两者不一致时，生成新的 `control` 资产版本和派生 HTML，而不是在查看器中强行拉伸；新版本沿用原 `version_group`，设置原素材为 `version_parent_id`，记录 `target_report_id`、`target_canvas_width`、`target_canvas_height`、`normalization_source_id` 和生成指纹。
+- 汇报页槽写入前执行 `report_canvas_normalize`：目标逻辑画布固定为 `1920×1080`。来源页面尺寸不一致时生成新的 `control` 资产版本和派生 HTML，而不是在查看器中强行拉伸；派生版本成为当前展示版本，原始版本保留在同一版本链中，并记录目标汇报、目标画布、来源版本和生成指纹。
 - 同一来源版本、同一目标画布、同一派生策略的适配结果必须幂等复用，避免重复导入或重复编排生成多个等价版本。汇报槽只引用适配后的版本；原页面素材、其资源、历史链接和其他汇报的引用不得被改写或删除。
 - 页码胶囊、全屏、复制当前页链接、刷新均为外层控件。Preview Shell 固定输出 `.fullscreen-page` 图标按钮，使用 Fullscreen API 对 `document.documentElement` 进入或退出全屏，并在 `fullscreenchange` 时同步按钮的标题和 `aria-label`；不得提供平台放大/缩小、滚轮缩放或画布拖拽；刷新只重载当前 iframe，复制使用当前页的真实预览 URL。
 - 键盘事件仅在预览壳获得焦点时响应，避免干扰素材库搜索与弹窗输入框。
 - 嵌入预览统一携带 `embed=1` 标记。服务端不得向带该标记的来源页注入复制/刷新工具；Preview Shell 是唯一的工具栏渲染者。
 - 故事线来源汇报同样读取统一编排查看器并携带 `embed=1`，避免故事线弹窗内出现第二套页面工具。
 - `report_canvas.py` 生成的尺寸包装页以包装文件为基准计算源页面相对 URL。该 URL 必须同时支持 HTTP `/extracted/...` 托管和 Chromium `file://` 缩略图截图；启动归一化会修复当前页槽及历史 `report_page_normalizations` 记录中的旧绝对地址，并为改写文件重新排队生成缩略图。
+- 外部多页 HTML 由 `generated_external_report_page_items()` 拆分时，先通过 `detect_preview_dimensions()` 识别原生逻辑画布并生成忠实的来源页；发布阶段再为非标准来源页生成 `1920×1080` 当前版本。同一汇报的拆分页共享一个来源画布基准，且平台查看器只缩放标准版本一次。
+- 生成页的 `<base href>` 使用生成页目录到原汇报入口目录的真实相对路径计算，并对 URL 路径段编码；禁止使用 `../../` 等固定层级。导入发布前递归验证生成页的 CSS、JavaScript、图片、字体、视频和 iframe 资源闭包。
+- 实时公开页保留来源内容动效，不注入全局 `animation: none` 或 `transition: none`；仅将当前根页面设置为可见。缩略图渲染使用 `prefers-reduced-motion` 与足够的虚拟时间等待最终状态，两条链路互不改写来源 HTML。
+- `generate_html_thumbnail()` 优先且唯一使用可用的 Chromium 读取当前 HTML；只有环境完全没有 Chromium 时才允许系统 HTML 渲染器参与，素材包内的 `preview.png`、`cover.png` 等缓存图片永不参与。Chromium 使用独立临时 profile 和固定 device scale；macOS 中即使进程延迟退出，只要截图已经完整写入也按图片质量继续校验。输出必须同时通过低方差、正文亮区、“等比内嵌画布”黑边三项门禁；仅有背景渐变、动画正文尚未出现、裁切或二次缩放的结果一律删除并重试，不能写入成功指纹。已有页面创建汇报时，`register_created_report_pages()` 直接将 `source_control_id` 写入页槽；汇报缩略图从当前第一页实时生成并绑定稳定公开入口指纹。
+- 缩略图元数据 `THUMBNAIL_META_VERSION=4`；指纹必须包含当前 HTML 路径、大小和修改时间。API 不允许仅凭旧图片时间较新就补写新指纹。存量和未来当前版本均以 `1920×1080` 为平台标准，历史原版仅在版本链中保留。
 - 对可识别的来源内置导航，嵌入层在不改写源文件的前提下添加隔离样式，隐藏常见的页码、上一页/下一页、轮播和全屏控制节点；多页来源由解析结果拆成平台页面序列，统一由 Preview Shell 切换 iframe URL。
 - “打开链接”由资产预览路由处理，返回 Preview Shell；原始 `/extracted/...` 地址只作为嵌入和原始文件访问地址，不在平台操作中直接作为用户预览入口。
 - 如果 `upload_id/source_path` 对应文件存在，API 返回真实路径。
@@ -384,7 +430,7 @@ sequenceDiagram
 - 相似版本区和并行页面生成区仍保持隐藏，避免干扰主素材管理流程。
 - 原数据链路点击后调用 `/api/assets/{id}/lineage`。
 - 双抽屉在详情弹窗内展开：左侧展示关联数据列表，右侧展示选中项详情和预览。
-- 标签编辑、资源筛选、分页和导入任务浮窗均使用 React state 管理。导入任务关闭状态以设备级 `localStorage` 保存任务 ID 与关闭时间水位线；不写入共享服务端，避免一个用户关闭任务影响其他组织成员。
+- 标签编辑、资源筛选、分页和导入任务浮窗均使用 React state 管理。导入任务关闭状态以设备级 `localStorage` 保存任务 ID 与关闭时间水位线；不写入共享服务端，避免一个用户关闭任务影响其他组织成员。服务断线使用独立 UI 状态并持续重连，服务重启后的遗留任务由后端统一标记中断。
 
 注意：
 - API 请求统一走 `frontend/src/api.ts`，不要在组件中散落 `fetch()`。

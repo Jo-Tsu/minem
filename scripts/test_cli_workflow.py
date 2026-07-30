@@ -78,6 +78,8 @@ def main() -> int:
         page_a = root / "page-a.html"
         page_b = root / "page-b.html"
         page_c = root / "page-c.html"
+        generated_spec = root / "generated-page.json"
+        generated_html = root / "generated-page.html"
         case_doc = root / "case.md"
         page_a.write_text(page_html("AI 创建页面素材", "模型生成页面，MineM 负责入库与追溯。", "#07111f"), encoding="utf-8")
         page_b.write_text(page_html("AI 管理汇报", "模型可以创建并编排完整汇报。", "#101827"), encoding="utf-8")
@@ -85,6 +87,21 @@ def main() -> int:
         case_doc.write_text(
             "# 制造业协同案例\n\n## 挑战\n页面重复且来源难追踪。\n\n"
             "## 方案\n通过 MineM 和 CLI 创建、管理并编排素材。\n",
+            encoding="utf-8",
+        )
+        generated_spec.write_text(
+            json.dumps(
+                {
+                    "eyebrow": "AI 页面生成",
+                    "title": "结构化内容生成标准 HTML 页面",
+                    "subtitle": "页面构建、校验和导入共用一条正式链路。",
+                    "bullets": ["固定 1920×1080", "自包含 HTML", "导入后返回 CTRL 编号"],
+                    "metrics": [{"value": "1 条", "label": "正式发布链路"}],
+                    "layout": "metrics",
+                    "theme": "dark",
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
 
@@ -95,7 +112,8 @@ def main() -> int:
 
         capabilities = invoke(base_url, config, "agent", "capabilities")
         names = {item["name"] for item in capabilities["data"]["capabilities"]}
-        assert {"page.import", "report.create", "report.page.add", "report.page.replace"} <= names
+        assert {"page.build", "page.import", "report.create", "report.page.add", "report.page.replace"} <= names
+        assert invoke(base_url, config, "agent", "schema", "page.build")["data"]["schema"]["type"] == "object"
         assert invoke(base_url, config, "agent", "schema", "report.page.add")["data"]["schema"]["type"] == "object"
 
         invoke(base_url, config, "config", "set", "output", "table")
@@ -105,6 +123,23 @@ def main() -> int:
         first = import_page(base_url, config, page_a, "AI 创建页面素材")
         second = import_page(base_url, config, page_b, "AI 管理汇报")
         replacement = import_page(base_url, config, page_c, "版本与来源")
+        built = invoke(
+            base_url,
+            config,
+            "page",
+            "build",
+            "--spec",
+            str(generated_spec),
+            "--file",
+            str(generated_html),
+            "--publish",
+            "--wait",
+        )
+        assert generated_html.is_file(), built
+        assert built["data"]["canvas"] == {"width": 1920, "height": 1080}, built
+        assert built["data"]["published"] is True, built
+        assert built["resource"]["type"] == "page" and built["resource"]["code"].startswith("CTRL-"), built
+        assert_url(built["links"]["preview"])
 
         case_result = invoke(
             base_url,

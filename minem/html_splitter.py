@@ -218,13 +218,17 @@ def detect_report_page_count(source, *, read_json_file, safe_int):
         html = source.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return 0
-    iframe_count = len(re.findall(r"<iframe\b", html, re.IGNORECASE))
-    if iframe_count:
-        return iframe_count
+    slide_frames = re.findall(
+        r'<(?:div|section|article)\b(?=[^>]*class=["\'][^"\']*\bslide-frame\b[^"\']*["\'])[^>]*>',
+        html,
+        re.IGNORECASE,
+    )
+    if slide_frames:
+        return len(slide_frames)
     return len(extract_page_nodes(html))
 
 
-def extract_head(html):
+def extract_head(html, canvas_width=1920, canvas_height=1080):
     match = re.search(r"<head\b[^>]*>.*?</head>", html, re.IGNORECASE | re.DOTALL)
     if match:
         head = match.group(0)
@@ -232,21 +236,16 @@ def extract_head(html):
         head = '<head><meta charset="utf-8"></head>'
     control_style = """
 <style>
-  html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  html, body { margin: 0; width: __CANVAS_WIDTH__px; height: __CANVAS_HEIGHT__px; background: #000; overflow: hidden; }
   .material-control-stage {
     position: fixed;
     top: 0;
     left: 0;
-    right: 0;
-    bottom: auto;
-    width: 1280px;
-    height: 720px;
-    max-width: 100vw;
-    max-height: 100vh;
-    max-height: 100dvh;
+    width: __CANVAS_WIDTH__px;
+    height: __CANVAS_HEIGHT__px;
     overflow: hidden;
     background: #000;
-    --fs-scale: 0.6666667;
+    --fs-scale: 1;
   }
   .material-control-stage > .deck[data-material-control-deck] {
     position: absolute !important;
@@ -258,8 +257,8 @@ def extract_head(html):
   .material-control-stage > .deck[data-material-control-deck] .slide-frame {
     position: absolute !important;
     inset: 0 !important;
-    width: 100% !important;
-    height: 100% !important;
+    width: __CANVAS_WIDTH__px !important;
+    height: __CANVAS_HEIGHT__px !important;
     aspect-ratio: auto !important;
   }
   .material-control-stage .slide-frame:first-child,
@@ -273,25 +272,20 @@ def extract_head(html):
     top: 0 !important;
     left: 0 !important;
     margin: 0 !important;
-    width: 1920px !important;
-    height: 1080px !important;
-    transform: scale(var(--fs-scale, 0.6666667)) translateZ(0) !important;
+    width: __CANVAS_WIDTH__px !important;
+    height: __CANVAS_HEIGHT__px !important;
+    transform: none !important;
     transform-origin: top left !important;
   }
-  .material-control-stage .slide-frame.is-current .slide,
-  .material-control-stage .slide-frame.is-current .slide * {
-    animation: none !important;
-    transition: none !important;
-  }
   /* Decks that use fs-reveal start direct slide children at opacity: 0.
-     A standalone material deliberately disables motion, so restore their
-     final visual state instead of leaving the page body transparent. */
+     Restore their visible state for standalone pages while allowing nested
+     source animations to run normally in the real report viewer. */
   .material-control-stage .slide-frame.is-current .slide > * {
     opacity: 1 !important;
     transform: none !important;
   }
 </style>
-"""
+""".replace("__CANVAS_WIDTH__", str(int(canvas_width))).replace("__CANVAS_HEIGHT__", str(int(canvas_height)))
     return head.replace("</head>", f"{control_style}</head>", 1)
 
 
@@ -313,10 +307,10 @@ def extract_body_scripts(html):
     return "\n".join(filtered)
 
 
-def build_control_html(report_html, page_html, title):
+def build_control_html(report_html, page_html, title, canvas_width=1920, canvas_height=1080):
     lang_match = re.search(r"<html\b[^>]*lang=[\"']([^\"']+)[\"']", report_html, re.IGNORECASE)
     lang = lang_match.group(1) if lang_match else "zh-CN"
-    head = extract_head(report_html)
+    head = extract_head(report_html, canvas_width, canvas_height)
     scripts = extract_body_scripts(report_html)
     page_html = re.sub(r'(<(?:div|section|article)\b[^>]*class=["\'][^"\']*\bslide-frame\b)([^"\']*)(["\'])', r'\1 is-current\2\3', page_html, count=1, flags=re.IGNORECASE)
     return f"""<!doctype html>

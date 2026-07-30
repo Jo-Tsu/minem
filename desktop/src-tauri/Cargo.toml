@@ -1,6 +1,6 @@
 [package]
 name = "minem-desktop"
-version = "0.5.0"
+version = "0.5.0-alpha.28"
 description = "MineM macOS desktop client"
 license = "Apache-2.0"
 repository = "https://github.com/Jo-Tsu/minem"
@@ -10,6 +10,13 @@ edition = "2021"
 tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.0.0", features = ["tray-icon"] }
+fs2 = "0.4"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.0.0", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 url = "2.5"

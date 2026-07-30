@@ -111,9 +111,8 @@ def sync_report_package_resources(
             if report_code not in usage:
                 usage = f"{usage}；复用到汇报素材 {report_code}".strip("；")
             conn.execute(
-                "update assets set tags = ?, usage = ?, updated_at = ? where id = ?",
+                "update assets set usage = ?, updated_at = ? where id = ?",
                 (
-                    ",".join(merge_tags(content_existing["tags"], tag_text, ["复用资源"])),
                     usage,
                     now_ms(),
                     content_existing["id"],
@@ -131,7 +130,7 @@ def sync_report_package_resources(
             on conflict(id) do update set
               title=excluded.title,
               usage=excluded.usage,
-              tags=excluded.tags,
+              tags=assets.tags,
               media_kind=excluded.media_kind,
               resource_kind=excluded.resource_kind,
               source_type=excluded.source_type,

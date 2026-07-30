@@ -73,25 +73,37 @@ export function ImportDialog({ mode, close, startImport }: {
   );
 }
 
-export function ImportTaskDock({ tasks, dismissTask }: { tasks: ImportTask[]; dismissTask: (taskId: string) => void }) {
+export function ImportTaskDock({ tasks, dismissTask, retryTask, connectionLost = false }: {
+  tasks: ImportTask[];
+  dismissTask: (taskId: string) => void;
+  retryTask: (taskId: string) => void;
+  connectionLost?: boolean;
+}) {
   if (!tasks.length) return null;
   return (
     <aside className="import-task-dock">
-      <header><strong>导入任务</strong><span>{tasks.filter(isActiveImportTask).length} 个进行中</span></header>
+      <header><strong>导入任务</strong><span>{connectionLost ? "连接中断" : `${tasks.filter(isActiveImportTask).length} 个进行中`}</span></header>
       {tasks.slice(0, 6).map((task) => (
         <article key={task.id} className={`task-card is-${task.status}`}>
           <header>
             {(() => {
+              if (connectionLost && isActiveImportTask(task)) {
+                return <span><AlertCircle size={13} />连接中断</span>;
+              }
               const meta = importStatusMeta(task.status);
               const Icon = meta.icon;
               return <span><Icon size={13} />{meta.label}</span>;
             })()}
             <strong>{task.fileName || "导入文件"}</strong>
-            {!isActiveImportTask(task) ? <button className="task-dismiss" type="button" onClick={() => dismissTask(task.id)} title="关闭导入任务" aria-label="关闭导入任务"><X size={13} /></button> : null}
+            {(!isActiveImportTask(task) || connectionLost) ? <button className="task-dismiss" type="button" onClick={() => dismissTask(task.id)} title="关闭导入任务" aria-label="关闭导入任务"><X size={13} /></button> : null}
           </header>
-          <small>{task.message || task.error || "等待处理"}</small>
+          <small>{connectionLost && isActiveImportTask(task) ? "正在重新连接本机服务" : task.message || task.error || "等待处理"}</small>
           <div><i style={{ width: `${Math.max(4, Math.min(100, Number(task.progress || 0)))}%` }} /></div>
-          <footer><span>{task.status === "success" ? `成功 ${task.assetCount || 0} 个` : task.status === "failed" ? task.error || "失败" : `${task.progress || 0}%`}</span>{task.previewUrl ? <a href={task.previewUrl} target="_blank" rel="noreferrer">预览</a> : null}</footer>
+          <footer>
+            <span>{connectionLost && isActiveImportTask(task) ? "等待恢复" : task.status === "success" ? `成功 ${task.assetCount || 0} 个` : task.status === "failed" ? task.error || "失败" : `${task.progress || 0}%`}</span>
+            {task.status === "failed" && !connectionLost ? <button type="button" onClick={() => retryTask(task.id)}>重试</button> : null}
+            {task.previewUrl ? <a href={task.previewUrl} target="_blank" rel="noreferrer">预览</a> : null}
+          </footer>
         </article>
       ))}
     </aside>

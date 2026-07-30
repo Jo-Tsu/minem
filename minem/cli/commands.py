@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from minem.html_page_builder import HtmlPageBuildError, build_page_file
+
 from . import SCHEMA_VERSION
 from .config import config_path, load_config, runtime_details, set_value, unset_value
 from .contracts import CliError, EXIT_CONFIRMATION, absolute_url, normalize_asset
@@ -252,6 +254,36 @@ def import_material(ctx: CommandContext, args, expected_type: str) -> dict:
     return {"task": task, "asset": resource, "reused": bool(created.get("reused")), "warnings": warnings}
 
 
+def page_build(ctx: CommandContext, args) -> dict:
+    try:
+        output, spec = build_page_file(Path(args.spec), Path(args.html_file) if args.html_file else None)
+    except HtmlPageBuildError as error:
+        raise CliError("INVALID_ARGUMENT", str(error), exit_code=2) from error
+    result = {
+        "file": str(output),
+        "canvas": {"width": 1920, "height": 1080},
+        "published": False,
+        "spec": {
+            "title": spec["title"],
+            "layout": spec["layout"],
+            "theme": spec["theme"],
+        },
+    }
+    if not args.publish:
+        return result
+    original_source = getattr(args, "source", None)
+    try:
+        args.source = str(output)
+        args.name = args.name or spec["title"]
+        args.description = args.description or f"MineM HTML page build: {spec['title']}"
+        imported = import_material(ctx, args, "page")
+    finally:
+        args.source = original_source
+    imported.update(result)
+    imported["published"] = True
+    return imported
+
+
 def case_import(ctx: CommandContext, args) -> dict:
     source = _source(args)
     if source.suffix.lower() not in {".md", ".markdown", ".txt"}:
@@ -416,6 +448,7 @@ CAPABILITIES = [
     {"name": "asset.delete", "mutates": True, "confirmation": True, "dryRun": True},
     {"name": "import.report", "input": "HTML or ZIP", "async": True},
     {"name": "import.page", "input": "HTML or ZIP", "async": True},
+    {"name": "page.build", "input": "MineM page JSON specification", "produces": "Self-contained 1920x1080 HTML", "mutates": False, "publishOptional": True},
     {"name": "page.import", "input": "HTML or ZIP", "async": True},
     {"name": "case.import", "input": "Markdown or TXT", "aiGenerated": False},
     {"name": "task.list", "readOnly": True},
@@ -442,6 +475,16 @@ SCHEMAS = {
     "report.create": {"required": ["name", "page"], "properties": {"name": {"type": "string"}, "page": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "note": {"type": "string"}}},
     "report.export": {"required": ["report"], "properties": {"report": {"type": "string"}, "format": {"enum": ["html", "pdf"]}, "destination": {"type": "string"}, "wait": {"type": "boolean"}}},
     "page.import": {"required": ["source"], "properties": {"source": {"type": "string"}, "name": {"type": "string"}, "wait": {"type": "boolean"}}},
+    "page.build": {
+        "required": ["spec"],
+        "properties": {
+            "spec": {"type": "string", "description": "Local JSON page specification"},
+            "file": {"type": "string", "description": "Generated HTML destination"},
+            "publish": {"type": "boolean", "description": "Import the generated page into MineM"},
+            "name": {"type": "string"},
+            "wait": {"type": "boolean"},
+        },
+    },
     "case.import": {"required": ["source"], "properties": {"source": {"type": "string"}, "name": {"type": "string"}, "industry": {"type": "string"}, "wait": {"type": "boolean"}}},
 }
 

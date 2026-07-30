@@ -235,7 +235,6 @@ def run_compat_migrations(conn):
     conn.execute("create index if not exists idx_report_page_normalizations_control on report_page_normalizations(normalized_control_id)")
     conn.execute("update assets set asset_type = 'report' where asset_type = 'page'")
     conn.execute("update assets set asset_code = replace(asset_code, 'PAGE-', 'RPT-') where asset_code like 'PAGE-%'")
-    conn.execute("update assets set tags = replace(tags, '页面素材', '汇报素材') where tags like '%页面素材%'")
     legacy_storyline_outputs = """
         select output_report_id
         from report_storyline_collections

@@ -13,7 +13,7 @@
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/Jo-Tsu/minem/codeql.yml?branch=main&label=CodeQL&style=flat-square)](https://github.com/Jo-Tsu/minem/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/github/license/Jo-Tsu/minem?style=flat-square)](LICENSE)
 
-[中文](#中文) · [English](#english) · [快速开始](#五分钟开始使用) · [文档](docs/README.md) · [参与贡献](CONTRIBUTING.md)
+[中文](#中文) · [English](#english) · [快速开始](#五分钟开始使用) · [使用指南](docs/USER_GUIDE.md) · [文档](docs/README.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -26,6 +26,15 @@ MineM is a local-first, open-source presentation material platform. It turns
 complete reports, individual pages, cases, and media resources into connected
 assets that teams can reuse, trace, version, arrange, and export. Any AI agent
 that can run shell commands can use the JSON CLI to create and manage material.
+
+> **完整开源 / Fully open source**
+>
+> Web 平台、Python 服务、CLI、Agent Skills、macOS 客户端和创作助手均包含在本
+> 仓库中，并按 Apache-2.0 开放。没有许可证密钥、隐藏的私有服务或付费功能门槛。
+>
+> The Web platform, Python service, CLI, Agent Skills, macOS client, and
+> Creator Assistant are all included under Apache-2.0. There is no license key,
+> hidden private service, or paid feature gate.
 
 ```mermaid
 flowchart LR
@@ -54,9 +63,9 @@ Agent，都可以调用同一套能力：
 # 安装正式 CLI；轻量启动脚本也会自动完成这一步
 python3 -m pip install --no-deps -e .
 
-# 1. AI 生成单页 HTML 后，导入并命名页面素材；等待真实入库完成
-minem page import ./generated-page.html \
-  --name "客户案例：交付成果" --wait --output json
+# 1. AI 生成页面 JSON 规范，MineM 构建自包含 HTML 并正式入库
+minem page build --spec ./customer-value.json \
+  --file ./customer-value.html --publish --wait --output json
 
 # 2. 用多个页面素材创建一份完整汇报
 minem report create --name "2026 制造业解决方案" \
@@ -80,9 +89,15 @@ minem case import ./customer-story.md \
 汇报的操作。命令中的素材引用既可以使用内部 ID，也可以使用公开编号或 MineM 链接。
 原始页面和旧版本不会因插入、替换或移出汇报而被删除。
 
-完整命令边界见 [MineM CLI 能力范围](docs/MineM_CLI_能力范围.md)。这套端到端链路
-已经进入 GitHub CI，每次提交都会真实创建页面与案例、生成汇报、插入和替换页面，
-并验证正式预览链接。
+完整命令边界见 [MineM CLI 能力范围](docs/MineM_CLI_能力范围.md)。仓库同时提供
+[页面生成 Skill](skills/minem-html-page/SKILL.md)、
+[汇报工作流 Skill](skills/minem-report-workflow/SKILL.md) 和
+[案例素材 Skill](skills/minem-case-material/SKILL.md)，供 Codex 或其他 Agent
+创建并管理页面、汇报和案例。macOS 创作助手按场景复制带有待填写信息的短模板；
+固定 Skill 负责维护分类、版本、幂等和验收规则。不支持 Skill 机制的 AI 需要先
+加载仓库提供的 Skill，且必须具备本机 Shell 执行能力。
+这套端到端链路已经进入 GitHub CI，每次提交都会真实创建页面与案例、生成汇报、
+插入和替换页面，并验证正式预览链接。
 
 ### 为什么需要 MineM
 
@@ -135,7 +150,7 @@ MineM 不是另一套 PPT 绘图工具，也不是把所有页面重新截图保
 | 汇报编排 | 调整顺序、批量插入或隐藏页面，确认后应用到真实汇报链接 |
 | 导出交付 | 导出可独立打开的 HTML 包或等待页面稳定后的 PDF |
 | 数据治理 | 检查重复、失效路径、错误层级、缺失资源和异常预览 |
-| 桌面入口 | 提供 macOS 客户端与快捷浮窗源码，网页和客户端均可使用 |
+| 桌面入口 | 提供 macOS 客户端与无输入场景指令浮窗，指令可粘贴到任意可执行命令的 AI 产品 |
 
 ### 五分钟开始使用
 
@@ -175,6 +190,25 @@ npm ci
 npm run build
 python3 server.py
 ```
+
+### macOS 客户端也是开源源码
+
+`desktop/` 不是只包含一个封装页面，而是包含完整的 Tauri + Rust 客户端实现：
+本地服务启动与复用、浏览器式标签与导航、真实链接打开、刷新与复制链接、平台唤起、
+系统剪贴板、创作助手、可拖动快捷浮窗、原生桥接、测试和打包脚本都可以审查和修改。
+
+在 Apple Silicon Mac 上从源码构建：
+
+```bash
+# 需要 Xcode Command Line Tools、Rust stable、Python 3.12 和 Node.js
+npm ci
+npm --prefix desktop ci
+npm run desktop:build
+```
+
+构建会先生成本机 sidecar、运行 JavaScript 与 Rust 测试，再产出 `.app` 和 DMG。
+安装包、sidecar 和构建缓存是可复现产物，因此不会提交进 Git；源码和必要图标会提交。
+完整说明见[开源说明与客户端构建](docs/OPEN_SOURCE_RELEASE.md)。
 
 ### 数据与隐私
 
@@ -239,9 +273,9 @@ run shell commands can use the same workflow:
 # Install the official command; the lightweight launcher also does this
 python3 -m pip install --no-deps -e .
 
-# Import and name an AI-generated page, then wait for the final asset
-minem page import ./generated-page.html \
-  --name "Customer outcome" --wait --output json
+# Build a self-contained HTML page from an agent-authored JSON spec and publish it
+minem page build --spec ./customer-value.json \
+  --file ./customer-value.html --publish --wait --output json
 
 # Create a report from existing page material codes
 minem report create --name "2026 Manufacturing Solution" \
@@ -266,9 +300,16 @@ minem case import ./customer-story.md \
 references accept internal IDs, public codes, or MineM URLs. Insert, replace,
 and remove-from-report operations never delete source pages or old versions.
 
-See the [MineM CLI capability scope](docs/MineM_CLI_能力范围.md). The complete
-workflow runs in GitHub CI and creates pages, case material, and a report before
-testing insert, replace, and the final public preview.
+See the [MineM CLI capability scope](docs/MineM_CLI_能力范围.md), or use the
+repository's [HTML page skill](skills/minem-html-page/SKILL.md),
+[report workflow skill](skills/minem-report-workflow/SKILL.md), and
+[case material skill](skills/minem-case-material/SKILL.md). The macOS creator
+assistant copies short, fill-in-the-blank scenario prompts. Stable Skills keep
+classification, version, idempotency, and acceptance rules out of the prompt
+surface. AI products without a native Skill mechanism must load the repository
+Skill first and be able to execute local shell commands. The complete workflow
+runs in GitHub CI and creates pages, case material, and a report before testing
+insert, replace, and the final public preview.
 
 ### Why MineM
 
@@ -364,6 +405,29 @@ npm ci
 npm run build
 python3 server.py
 ```
+
+### The macOS client is open source too
+
+`desktop/` is more than a hosted WebView wrapper. It contains the complete
+Tauri and Rust implementation for local-service startup and reuse,
+browser-style tabs and navigation, real-link opening, refresh and copy-link
+actions, platform activation, system clipboard access, the Creator Assistant,
+its draggable quick-command window, native bridges, tests, and packaging
+scripts.
+
+Build it on an Apple Silicon Mac:
+
+```bash
+# Requires Xcode Command Line Tools, Rust stable, Python 3.12, and Node.js
+npm ci
+npm --prefix desktop ci
+npm run desktop:build
+```
+
+The build creates the local sidecar, runs JavaScript and Rust tests, and then
+packages the app and DMG. Installers, sidecars, and build caches are
+reproducible outputs and are not committed; all source and required icons are.
+See the [open-source and desktop build guide](docs/OPEN_SOURCE_RELEASE.md).
 
 ### Data and privacy
 

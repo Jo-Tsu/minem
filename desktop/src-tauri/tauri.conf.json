@@ -1,12 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MineM",
-  "version": "0.5.0",
+  "version": "0.5.0-alpha.28",
   "identifier": "com.minem.materialos",
   "build": {
     "frontendDist": "../ui"
   },
   "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [],
     "security": {
       "csp": null
@@ -17,8 +19,14 @@
     "targets": [
       "app"
     ],
-    "externalBin": [
-      "binaries/minem-server"
-    ]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": {
+      "binaries/sidecar": "sidecar"
+    }
   }
 }

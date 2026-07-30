@@ -16,6 +16,7 @@ import mimetypes
 import os
 import queue
 import re
+import runpy
 import secrets
 import shutil
 import socket
@@ -27,6 +28,11 @@ import time
 import zipfile
 
 from minem.assets import list_assets_response
+from minem.asset_deletion import (
+    AssetDeletionError,
+    apply_asset_deletion_plan,
+    build_asset_deletion_plan,
+)
 from minem.agent import AgentRuntime
 from minem.case_groups import load_case_groups
 from minem.db import connect_database, ensure_asset_schema, initialize_database
@@ -71,6 +77,7 @@ from minem.tag_tasks import (
     public_task as public_tag_analysis_task,
     run_task as run_tag_analysis_task_record,
 )
+from minem.tag_taxonomy import TAG_DIMENSION, taxonomy_payload, validate_tags
 from minem.report_exports import ReportExportTaskStore
 from minem.lineage import (
     asset_lineage_details as build_asset_lineage_details,
@@ -136,7 +143,6 @@ from minem.thumbnails import (
     chrome_path as preview_chrome_path,
     detect_html_dimensions as detect_preview_dimensions,
     generate_html_thumbnail as render_html_thumbnail,
-    save_contained_thumbnail as render_contained_thumbnail,
 )
 from minem.upload_safety import UploadLimitError, copy_limited_stream, safe_extract_zip, validate_upload_request_size
 
@@ -179,7 +185,7 @@ REPORT_EXPORT_TASK_STORE = ReportExportTaskStore(DB_PATH)
 AGENT_RUNTIME = AgentRuntime(ROOT, DATA)
 AI_PRESENTER_VERSION = "edgetts5"
 AI_PRESENTER_TEMPLATE = ROOT / "templates" / "ai-presenter.html"
-THUMBNAIL_META_VERSION = 2
+THUMBNAIL_META_VERSION = 4
 TEMP_REPORT_TTL_MS = 60 * 60 * 1000
 TEMP_REPORT_STALE_MS = 15 * 1000
 TEMP_REPORT_SESSIONS = {}
@@ -426,8 +432,8 @@ def split_tags(value):
     return tagging_split_tags(value)
 
 
-# The former flat tag field mixed system metadata, import state, and business
-# semantics. Keep it disabled until the governed taxonomy migration lands.
+# The former flat tag inference mixed system metadata, import state, and
+# business semantics. It stays disabled after the governed taxonomy launches.
 LEGACY_TAGS_ENABLED = False
 
 
@@ -477,55 +483,25 @@ def infer_tags_from_text(text):
 
 
 def ai_tag_assets(asset_type="control"):
-    if not LEGACY_TAGS_ENABLED:
-        return {
-            "ok": False,
-            "error": "旧标签体系已停用，等待新标签体系启用后再执行自动标注",
-            "updated": 0,
-            "scanned": 0,
-            "assetType": asset_type,
-        }
-    where = ""
-    params = []
-    if asset_type != "all":
-        where = " where asset_type = ?"
-        params.append(asset_type)
-    updated = 0
     with db() as conn:
-        rows = conn.execute(f"select * from assets{where}", params).fetchall()
-        for row in rows:
-            item = dict(row)
-            new_title = row["title"]
-            new_kind = row["resource_kind"] or ""
-            if row["asset_type"] == "resource":
-                path = asset_library_path(row) or Path(row["source_path"] or row["title"] or "")
-                new_kind = resource_kind_for(path, row["media_kind"], row["title"], row["tags"])
-                item["resource_kind"] = new_kind
-                new_title, seeded_tags = apply_company_logo_metadata(
-                    row["title"],
-                    ",".join(merge_tags(row["tags"], [RESOURCE_KINDS.get(new_kind, new_kind)])),
-                    row["source_path"],
-                    row["usage"],
-                    new_kind,
-                )
-                item["title"] = new_title
-                item["tags"] = seeded_tags
-            inferred = infer_tags(item)
-            suggested = suggest_material_tags(item) if row["asset_type"] == "resource" else []
-            merged = normalize_role_tags(
-                merge_tags(item.get("tags") or row["tags"], inferred, suggested),
-                row["asset_type"],
-                new_kind,
-                " ".join([new_title or "", row["source_path"] or ""]),
-            )
-            tag_text = ",".join(merged)
-            if tag_text != (row["tags"] or "") or new_kind != (row["resource_kind"] or "") or new_title != row["title"]:
-                conn.execute(
-                    "update assets set title = ?, resource_kind = ?, tags = ?, tag_seeded = 1, updated_at = ? where id = ?",
-                    (new_title, new_kind, tag_text, now_ms(), row["id"]),
-                )
-                updated += 1
-    return {"ok": True, "updated": updated, "scanned": len(rows), "assetType": asset_type}
+        if asset_type == "all":
+            rows = conn.execute("select id from assets order by updated_at desc, created_at desc").fetchall()
+        elif asset_type in {"control", "report", "resource"}:
+            rows = conn.execute(
+                "select id from assets where asset_type=? order by updated_at desc, created_at desc",
+                (asset_type,),
+            ).fetchall()
+        else:
+            return {"ok": False, "error": "素材类型无效", "updated": 0, "scanned": 0}
+    ids = [row["id"] for row in rows]
+    result = create_tag_analysis_task(
+        ids,
+        trigger_type="manual",
+        scope_type=asset_type,
+        apply_mode="confirmed",
+    )
+    result.update({"scanned": len(ids), "updated": 0, "assetType": asset_type})
+    return result
 
 
 def date_key():
@@ -581,7 +557,7 @@ def suggest_material_tags(asset_or_text, resource_kind=""):
 
 def apply_company_logo_metadata(title, tags, source_path="", usage="", resource_kind=""):
     if not LEGACY_TAGS_ENABLED:
-        return title, ""
+        return title, str(tags or "")
     return tagging_apply_company_logo_metadata(
         title,
         tags,
@@ -706,6 +682,9 @@ def init_db():
     )
     REPORT_EXPORTS.mkdir(parents=True, exist_ok=True)
     REPORT_EXPORT_TASK_STORE.ensure_schema()
+    interrupted_imports = IMPORT_TASK_STORE.recover_interrupted()
+    if interrupted_imports:
+        print(f"Recovered {interrupted_imports} interrupted import task(s)")
     with db() as conn:
         ensure_tag_task_schema(conn)
     # Reports are served through a stable public entry.  It composes their
@@ -764,9 +743,8 @@ PREVIEW_EMBED_STYLE = """
   [data-minem-page-tools], [data-slide-navigation], [data-deck-navigation] {
     display: none !important;
   }
-  /* Split page exports use a 1280x720 staging wrapper inside a 1920x1080
-     iframe. Let the platform canvas own the sizing so the page is not
-     letterboxed a second time inside the report viewer. */
+  /* Let the platform canvas own the embedding viewport so source pages are
+     not letterboxed a second time inside the report viewer. */
   html, body { width: 100% !important; height: 100% !important; }
   .material-control-stage {
     width: 100vw !important;
@@ -797,6 +775,18 @@ def thumbnail_meta_path(asset_id):
 
 
 def local_html_preview_path(data):
+    data = dict(data)
+    upload_id = str(data.get("upload_id") or "").strip()
+    source_path = str(data.get("source_path") or "").strip()
+    if upload_id and source_path:
+        upload_path = (EXTRACTED / upload_id / source_path).resolve()
+        if (
+            is_path_within(upload_path, EXTRACTED)
+            and upload_path.exists()
+            and upload_path.is_file()
+            and upload_path.suffix.lower() in {".html", ".htm"}
+        ):
+            return upload_path
     preview_url = canonical_preview_url(data)
     if not preview_url.startswith("/"):
         return None
@@ -816,7 +806,7 @@ def thumbnail_source_fingerprint(data):
     data = dict(data)
     preview_url = canonical_preview_url(data)
     parts = [
-        "thumb-v2",
+        "thumb-v4",
         str(data.get("source_hash") or ""),
         str(preview_url or ""),
         str(data.get("source_path") or ""),
@@ -893,11 +883,11 @@ def thumbnail_meta_matches(asset_id, source_fingerprint=""):
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return True
+        return False
     if int(meta.get("version") or 0) != THUMBNAIL_META_VERSION:
         return False
     stored = str(meta.get("sourceFingerprint") or "")
-    return not stored or stored == source_fingerprint
+    return stored == source_fingerprint
 
 
 def write_thumbnail_meta(asset_id, source_fingerprint=""):
@@ -932,14 +922,6 @@ def asset_thumbnail_url(data):
     if url:
         return url
     html_path = local_html_preview_path(data)
-    thumb = thumbnail_path(data["id"])
-    if html_path and thumb.exists():
-        try:
-            if thumb.stat().st_mtime_ns >= html_path.stat().st_mtime_ns:
-                write_thumbnail_meta(data["id"], fingerprint)
-                return thumbnail_url(data["id"], fingerprint)
-        except OSError:
-            pass
     if html_path and data.get("media_kind") == "html":
         enqueue_thumbnail_refresh(data["id"], html_path, fingerprint)
     return ""
@@ -1039,6 +1021,12 @@ def backfill_resource_kinds(conn):
         if not path:
             path = Path(row["source_path"] or row["title"] or "")
         kind = resource_kind_for(path, row["media_kind"], row["title"], row["tags"])
+        if not LEGACY_TAGS_ENABLED:
+            conn.execute(
+                "update assets set resource_kind=? where id=?",
+                (kind, row["id"]),
+            )
+            continue
         tags = normalize_role_tags(
             merge_tags(row["tags"], [RESOURCE_KINDS.get(kind, kind)]),
             row["asset_type"],
@@ -1143,82 +1131,90 @@ def asset_library_path(asset):
 
 
 def reclassify_single_page_report_assets():
-    """A one-page upload is a reusable page material, never a report card."""
+    """Remove inferred one-page report wrappers without duplicating their page."""
     timestamp = now_ms()
+    cleanup_results = []
     with db() as conn:
         candidates = conn.execute(
             """
             select asset.* from assets asset
-            where (
-                asset.asset_type = 'report'
-                and not exists (
-                  select 1 from report_page_slots slot
-                  where slot.report_id = asset.id and slot.control_id <> ''
-                )
-              ) or (
-                asset.asset_type = 'control'
-                and asset.source_type = 'single-page-reclassified'
-              )
+            where asset.asset_type = 'report'
             order by asset.created_at, asset.id
             """
         ).fetchall()
-        known_controls = conn.execute(
-            """
-            select * from assets
-            where asset_type = 'control' and source_type <> 'single-page-reclassified'
-            order by case when version_parent_id = '' then 0 else 1 end, created_at, id
-            """
-        ).fetchall()
-        content_index = {}
-        for control in known_controls:
-            control_path = asset_library_path(control)
-            if control_path and control_path.exists():
-                try:
-                    content_index.setdefault(file_hash(control_path), control)
-                except OSError:
-                    continue
         for asset in candidates:
+            # Historical repair is intentionally conservative. A report with
+            # missing slots may be temporarily incomplete or awaiting a sync;
+            # it must never be reclassified from a heuristic page count alone.
+            if asset["source_type"] != "report-material-sync":
+                continue
             source = asset_library_path(asset)
             if not source or source.suffix.lower() not in {'.html', '.htm'}:
                 continue
-            if asset["asset_type"] == 'report' and detect_report_page_count(source) > 1:
+            slots = conn.execute(
+                """
+                select slot.*, control.id control_exists
+                from report_page_slots slot
+                left join assets control
+                  on control.id = slot.control_id and control.asset_type = 'control'
+                where slot.report_id = ? and slot.control_id <> ''
+                order by slot.page_number
+                """,
+                (asset["id"],),
+            ).fetchall()
+            if len(slots) != 1 or not slots[0]["control_exists"]:
                 continue
-            try:
-                same_content = content_index.get(file_hash(source))
-            except OSError:
-                same_content = None
-            code = asset["asset_code"] if asset["asset_type"] == 'control' else next_asset_code(conn, "control", "page", "html")
-            tags = merge_tags(
-                asset["tags"],
-                ["页面素材", "单页素材", "导入分类修复"],
-            )
-            tags = [tag for tag in tags if tag not in {"汇报素材", "完整汇报", "HTML 汇报"}]
-            group_id = same_content["version_group"] or same_content["id"] if same_content else (asset["version_group"] or asset["id"])
-            parent_id = same_content["id"] if same_content else (asset["version_parent_id"] or "")
-            version_no = next_asset_version_no(conn, group_id) if same_content and asset["version_group"] != group_id else (asset["version_no"] or 1)
+            if detect_report_page_count(source) != 1:
+                continue
+
+            linked_control = conn.execute(
+                "select * from assets where id = ? and asset_type = 'control'",
+                (slots[0]["control_id"],),
+            ).fetchone()
+            if not linked_control:
+                continue
+            report_title = clean_report_title(asset["title"])
             conn.execute(
                 """
                 update assets
-                set asset_type = 'control', category = 'page', asset_code = ?,
-                    usage = ?, tags = ?, source_type = 'single-page-reclassified',
-                    version_group = ?, version_no = ?, version_parent_id = ?,
-                    similarity_score = ?, similarity_method = ?,
+                set title = ?, usage = ?, source_type = 'single-page-import',
                     updated_at = ?
                 where id = ?
                 """,
                 (
-                    code,
-                    "单页 HTML 导入，已自动归类为页面素材。",
-                    ",".join(tags),
-                    group_id,
-                    version_no,
-                    parent_id,
-                    1.0,
-                    "single-page-reclassified-version" if same_content else "single-page-reclassified",
-                    timestamp,
-                    asset["id"],
+                    report_title,
+                    "单页 HTML 导入，已归类为页面素材。",
+                    max(timestamp, int(asset["updated_at"] or 0)),
+                    linked_control["id"],
                 ),
             )
+            plan = build_asset_deletion_plan(conn, asset["id"])
+            result = apply_asset_deletion_plan(conn, plan, timestamp=timestamp)
+            cleanup_results.append(result)
+            if conn.execute(
+                "select 1 from sqlite_master where type = 'table' and name = 'import_tasks'"
+            ).fetchone():
+                conn.execute(
+                    """
+                    update import_tasks
+                    set asset_id = ?, asset_code = ?, asset_title = ?, asset_type = 'control',
+                        preview_url = ?, message = '导入完成，已归类为页面素材', updated_at = ?
+                    where upload_id = ?
+                    """,
+                    (
+                        linked_control["id"],
+                        linked_control["asset_code"],
+                        report_title,
+                        canonical_preview_url(linked_control),
+                        timestamp,
+                        asset["upload_id"],
+                    ),
+                )
+    for result in cleanup_results:
+        cleanup_deleted_asset_files(result)
+    if cleanup_results:
+        invalidate_stats_cache()
+    return len(cleanup_results)
 
 
 def safe_download_name(value):
@@ -1277,9 +1273,8 @@ def insert_control_resource_assets(conn, extract_root, upload_id, control, descr
         ).fetchone()
         if existing:
             conn.execute(
-                "update assets set tags = ?, usage = ?, updated_at = ? where id = ?",
+                "update assets set usage = ?, updated_at = ? where id = ?",
                 (
-                    ",".join(merge_tags(existing["tags"], tag_text, ["复用资源"])),
                     existing["usage"] if control["asset_code"] in (existing["usage"] or "") else f"{existing['usage']}；复用到页面素材 {control['asset_code']}",
                     now_ms(),
                     existing["id"],
@@ -2109,13 +2104,98 @@ def control_public_url(control_id):
     return f"/pages/{quote(control_id, safe='')}/index.html"
 
 
+def control_source_doc(control):
+    """Return the Feishu source link declared by a case control manifest.
+
+    The page wrapper is the common viewing surface for controls, so resolving
+    this once here keeps every Feishu case page consistent without changing
+    the authored 16:9 source files.
+    """
+    candidates = []
+    path = local_html_preview_path(control)
+    if path:
+        manifest_path = path.parent / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manifest = {}
+            candidates.extend([
+                manifest.get("sourceDoc"),
+                manifest.get("sourceUrl"),
+                manifest.get("source_document"),
+                (manifest.get("ai") or {}).get("sourceUrl"),
+            ])
+    # CLI-published pages are imported as standalone HTML files, so there is
+    # no adjacent case manifest. Preserve the same source-copy affordance by
+    # accepting a Feishu/Lark URL embedded in the asset description.
+    keys = set(control.keys()) if hasattr(control, "keys") else set()
+    if "description" in keys:
+        candidates.append(control["description"])
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not value:
+            continue
+        urls = re.findall(r"https?://[^\s<>'\"]+", value)
+        for url in urls or [value]:
+            clean_url = url.rstrip(".,;，。；)")
+            if "larkoffice.com/" in clean_url or ".feishu.cn/" in clean_url or "larksuite.com/" in clean_url:
+                return clean_url
+    return ""
+
+
+def available_case_groups():
+    """Load visible case groups once for both the API and case-only viewer."""
+    roots, _, _ = load_import_sources()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            select * from assets
+            where asset_type in ('report', 'control') and version_parent_id = ''
+            order by updated_at desc, created_at desc, asset_code desc
+            """
+        ).fetchall()
+        asset_by_code = {}
+        for row in rows:
+            code = row["asset_code"] or ""
+            if code and code not in asset_by_code:
+                asset_data = dict(row)
+                asset_by_code[code] = {
+                    "title": row["title"],
+                    "previewUrl": canonical_preview_url(row),
+                    "thumbnailUrl": asset_thumbnail_url(asset_data),
+                    "updatedAt": row["updated_at"],
+                }
+        resource_paths = [
+            f"{row['source_path']} {row['preview_url']}"
+            for row in conn.execute(
+                "select source_path, preview_url from assets where asset_type = 'resource' and version_parent_id = ''"
+            ).fetchall()
+        ]
+    return load_case_groups(EXTRACTED, roots, asset_by_code, resource_paths)
+
+
 def report_public_page_items(report_id):
     """Return the current visible arrangement for the public report entry."""
     result = report_arrangement_payload(report_id)
     if not result.get("ok"):
         return result, []
+    control_ids = [page["id"] for page in result["pages"] if not page["hidden"]]
+    with db() as conn:
+        tagged_controls = {
+            row["id"]: row["tags"] or ""
+            for row in conn.execute(
+                f"select id, tags from assets where id in ({','.join('?' for _ in control_ids)})",
+                control_ids,
+            ).fetchall()
+        } if control_ids else {}
     page_items = [
-        {"title": page["title"], "code": page["code"], "src": page["previewUrl"]}
+        {
+            "title": page["title"],
+            "code": page["code"],
+            "src": page["previewUrl"],
+            "isDirectory": "汇报目录" in tagged_controls.get(page["id"], ""),
+        }
         for page in result["pages"] if not page["hidden"]
     ]
     return result, page_items
@@ -2438,7 +2518,7 @@ def validate_report_trusted_entry(conn, report_id, refresh=False):
 
 def validate_report_trusted_entry_by_id(report_id):
     with db() as conn:
-        return validate_report_trusted_entry(conn, report_id)
+        return validate_report_trusted_entry(conn, report_id, refresh=True)
 
 
 def sync_report_index_from_slots(conn, report_id, page_numbers=None, change_note="同步当前页到最新汇报 index"):
@@ -2509,14 +2589,19 @@ def sync_report_index_from_slots(conn, report_id, page_numbers=None, change_note
         """,
         (
             read_text_sample(source),
-            f"/extracted/{report['upload_id']}/{rel}",
+            f"/reports/{report['id']}/index.html",
             source_hash,
             timestamp,
             report["id"],
         ),
     )
     try:
-        generate_html_thumbnail(report["id"], source, source_hash)
+        updated_report = conn.execute("select * from assets where id = ?", (report["id"],)).fetchone()
+        generate_html_thumbnail(
+            report["id"],
+            source,
+            thumbnail_source_fingerprint(updated_report) if updated_report else source_hash,
+        )
     except Exception:
         pass
     trusted_entry = validate_report_trusted_entry(conn, report_id, refresh=True)
@@ -2955,6 +3040,11 @@ def inject_html_base_href(document, href):
     return document
 
 
+def external_report_page_base_href(report_html_path, generated_page_path):
+    relative = os.path.relpath(report_html_path.parent, generated_page_path.parent)
+    return quote(relative.replace(os.sep, "/").rstrip("/") + "/", safe="/._-")
+
+
 def generated_external_report_page_items(extract_root, manifest, manifest_kind):
     if manifest_kind != "html-report":
         return []
@@ -2968,6 +3058,9 @@ def generated_external_report_page_items(extract_root, manifest, manifest_kind):
     page_spans = split_page_node_spans(report_html)
     if not page_spans:
         return []
+    canvas_width, canvas_height = detect_preview_dimensions(report_html_path)
+    if not canvas_width or not canvas_height:
+        canvas_width, canvas_height = 1920, 1080
     deck_slides, deck_by_key, index_slides, index_by_key = load_deck_slides(extract_root)
     generated_root = Path(extract_root) / "_minem_pages"
     items = []
@@ -2975,7 +3068,11 @@ def generated_external_report_page_items(extract_root, manifest, manifest_kind):
         title = external_report_page_title(page_number, page_node, deck_slides, deck_by_key, index_slides, index_by_key)
         rel = f"_minem_pages/page-{page_number:03d}/index.html"
         target = generated_root / f"page-{page_number:03d}" / "index.html"
-        page_html = inject_html_base_href(split_control_html(report_html, page_node, title), "../../")
+        base_href = external_report_page_base_href(report_html_path, target)
+        page_html = inject_html_base_href(
+            split_control_html(report_html, page_node, title, canvas_width, canvas_height),
+            base_href,
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             current = target.read_text(encoding="utf-8") if target.exists() else ""
@@ -3046,20 +3143,10 @@ def next_report_revision_code(conn, desired_code):
 
 
 def copy_package_preview_thumbnail(asset_id, extract_root, preview_rel, html_path, source_fingerprint=""):
-    preview_path = extract_root / preview_rel if preview_rel else None
-    if preview_path and preview_path.exists() and preview_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-        output_path = THUMBNAILS / f"{asset_id}.png"
-        try:
-            if Image:
-                render_contained_thumbnail(preview_path, output_path, html_path, image_module=Image)
-            else:
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(preview_path, output_path)
-            write_thumbnail_meta(asset_id, source_fingerprint)
-            return True
-        except Exception:
-            pass
-    return generate_html_thumbnail(asset_id, html_path, source_fingerprint)
+    # Thumbnail rendering must never run inside the import transaction. The
+    # post-commit preview phase renders a representative card; remaining pages
+    # are generated lazily when their list is opened.
+    return False
 
 
 def sync_report_package_resources(conn, upload_id, extract_root, report_code, report_title):
@@ -3163,6 +3250,48 @@ def get_import_task(task_id):
     return get_import_task_record(IMPORT_TASK_STORE, task_id)
 
 
+def retry_import_task(task_id):
+    task = IMPORT_TASK_STORE.get(task_id, include_private=True)
+    if not task:
+        return {"ok": False, "error": "任务不存在"}, 404
+    if task["status"] in {"queued", "running"}:
+        return {"ok": False, "error": "任务仍在处理中"}, 409
+    stored_record = str(task.get("storedPath") or "").strip()
+    stored_path = Path(stored_record)
+    if not stored_path.is_absolute():
+        stored_path = RUNTIME_ROOT / stored_path
+    stored_path = stored_path.resolve()
+    if not is_path_within(stored_path, UPLOADS) or not stored_path.is_file():
+        return {"ok": False, "error": "原始导入文件已失效，请重新选择文件"}, 410
+    upload_id = str(task.get("uploadId") or "").strip()
+    original = str(task.get("fileName") or stored_path.name).strip() or stored_path.name
+    if not upload_id:
+        return {"ok": False, "error": "任务缺少导入批次信息，请重新选择文件"}, 409
+    updated = update_import_task(
+        task_id,
+        status="queued",
+        progress=4,
+        message="等待重新导入",
+        error="",
+        fileCount=0,
+        assetCount=0,
+        thumbnailCount=0,
+        assetId="",
+        assetCode="",
+        assetTitle="",
+        assetType="",
+        previewUrl="",
+    )
+    worker = threading.Thread(
+        target=run_import_task,
+        args=(task_id, str(stored_path), original, upload_id, "", file_hash(stored_path)),
+        name=f"minem-import-retry-{task_id}",
+        daemon=True,
+    )
+    worker.start()
+    return {"ok": True, "task": updated}, 202
+
+
 def start_tag_analysis_task(task_id):
     threading.Thread(
         target=run_tag_analysis_task_record,
@@ -3172,9 +3301,9 @@ def start_tag_analysis_task(task_id):
     ).start()
 
 
-def create_tag_analysis_task(asset_ids, trigger_type="manual", scope_type="assets"):
+def create_tag_analysis_task(asset_ids, trigger_type="manual", scope_type="assets", apply_mode="suggestions"):
     with db() as conn:
-        result = create_tag_analysis_task_record(conn, asset_ids, trigger_type, scope_type)
+        result = create_tag_analysis_task_record(conn, asset_ids, trigger_type, scope_type, apply_mode)
         if result.get("ok"):
             task = conn.execute("select * from tag_analysis_tasks where id = ?", (result["taskId"],)).fetchone()
             result["task"] = public_tag_analysis_task(task)
@@ -3316,7 +3445,13 @@ def generate_upload_thumbnails(upload_id):
     created = 0
     with db() as conn:
         rows = conn.execute(
-            "select id, source_path, preview_url, source_hash from assets where upload_id = ? and asset_type in ('report', 'control')",
+            """
+            select id, source_path, preview_url, source_hash, asset_type
+            from assets
+            where upload_id = ? and asset_type in ('report', 'control')
+            order by case asset_type when 'report' then 0 else 1 end, created_at, id
+            limit 1
+            """,
             (upload_id,),
         ).fetchall()
     upload_root = (EXTRACTED / upload_id).resolve()
@@ -3406,44 +3541,43 @@ def auto_import_sources():
     )
 
 
-def delete_library_file(asset, conn=None):
-    upload_id = asset["upload_id"]
-    source_path = asset["source_path"]
-    if not upload_id or not source_path:
-        return False
-    if conn is not None:
-        references = conn.execute(
-            """
-            select count(*) from assets
-            where upload_id = ? and source_path = ? and id <> ?
-            """,
-            (upload_id, source_path, asset["id"]),
-        ).fetchone()[0]
-        if references:
-            return False
-    path = (EXTRACTED / upload_id / source_path).resolve()
-    if not is_path_within(path, EXTRACTED):
-        return False
-    if path.exists() and path.is_file():
-        path.unlink()
-        return True
-    return False
+def cleanup_deleted_asset_files(result):
+    removed = False
+    paths = set()
+    for item in result.get("source_files", []):
+        paths.add((EXTRACTED / item["upload_id"] / item["source_path"]).resolve())
+    for item in result.get("history_rows", []):
+        if item.get("snapshot_path"):
+            paths.add((EXTRACTED / item["snapshot_path"]).resolve())
+        paths.add((THUMBNAILS / f"{item['id']}.png").resolve())
+    for target_id in result.get("target_ids", []):
+        paths.add((THUMBNAILS / f"{target_id}.png").resolve())
+    for item in result.get("export_rows", []):
+        if item.get("output_path"):
+            export_path = Path(item["output_path"]).resolve()
+            if is_path_within(export_path, REPORT_EXPORTS):
+                paths.add(export_path)
 
-
-def delete_asset_history_files(conn, asset_ids):
-    if not asset_ids:
-        return
-    placeholders = ",".join("?" for _ in asset_ids)
-    rows = conn.execute(f"select id, snapshot_path from asset_history where asset_id in ({placeholders})", asset_ids).fetchall()
-    for row in rows:
-        if row["snapshot_path"]:
-            path = (EXTRACTED / row["snapshot_path"]).resolve()
-            if is_path_within(path, EXTRACTED) and path.exists() and path.is_file():
+    for path in paths:
+        if not (
+            is_path_within(path, EXTRACTED)
+            or is_path_within(path, THUMBNAILS)
+            or is_path_within(path, REPORT_EXPORTS)
+        ):
+            continue
+        if path.exists() and path.is_file():
+            try:
                 path.unlink()
-        thumb = THUMBNAILS / f"{row['id']}.png"
-        if thumb.exists() and thumb.is_file():
-            thumb.unlink()
-    conn.execute(f"delete from asset_history where asset_id in ({placeholders})", asset_ids)
+                removed = True
+            except OSError:
+                continue
+
+    for upload_id in result.get("empty_created_uploads", []):
+        upload_root = (EXTRACTED / upload_id).resolve()
+        if is_path_within(upload_root, EXTRACTED) and upload_root.exists():
+            shutil.rmtree(upload_root, ignore_errors=True)
+            removed = True
+    return removed
 
 
 def refresh_upload_count(conn, upload_id):
@@ -3451,33 +3585,6 @@ def refresh_upload_count(conn, upload_id):
         return
     count = conn.execute("select count(*) from assets where upload_id = ?", (upload_id,)).fetchone()[0]
     conn.execute("update uploads set asset_count = ? where id = ?", (count, upload_id))
-
-
-def cleanup_empty_created_upload(conn, upload_id):
-    if not upload_id or not str(upload_id).startswith("created-report-"):
-        return False
-    count = conn.execute("select count(*) from assets where upload_id = ?", (upload_id,)).fetchone()[0]
-    if count:
-        return False
-    conn.execute("delete from uploads where id = ?", (upload_id,))
-    upload_root = (EXTRACTED / upload_id).resolve()
-    if is_path_within(upload_root, EXTRACTED) and upload_root.exists():
-        shutil.rmtree(upload_root, ignore_errors=True)
-    return True
-
-
-def delete_asset_thumbnail(asset_id):
-    thumb = THUMBNAILS / f"{asset_id}.png"
-    if thumb.exists() and thumb.is_file():
-        thumb.unlink()
-        return True
-    return False
-
-
-
-
-
-
 
 
 def version_candidate_path(row):
@@ -3674,17 +3781,28 @@ def normalize_tag_payload(value):
 
 
 def update_asset_tags(asset_id, tags):
-    if not LEGACY_TAGS_ENABLED:
-        return {"ok": False, "error": "旧标签体系已停用，暂不支持编辑标签"}
-    normalized = normalize_tag_payload(tags)
+    incoming = tags if isinstance(tags, list) else [
+        tag.strip().strip("#")
+        for tag in re.split(r"[,，、;；\n]+", str(tags or ""))
+        if tag.strip()
+    ]
+    normalized = validate_tags(incoming)
+    invalid = [str(tag).strip() for tag in incoming if str(tag).strip() not in normalized]
+    if invalid:
+        return {"ok": False, "error": f"包含不在受控词表中的标签：{', '.join(invalid[:6])}"}
     with db() as conn:
+        ensure_tag_task_schema(conn)
         asset = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
         if not asset:
             return {"ok": False, "error": "素材不存在"}
-        conn.execute(
-            "update assets set tags = ?, tag_seeded = 1, updated_at = ? where id = ?",
-            (",".join(normalized), now_ms(), asset_id),
-        )
+        timestamp = now_ms()
+        conn.execute("delete from asset_tags where asset_id=?", (asset_id,))
+        for tag in normalized:
+            conn.execute("""insert into asset_tags(
+              asset_id,tag,dimension,source,confidence,evidence_json,confirmed_at,updated_at
+            ) values (?,?,?,'manual',1,'[]',?,?)""",
+              (asset_id, tag, TAG_DIMENSION[tag], timestamp, timestamp))
+        conn.execute("update assets set tags=?, tag_seeded=1 where id=?", (",".join(normalized), asset_id))
         row = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
         updated = add_version_counts(conn, [row])[0]
     return {"ok": True, "asset": updated}
@@ -4063,6 +4181,8 @@ def report_viewer_html(title, page_items, release_url=""):
             "title": page_title,
             "code": item.get("code") or "",
             "src": item.get("src") or "",
+            "sourceDoc": item.get("sourceDoc") or "",
+            "isDirectory": bool(item.get("isDirectory")),
             "role": "cover" if index == 1 else "content",
         })
     if not pages:
@@ -4090,10 +4210,17 @@ def report_viewer_html(title, page_items, release_url=""):
     .page-tools {{ position: fixed; top: 24px; right: 24px; display: inline-flex; gap: 8px; padding: 6px; border: 1px solid rgba(153,180,209,.34); border-radius: 10px; background: rgba(2,5,12,.72); }}
     .tool-btn {{ width: 36px; height: 36px; border: 0; border-radius: 7px; color: #fff; background: transparent; font-size: 19px; line-height: 1; cursor: pointer; }}
     .tool-btn:hover {{ background: rgba(255,255,255,.12); }}
-    .copy-page {{ position: relative; font-size: 0; }}
+    .tool-btn svg {{ display: block; width: 20px; height: 20px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }}
+    .toc-page {{ color: #8cecff; }}
+    .toc-page[hidden] {{ display: none; }}
+    .copy-page, .copy-source {{ position: relative; font-size: 0; }}
     .copy-page::before, .copy-page::after {{ content: ""; position: absolute; width: 11px; height: 12px; border: 1.5px solid currentColor; border-radius: 2px; }}
     .copy-page::before {{ left: 10px; top: 9px; opacity: .72; }}
     .copy-page::after {{ left: 14px; top: 13px; background: #02050c; }}
+    .copy-source::before {{ content: "↗"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 21px; font-weight: 800; }}
+    .copy-source[hidden] {{ display: none; }}
+    .copy-tip {{ position: fixed; top: 78px; right: 24px; z-index: 4; padding: 8px 12px; border: 1px solid rgba(114,213,255,.55); border-radius: 8px; background: rgba(12,38,65,.96); color: #b8ebff; font-size: 13px; font-weight: 800; opacity: 0; transform: translateY(-6px); pointer-events: none; transition: opacity .16s ease,transform .16s ease; }}
+    .copy-tip.is-visible {{ opacity: 1; transform: translateY(0); }}
     html[data-embed="1"] .page-tools {{ display: none; }}
     @media (max-width: 720px) {{ .page-tools {{ top: 12px; right: 12px; }} .page-pill {{ bottom: 12px; }} }}
   </style>
@@ -4101,7 +4228,8 @@ def report_viewer_html(title, page_items, release_url=""):
 <body>
   <main class="viewer" aria-label="{safe_title}">
     <div class="slide-viewport"><section class="slide-shell"><iframe class="deck-frame" title="Page 01" src=""></iframe></section></div>
-    <div class="page-tools" aria-label="页面工具"><button class="tool-btn copy-page" type="button" title="复制当前页链接" aria-label="复制当前页链接"></button><button class="tool-btn refresh-page" type="button" title="刷新当前页" aria-label="刷新当前页">↻</button><button class="tool-btn fullscreen-page" type="button" title="全屏" aria-label="全屏">⛶</button></div>
+    <div class="page-tools" aria-label="页面工具"><button class="tool-btn toc-page" type="button" title="返回目录" aria-label="返回目录" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"></path></svg></button><button class="tool-btn copy-page" type="button" title="复制当前页链接" aria-label="复制当前页链接"></button><button class="tool-btn copy-source" type="button" title="复制原始飞书文档链接" aria-label="复制原始飞书文档链接" hidden></button><button class="tool-btn refresh-page" type="button" title="刷新当前页" aria-label="刷新当前页">↻</button><button class="tool-btn fullscreen-page" type="button" title="全屏" aria-label="全屏">⛶</button></div>
+    <div class="copy-tip" role="status">复制成功</div>
     <div class="page-pill"><button class="nav-btn prev" type="button" aria-label="上一页">‹</button><span class="page-count">1 / 1</span><span>·</span><span class="page-title">Page 01</span><button class="nav-btn next" type="button" aria-label="下一页">›</button></div>
   </main>
   <script>
@@ -4118,14 +4246,43 @@ def report_viewer_html(title, page_items, release_url=""):
     const pageTitle = document.querySelector(".page-title");
     const prevButton = document.querySelector(".prev");
     const nextButton = document.querySelector(".next");
+    const tocButton = document.querySelector(".toc-page");
     const copyButton = document.querySelector(".copy-page");
+    const copySourceButton = document.querySelector(".copy-source");
+    const copyTip = document.querySelector(".copy-tip");
+    let copyTipTimer = 0;
+    function flashCopyTip() {{
+      copyTip.classList.add("is-visible");
+      if (copyTipTimer) window.clearTimeout(copyTipTimer);
+      copyTipTimer = window.setTimeout(() => copyTip.classList.remove("is-visible"), 1000);
+    }}
     const refreshButton = document.querySelector(".refresh-page");
     const fullscreenButton = document.querySelector(".fullscreen-page");
+    const directoryPage = pages.find(page => page.isDirectory) || null;
     function updateDeckScale() {{
       const scale = Math.min((window.innerWidth - 96) / 1920, (window.innerHeight - 72) / 1080, 1);
       document.documentElement.style.setProperty("--deck-scale", String(scale));
     }}
-    function showPage(index) {{
+    function resolvePageIndex(target) {{
+      if (target == null || target === "") return 0;
+      if (/^\\d+$/.test(String(target))) return Math.max(0, Math.min(Number(target), pages.length - 1));
+      const normalized = decodeURIComponent(String(target)).replace(/^page=/, "");
+      const index = pages.findIndex(page => page.id === normalized || page.code === normalized || page.src === normalized || page.title === normalized);
+      return index >= 0 ? index : 0;
+    }}
+    function locationPageTarget() {{
+      const queryTarget = new URLSearchParams(window.location.search).get("page");
+      const hashValue = window.location.hash.replace(/^#/, "");
+      const hashTarget = new URLSearchParams(hashValue).get("page") || hashValue;
+      return queryTarget || hashTarget || "";
+    }}
+    function syncPageUrl(page) {{
+      if (!page || !window.history?.replaceState) return;
+      const url = new URL(window.location.href);
+      url.hash = `page=${{encodeURIComponent(page.code || page.id)}}`;
+      window.history.replaceState(null, "", url);
+    }}
+    function showPage(index, options = {{}}) {{
       currentIndex = Math.max(0, Math.min(index, pages.length - 1));
       const page = pages[currentIndex] || pages[0];
       frame.src = page.src ? `${{page.src}}${{page.src.includes("?") ? "&" : "?"}}embed=1&v=${{Date.now()}}` : "";
@@ -4134,22 +4291,48 @@ def report_viewer_html(title, page_items, release_url=""):
       pageTitle.textContent = page.label;
       prevButton.disabled = currentIndex === 0;
       nextButton.disabled = currentIndex >= pages.length - 1;
+      copySourceButton.hidden = !page.sourceDoc;
+      tocButton.hidden = !directoryPage || page === directoryPage;
+      if (options.syncUrl !== false) syncPageUrl(page);
     }}
     updateDeckScale();
-    showPage(0);
+    showPage(resolvePageIndex(locationPageTarget()));
     window.addEventListener("resize", updateDeckScale);
 	    prevButton.addEventListener("click", () => showPage(currentIndex - 1));
 	    nextButton.addEventListener("click", () => showPage(currentIndex + 1));
+	    tocButton.addEventListener("click", () => {{
+	      if (directoryPage) showPage(pages.indexOf(directoryPage));
+	    }});
+	    window.addEventListener("message", event => {{
+	      if (event.origin !== window.location.origin) return;
+	      if (event.data?.type !== "report:navigate") return;
+	      showPage(resolvePageIndex(event.data.target));
+	    }});
+	    window.addEventListener("hashchange", () => showPage(resolvePageIndex(locationPageTarget()), {{ syncUrl: false }}));
 	    copyButton.addEventListener("click", async () => {{
 	      const page = pages[currentIndex] || pages[0];
-	      if (!page || !page.src) return;
-	      const url = new URL(page.src, window.location.origin).toString();
+	      if (!page) return;
+	      const url = new URL(window.location.href);
+	      url.hash = `page=${{encodeURIComponent(page.code || page.id)}}`;
 	      try {{
-	        await navigator.clipboard.writeText(url);
+	        await navigator.clipboard.writeText(url.toString());
 	        copyButton.setAttribute("data-copied", "true");
-	        window.setTimeout(() => {{ copyButton.removeAttribute("data-copied"); }}, 1200);
+	        flashCopyTip();
+	        window.setTimeout(() => {{ copyButton.removeAttribute("data-copied"); }}, 1000);
 	      }} catch (_) {{
-	        window.prompt("复制当前页链接", url);
+	        window.prompt("复制当前页链接", url.toString());
+	      }}
+	    }});
+	    copySourceButton.addEventListener("click", async () => {{
+	      const page = pages[currentIndex] || pages[0];
+	      if (!page || !page.sourceDoc) return;
+	      try {{
+	        await navigator.clipboard.writeText(page.sourceDoc);
+	        copySourceButton.setAttribute("data-copied", "true");
+	        flashCopyTip();
+	        window.setTimeout(() => {{ copySourceButton.removeAttribute("data-copied"); }}, 1000);
+	      }} catch (_) {{
+	        window.prompt("复制原始飞书文档链接", page.sourceDoc);
 	      }}
 	    }});
 	    refreshButton.addEventListener("click", () => showPage(currentIndex));
@@ -4335,6 +4518,24 @@ def register_created_report_pages(conn, *, report_id, report_code, report_title,
     created = []
     for index, item in enumerate(manifest_pages or [], start=1):
         page_number = created_report_page_number(item.get("display_page") or item.get("page"), index)
+        source_control_id = str(item.get("source_control_id") or "").strip()
+        source_control = None
+        if source_control_id:
+            source_control = conn.execute(
+                "select * from assets where id = ? and asset_type = 'control' limit 1",
+                (source_control_id,),
+            ).fetchone()
+        if source_control:
+            attach_report_page_control(
+                conn,
+                report_id,
+                page_number,
+                source_control["id"],
+                str(item.get("title") or source_control["title"] or "").strip() or f"第{page_number}页",
+                "创建汇报引用已有页面素材",
+                replace=True,
+            )
+            continue
         source_rel = str(item.get("control_path") or item.get("path") or "").strip()
         if not source_rel:
             continue
@@ -4393,15 +4594,6 @@ def register_created_report_pages(conn, *, report_id, report_code, report_title,
     if manifest_pages:
         refresh_upload_count(conn, Path(target_root).name)
     return created
-
-
-def copy_report_thumbnail(source_id, target_id, source_fingerprint=""):
-    source_thumb = THUMBNAILS / f"{source_id}.png"
-    target_thumb = THUMBNAILS / f"{target_id}.png"
-    if source_thumb.exists():
-        target_thumb.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_thumb, target_thumb)
-        write_thumbnail_meta(target_id, source_fingerprint)
 
 
 def control_codes_from_conversation(text):
@@ -4471,7 +4663,6 @@ def create_storyline_report(payload):
       source_hash = f"created-report:{mode}:{digest}"
       tags = merge_tags(["汇报素材", "故事线新增", "独立汇报", asset_code])
       source_path = "index.html"
-      copied_thumbnail_from = ""
       manifest_pages = []
 
       if mode in ("manual", "chat"):
@@ -4535,7 +4726,6 @@ def create_storyline_report(payload):
               "created_at": timestamp,
           }
           (target_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-          copied_thumbnail_from = controls[0]["id"]
           if mode == "chat":
               source_type = "storyline-report-chat"
               tags = merge_tags(tags, ["AI对话创建"])
@@ -4567,7 +4757,6 @@ def create_storyline_report(payload):
               return fail(str(error) or "故事线版本复制失败")
           source_path = source_report["source_path"] or "index.html"
           source_type = "storyline-report-copy"
-          copied_thumbnail_from = source_report["id"]
           tags = merge_tags(tags, [version["code"], f"复制自:{source_report['asset_code']}"])
           usage = f"从故事线 {version['code']} 的 V{version['version_no']} 复制为独立汇报素材。"
           if note:
@@ -4578,10 +4767,18 @@ def create_storyline_report(payload):
       report_file = target_root / source_path
       if not report_file.exists():
           return fail("汇报入口生成失败")
-      preview_url = f"/extracted/{upload_id}/{source_path}"
+      preview_url = f"/reports/{report_id}/index.html"
       conn.execute(
           "insert or replace into uploads (id, filename, stored_path, extract_path, file_count, asset_count, created_at) values (?, ?, ?, ?, ?, ?, ?)",
-          (upload_id, title, str(target_root), str(target_root), sum(1 for path in target_root.rglob("*") if path.is_file()), 1, timestamp),
+          (
+              upload_id,
+              title,
+              runtime_record_path(target_root, RUNTIME_ROOT),
+              runtime_record_path(target_root, RUNTIME_ROOT),
+              sum(1 for path in target_root.rglob("*") if path.is_file()),
+              1,
+              timestamp,
+          ),
       )
       insert_created_report_asset(
           conn,
@@ -4607,12 +4804,41 @@ def create_storyline_report(payload):
               manifest_pages=manifest_pages,
               timestamp=timestamp,
           )
-          for page_id, control in zip(created_page_ids, controls):
-              copy_report_thumbnail(control["id"], page_id, source_hash)
-      copy_report_thumbnail(copied_thumbnail_from, report_id, source_hash)
+      else:
+          created_page_ids = []
+
+      report_row = conn.execute("select * from assets where id = ?", (report_id,)).fetchone()
+      cover_path = None
+      for index, page_id in enumerate(created_page_ids):
+          page_row = conn.execute("select * from assets where id = ?", (page_id,)).fetchone()
+          page_path = asset_library_path(page_row) if page_row else None
+          if not page_path or not page_path.exists():
+              continue
+          page_fingerprint = thumbnail_source_fingerprint(page_row)
+          if index == 0:
+              generate_html_thumbnail(page_id, page_path, page_fingerprint)
+              cover_path = page_path
+          else:
+              enqueue_thumbnail_refresh(page_id, page_path, page_fingerprint)
+
+      if cover_path is None:
+          manifest_file = target_root / "manifest.json"
+          try:
+              copied_manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else {}
+          except (OSError, json.JSONDecodeError):
+              copied_manifest = {}
+          first_page = next(iter(copied_manifest.get("pages") or []), {})
+          first_rel = str(first_page.get("control_path") or first_page.get("path") or first_page.get("src") or "").strip()
+          candidate = (target_root / first_rel).resolve() if first_rel else None
+          if candidate and is_path_within(candidate, target_root.resolve()) and candidate.exists():
+              cover_path = candidate
+
       try:
-          if not (THUMBNAILS / f"{report_id}.png").exists():
-              generate_html_thumbnail(report_id, report_file, source_hash)
+          generate_html_thumbnail(
+              report_id,
+              cover_path or report_file,
+              thumbnail_source_fingerprint(report_row) if report_row else source_hash,
+          )
       except Exception:
           pass
       trusted_entry = validate_report_trusted_entry(conn, report_id, refresh=True)
@@ -5591,6 +5817,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "task": task})
             return
+        case_preview_match = re.fullmatch(r"/case-groups/([^/]+)/index\.html", parsed.path)
+        if case_preview_match:
+            case_code = unquote(case_preview_match.group(1))
+            group = next((item for item in available_case_groups() if item["code"] == case_code), None)
+            if not group:
+                self.send_error(404)
+                return
+            page_items = [
+                {
+                    "title": control["title"],
+                    "code": control["code"],
+                    "src": control["controlUrl"],
+                    "sourceDoc": control.get("sourceUrl") or group.get("sourceDoc") or "",
+                }
+                for control in group["controls"]
+            ]
+            self.send_html(
+                report_viewer_html(group["title"], page_items),
+                cache_control="no-store, max-age=0",
+            )
+            return
         if parsed.path.startswith("/pages/") and parsed.path.endswith("/index.html"):
             control_id = unquote(parsed.path.removeprefix("/pages/").removesuffix("/index.html").strip("/"))
             if not control_id or "/" in control_id:
@@ -5610,6 +5857,7 @@ class Handler(BaseHTTPRequestHandler):
                     "title": control["title"],
                     "code": control["asset_code"],
                     "src": source_url,
+                    "sourceDoc": control_source_doc(control),
                 }]),
                 cache_control="no-store, max-age=0",
             )
@@ -5669,8 +5917,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 group_id = asset["version_group"] or asset["id"]
                 rows = conn.execute(
-                    "select * from assets where version_group = ? order by version_no desc, created_at desc, asset_code desc",
-                    (group_id,),
+                    """
+                    select * from assets
+                    where id = ? or version_group = ?
+                    order by version_no desc, created_at desc, asset_code desc
+                    """,
+                    (group_id, group_id),
                 ).fetchall()
                 assets = add_version_counts(conn, rows)
             self.send_json({"ok": True, "groupId": group_id, "versions": assets})
@@ -5707,33 +5959,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/case-groups":
-            roots, _, _ = load_import_sources()
-            with db() as conn:
-                rows = conn.execute(
-                    """
-                    select * from assets
-                    where asset_type in ('report', 'control') and version_parent_id = ''
-                    order by updated_at desc, created_at desc, asset_code desc
-                    """
-                ).fetchall()
-                asset_by_code = {}
-                for row in rows:
-                    code = row["asset_code"] or ""
-                    if code and code not in asset_by_code:
-                        asset_data = dict(row)
-                        asset_by_code[code] = {
-                            "title": row["title"],
-                            "previewUrl": canonical_preview_url(row),
-                            "thumbnailUrl": asset_thumbnail_url(asset_data),
-                            "updatedAt": row["updated_at"],
-                        }
-                resource_paths = [
-                    f"{row['source_path']} {row['preview_url']}"
-                    for row in conn.execute(
-                        "select source_path, preview_url from assets where asset_type = 'resource' and version_parent_id = ''"
-                    ).fetchall()
-                ]
-            groups = load_case_groups(EXTRACTED, roots, asset_by_code, resource_paths)
+            groups = available_case_groups()
             self.send_json({"ok": True, "caseGroups": groups, "total": len(groups)})
             return
 
@@ -5763,12 +5989,12 @@ class Handler(BaseHTTPRequestHandler):
                     categories=CATEGORIES,
                     asset_types=ASSET_TYPES,
                     resource_kinds=RESOURCE_KINDS,
-                    tag_taxonomy={},
+                    tag_taxonomy=taxonomy_payload(),
                 )
             self.send_json(payload)
             return
         if parsed.path == "/api/tag-taxonomy":
-            self.send_json({"taxonomy": {}, "status": "legacy-tags-disabled"})
+            self.send_json({"ok": True, "taxonomy": taxonomy_payload(), "status": "active"})
             return
         if parsed.path == "/api/tag-analysis/tasks":
             query = parse_qs(parsed.query)
@@ -5912,6 +6138,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/desktop/creator-assistant":
+            executable = Path(os.environ.get(
+                "MINEM_DESKTOP_EXECUTABLE",
+                "/Applications/MineM.app/Contents/MacOS/minem-desktop",
+            )).expanduser()
+            if not executable.is_file():
+                self.send_json({
+                    "ok": False,
+                    "error": "未检测到 MineM 客户端，请先安装 macOS 客户端",
+                }, 409)
+                return
+            try:
+                subprocess.Popen(
+                    [str(executable), "--assistant"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                self.send_json({"ok": False, "error": f"无法打开创作助手：{error}"}, 500)
+                return
+            self.send_json({"ok": True})
+            return
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/exports"):
             report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/exports").strip("/"))
             if not report_id or "/" in report_id:
@@ -5965,7 +6215,7 @@ class Handler(BaseHTTPRequestHandler):
                         payload.get("title", "未命名素材"),
                         category,
                         payload.get("usage", ""),
-                        ",".join(payload.get("tags", [])) if isinstance(payload.get("tags"), list) else payload.get("tags", ""),
+                        "",
                         payload.get("snippet", ""),
                         asset_type,
                         asset_code,
@@ -6004,7 +6254,24 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(asset_ids, list):
                 self.send_json({"ok": False, "error": "assetIds 必须是数组"}, 400)
                 return
-            result = create_tag_analysis_task([str(item) for item in asset_ids if str(item).strip()])
+            scope_type = str(payload.get("scopeType") or "assets")
+            if not asset_ids and scope_type in {"all", "control", "report", "resource"}:
+                with db() as conn:
+                    if scope_type == "all":
+                        rows = conn.execute("select id from assets order by updated_at desc, created_at desc").fetchall()
+                    else:
+                        rows = conn.execute(
+                            "select id from assets where asset_type=? order by updated_at desc, created_at desc",
+                            (scope_type,),
+                        ).fetchall()
+                asset_ids = [row["id"] for row in rows]
+            apply_mode = "confirmed" if payload.get("apply") is True else "suggestions"
+            result = create_tag_analysis_task(
+                [str(item) for item in asset_ids if str(item).strip()],
+                trigger_type="manual",
+                scope_type=scope_type,
+                apply_mode=apply_mode,
+            )
             self.send_json(result, 202 if result.get("ok") else 400)
             return
         if parsed.path == "/api/tag-analysis/scheduled-run":
@@ -6157,6 +6424,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "task": created_task}, 202)
             return
 
+        if parsed.path.startswith("/api/import-tasks/") and parsed.path.endswith("/retry"):
+            task_id = unquote(
+                parsed.path.removeprefix("/api/import-tasks/").removesuffix("/retry").strip("/")
+            )
+            if not task_id or "/" in task_id:
+                self.send_json({"ok": False, "error": "任务地址无效"}, 400)
+                return
+            result, status = retry_import_task(task_id)
+            self.send_json(result, status)
+            return
+
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/arrangement"):
             report_id = parsed.path.removeprefix("/api/reports/").removesuffix("/arrangement").strip("/")
             length = int(self.headers.get("Content-Length", "0"))
@@ -6272,67 +6550,28 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/api/assets/"):
-            asset_id = unquote(parsed.path.removeprefix("/api/assets/").strip())
+            asset_id = unquote(parsed.path.removeprefix("/api/assets/").strip("/"))
             if not asset_id:
                 self.send_json({"ok": False, "error": "缺少素材 ID"}, 400)
                 return
-            with db() as conn:
-                asset = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
-                if not asset:
-                    self.send_json({"ok": False, "error": "素材不存在"}, 404)
-                    return
-                group_id = asset["version_group"] or asset["id"]
-                targets = conn.execute("select * from assets where version_group = ?", (group_id,)).fetchall() if not asset["version_parent_id"] else [asset]
-                target_ids = [target["id"] for target in targets]
-                affected_report_ids = set()
-                if target_ids:
-                    placeholders = ",".join("?" for _ in target_ids)
-                    affected_report_ids.update(
-                        row["report_id"]
-                        for row in conn.execute(
-                            f"select distinct report_id from report_page_slots where control_id in ({placeholders})",
-                            target_ids,
-                        ).fetchall()
-                        if row["report_id"] not in target_ids
-                    )
-                    affected_report_ids.update(
-                        row["report_id"]
-                        for row in conn.execute(
-                            f"select distinct report_id from report_page_candidates where control_id in ({placeholders})",
-                            target_ids,
-                        ).fetchall()
-                        if row["report_id"] not in target_ids
-                    )
-                removed_file = False
-                upload_ids = set()
-                for target in targets:
-                    removed_file = delete_library_file(target, conn) or removed_file
-                    removed_file = delete_asset_thumbnail(target["id"]) or removed_file
-                    if target["upload_id"]:
-                        upload_ids.add(target["upload_id"])
-                conn.executemany("delete from assets where id = ?", [(target["id"],) for target in targets])
-                delete_asset_history_files(conn, [target["id"] for target in targets])
-                conn.executemany("delete from report_page_slots where report_id = ?", [(target["id"],) for target in targets])
-                conn.executemany("delete from report_page_candidates where report_id = ?", [(target["id"],) for target in targets])
-                conn.executemany("delete from report_page_candidates where control_id = ?", [(target["id"],) for target in targets])
-                conn.executemany("delete from report_storyline_collections where source_report_id = ? or output_report_id = ? or target_report_id = ?", [(target["id"], target["id"], target["id"]) for target in targets])
-                conn.executemany(
-                    "update report_page_slots set control_id = '', status = 'planned', updated_at = ? where control_id = ?",
-                    [(now_ms(), target["id"]) for target in targets],
+            try:
+                with db() as conn:
+                    plan = build_asset_deletion_plan(conn, asset_id)
+                    result = apply_asset_deletion_plan(conn, plan, timestamp=now_ms())
+            except AssetDeletionError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), **error.details},
+                    error.status,
                 )
-                for upload_id in upload_ids:
-                    refresh_upload_count(conn, upload_id)
-                    removed_file = cleanup_empty_created_upload(conn, upload_id) or removed_file
-                for report_id in affected_report_ids:
-                    if conn.execute("select 1 from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone():
-                        validate_report_trusted_entry(conn, report_id, refresh=True)
-                invalidate_stats_cache()
+                return
+            removed_file = cleanup_deleted_asset_files(result)
+            invalidate_stats_cache()
             self.send_json({
                 "ok": True,
                 "id": asset_id,
-                "assetCode": asset["asset_code"],
+                "assetCode": result["asset"]["asset_code"],
                 "removedFile": removed_file,
-                "deletedCount": len(targets),
+                "deletedCount": result["deleted_count"],
             })
             return
 
@@ -6405,6 +6644,29 @@ def acquire_instance_lock(host="", port=0):
     INSTANCE_LOCK_HANDLE = handle
 
 
+def start_parent_watchdog(server):
+    """Stop a desktop-managed sidecar when its Tauri parent disappears."""
+    try:
+        parent_pid = int(os.environ.get("MINEM_PARENT_PID", "0"))
+    except ValueError:
+        parent_pid = 0
+    if parent_pid <= 1:
+        return
+
+    def watch():
+        while True:
+            try:
+                os.kill(parent_pid, 0)
+            except ProcessLookupError:
+                server.shutdown()
+                return
+            except PermissionError:
+                pass
+            time.sleep(1)
+
+    threading.Thread(target=watch, name="minem-parent-watchdog", daemon=True).start()
+
+
 def main():
     port = int(os.environ.get("PORT", "8790"))
     host = os.environ.get("HOST", "127.0.0.1")
@@ -6420,10 +6682,34 @@ def main():
         result = auto_import_sources()
         print(f"Auto import: scanned {result['scanned']} files, added {result['assetCount']} assets")
     server = ThreadingHTTPServer((host, port), Handler)
+    start_parent_watchdog(server)
     print(f"Material Library: http://{host}:{port}/")
     print(f"Database: {DB_PATH}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def is_cli_invocation():
+    executable = Path(sys.argv[0]).name.lower()
+    return executable in {"minem", "minem-cli"} or sys.argv[1:2] == ["--cli"]
+
+
+def run_cli():
+    if sys.argv[1:2] == ["--cli"]:
+        del sys.argv[1]
+    cli_script = RESOURCE_ROOT / "scripts" / "minem_cli.py"
+    if not cli_script.is_file():
+        print("MineM CLI 组件缺失，请重新安装客户端", file=sys.stderr)
+        raise SystemExit(2)
+    runpy.run_path(str(cli_script), run_name="__main__")
 
 
 if __name__ == "__main__":
-    main()
+    if is_cli_invocation():
+        run_cli()
+    else:
+        main()

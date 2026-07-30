@@ -27,8 +27,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from PIL import Image
+
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from minem.tag_taxonomy import CONTROLLED_TAGS, FORBIDDEN_TAGS  # noqa: E402
+
 DEFAULT_DB = ROOT / "data" / "materials.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:8790"
 
@@ -81,6 +86,81 @@ def file_sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_preview_url(row: sqlite3.Row) -> str:
+    preview_url = row["preview_url"] or ""
+    if preview_url.startswith(("/extracted/_history/", "/reports/")):
+        return preview_url
+    upload_id = row["upload_id"] or ""
+    source_path = row["source_path"] or ""
+    if upload_id and source_path:
+        source = ROOT / "extracted" / upload_id / source_path
+        if source.exists():
+            return f"/extracted/{upload_id}/{source_path}"
+    return preview_url
+
+
+def thumbnail_source_fingerprint(row: sqlite3.Row) -> str:
+    preview_url = canonical_preview_url(row)
+    parts = [
+        "thumb-v4",
+        str(row["source_hash"] or ""),
+        preview_url,
+        str(row["source_path"] or ""),
+    ]
+    html_path = None
+    if row["upload_id"] and row["source_path"]:
+        candidate = (ROOT / "extracted" / row["upload_id"] / row["source_path"]).resolve()
+        if candidate.is_relative_to(ROOT / "extracted") and candidate.is_file():
+            html_path = candidate
+    if html_path is None and preview_url.startswith("/"):
+        candidate = (ROOT / urlparse(preview_url).path.lstrip("/")).resolve()
+        if candidate.is_relative_to(ROOT) and candidate.is_file():
+            html_path = candidate
+    if html_path and html_path.suffix.lower() in {".html", ".htm"}:
+        stat = html_path.stat()
+        relative = html_path.relative_to(ROOT).as_posix()
+        parts.append(f"file:{relative}:{stat.st_size}:{stat.st_mtime_ns}")
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def thumbnail_has_nested_canvas(path: Path) -> bool:
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+            width, height = image.size
+            mask = image.convert("L").point(lambda value: 255 if value > 5 else 0)
+            bounds = mask.getbbox()
+        if not bounds:
+            return False
+        left, top, right, bottom = bounds
+        content_width = right - left
+        content_height = bottom - top
+        scale_x = content_width / width
+        scale_y = content_height / height
+        return (
+            left <= width * 0.02
+            and top <= height * 0.02
+            and 0.4 < scale_x < 0.96
+            and 0.4 < scale_y < 0.96
+            and abs(scale_x - scale_y) < 0.025
+            and abs((content_width / content_height) - (16 / 9)) < 0.04
+        )
+    except OSError:
+        return False
+
+
+def thumbnail_is_background_only(path: Path) -> bool:
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB").resize((128, 72))
+            pixel_reader = getattr(image, "get_flattened_data", image.getdata)
+            pixels = list(pixel_reader())
+        bright_pixels = sum(1 for pixel in pixels if max(pixel) >= 120)
+        return bright_pixels / max(len(pixels), 1) < 0.0005
+    except OSError:
+        return True
+
+
 def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
     rows = conn.execute("select * from assets order by id").fetchall()
     reports = [row for row in rows if row["asset_type"] == "report"]
@@ -90,6 +170,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
 
     prefix_issues = []
     misplaced_controls = []
+    single_page_reports = []
     missing_previews = []
     blank_previews = []
     by_hash: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
@@ -105,6 +186,17 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
             prefix_issues.append((code, asset_type))
         if asset_type == "report" and (code.startswith("CTRL-") or "_minem_pages/" in (row["source_path"] or "")):
             misplaced_controls.append((code, row["source_path"]))
+        if asset_type == "report":
+            linked_page_count = conn.execute(
+                """
+                select count(distinct control_id)
+                from report_page_slots
+                where report_id = ? and control_id <> ''
+                """,
+                (row["id"],),
+            ).fetchone()[0]
+            if linked_page_count < 2:
+                single_page_reports.append((code, row["title"], linked_page_count, row["source_path"]))
         if asset_type in {"report", "control", "resource"}:
             if not row["preview_url"]:
                 blank_previews.append(code)
@@ -122,8 +214,14 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         reporter.fail("DATA-001", "编号与资产类型不匹配", issues=prefix_issues[:30], total=len(prefix_issues))
     else:
         reporter.passed("DATA-001", "编号与资产类型匹配")
-    if misplaced_controls:
-        reporter.fail("DATA-001A", "页面素材混入汇报列表", issues=misplaced_controls[:30], total=len(misplaced_controls))
+    if misplaced_controls or single_page_reports:
+        reporter.fail(
+            "DATA-001A",
+            "页面素材混入汇报列表",
+            issues=misplaced_controls[:30],
+            singlePageReports=single_page_reports[:30],
+            total=len(misplaced_controls) + len(single_page_reports),
+        )
     else:
         reporter.passed("DATA-001A", "汇报列表未发现页面素材")
     if blank_previews or missing_previews:
@@ -158,6 +256,73 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         )
     else:
         reporter.passed("DATA-002A", "素材依赖审计为只读模式，且无本地断链或分类异常")
+
+    thumbnail_issues = []
+    thumbnail_rows = conn.execute(
+        """
+        select * from assets
+        where version_parent_id = ''
+          and asset_type in ('report', 'control')
+          and media_kind = 'html'
+        order by asset_type, asset_code, id
+        """
+    ).fetchall()
+    for row in thumbnail_rows:
+        thumbnail_path = ROOT / "thumbnails" / f"{row['id']}.png"
+        metadata_path = thumbnail_path.with_suffix(".json")
+        issue = {"assetCode": row["asset_code"], "assetId": row["id"]}
+        if not thumbnail_path.is_file() or not metadata_path.is_file():
+            issue["reason"] = "缩略图或指纹元数据缺失"
+            thumbnail_issues.append(issue)
+            continue
+        try:
+            with Image.open(thumbnail_path) as image:
+                if image.size != (1280, 720):
+                    issue["reason"] = "缩略图画布尺寸错误"
+                    issue["size"] = list(image.size)
+                    thumbnail_issues.append(issue)
+                    continue
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            issue["reason"] = "缩略图或指纹元数据不可读取"
+            issue["error"] = str(error)
+            thumbnail_issues.append(issue)
+            continue
+        if thumbnail_has_nested_canvas(thumbnail_path):
+            issue["reason"] = "缩略图包含二次缩放画布或右侧、底部黑边"
+            thumbnail_issues.append(issue)
+            continue
+        if thumbnail_is_background_only(thumbnail_path):
+            issue["reason"] = "缩略图只包含背景首帧，正文或主要素材未完成渲染"
+            thumbnail_issues.append(issue)
+            continue
+        expected_fingerprint = thumbnail_source_fingerprint(row)
+        if int(metadata.get("version") or 0) != 4 or metadata.get("sourceFingerprint") != expected_fingerprint:
+            issue["reason"] = "缩略图与当前 HTML 指纹不一致"
+            thumbnail_issues.append(issue)
+
+    thumbnail_regression = ROOT / "scripts" / "test_import_pipeline.py"
+    thumbnail_result = subprocess.run(
+        [sys.executable, str(thumbnail_regression)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if thumbnail_issues or thumbnail_result.returncode:
+        reporter.fail(
+            "DATA-003",
+            "缩略图存在缺失、过期、尺寸错误或旧预览复用",
+            issues=thumbnail_issues[:50],
+            total=len(thumbnail_issues),
+            regressionOutput=(thumbnail_result.stdout + thumbnail_result.stderr)[-2000:],
+        )
+    else:
+        reporter.passed(
+            "DATA-003",
+            "当前 HTML 缩略图均为最新 1280×720 单层画布，正文已渲染，且不存在背景首帧、历史预览回退或嵌套缩放黑边",
+            checked=len(thumbnail_rows),
+        )
 
     no_slots = []
     slot_duplicates = []
@@ -225,25 +390,68 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         else:
             reporter.passed("DATA-016", "完整汇报导出任务结构与状态合法")
 
-    legacy_asset_tags = conn.execute(
-        "select asset_code, tags from assets where trim(coalesce(tags, '')) <> '' limit 30"
-    ).fetchall()
+    tag_tables = {
+        row["name"] for row in conn.execute(
+            "select name from sqlite_master where type='table' and name in ('tag_definitions','asset_tags','asset_tag_suggestions')"
+        ).fetchall()
+    }
     legacy_history_tags = conn.execute(
         "select asset_code, tags from asset_history where trim(coalesce(tags, '')) <> '' limit 30"
     ).fetchall()
     legacy_storyline_tags = conn.execute(
         "select code, tags from report_storyline_collections where trim(coalesce(tags, '')) <> '' limit 30"
     ).fetchall()
-    if legacy_asset_tags or legacy_history_tags or legacy_storyline_tags:
+    invalid_cache = []
+    cache_mismatches = []
+    untagged_visible = []
+    invalid_relations = []
+    if {"tag_definitions", "asset_tags", "asset_tag_suggestions"}.issubset(tag_tables):
+        assets = conn.execute("select id,asset_code,tags,version_parent_id from assets").fetchall()
+        relation_rows = conn.execute(
+            "select asset_id,tag,dimension,source from asset_tags order by asset_id,tag"
+        ).fetchall()
+        relation_tags = defaultdict(list)
+        for row in relation_rows:
+            relation_tags[row["asset_id"]].append(row["tag"])
+            if row["tag"] not in CONTROLLED_TAGS or row["tag"] in FORBIDDEN_TAGS:
+                invalid_relations.append(dict(row))
+        for asset in assets:
+            cache = [tag.strip() for tag in (asset["tags"] or "").split(",") if tag.strip()]
+            if any(tag not in CONTROLLED_TAGS or tag in FORBIDDEN_TAGS for tag in cache):
+                invalid_cache.append({"assetCode": asset["asset_code"], "tags": cache})
+            if sorted(cache) != sorted(relation_tags.get(asset["id"], [])):
+                cache_mismatches.append({
+                    "assetCode": asset["asset_code"],
+                    "cache": cache,
+                    "relations": relation_tags.get(asset["id"], []),
+                })
+            if not asset["version_parent_id"] and not cache:
+                untagged_visible.append(asset["asset_code"])
+    if (
+        not {"tag_definitions", "asset_tags", "asset_tag_suggestions"}.issubset(tag_tables)
+        or legacy_history_tags
+        or legacy_storyline_tags
+        or invalid_cache
+        or invalid_relations
+        or cache_mismatches
+        or untagged_visible
+    ):
         reporter.fail(
             "DATA-017",
-            "旧标签重置期仍存在标签数据",
-            assets=[dict(row) for row in legacy_asset_tags],
+            "受控标签数据不完整",
+            missingTables=sorted({"tag_definitions", "asset_tags", "asset_tag_suggestions"} - tag_tables),
             history=[dict(row) for row in legacy_history_tags],
             storylines=[dict(row) for row in legacy_storyline_tags],
+            invalidCache=invalid_cache[:30],
+            invalidRelations=invalid_relations[:30],
+            cacheMismatches=cache_mismatches[:30],
+            untaggedVisible=untagged_visible[:30],
         )
     else:
-        reporter.passed("DATA-017", "旧标签已清空，未发现自动回填")
+        reporter.passed(
+            "DATA-017",
+            "正式标签均属于受控词表，关系表与兼容缓存一致，全部可见素材已分类",
+        )
 
     legacy_upload_paths = conn.execute(
         """
@@ -506,6 +714,7 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
         select primary_asset.*
         from assets primary_asset
         where primary_asset.version_parent_id = ''
+          and trim(coalesce(primary_asset.version_group, '')) <> ''
           and (select count(*) from assets version where version.version_group = primary_asset.version_group) > 1
         order by primary_asset.updated_at desc
         limit 1

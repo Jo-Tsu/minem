@@ -55,7 +55,7 @@ def main():
         root = Path(tmp) / "extracted"
         upload = root / "upload-1"
         (upload / "pages").mkdir(parents=True)
-        (upload / "report.html").write_text("<style>.slide { width: 1920px; height: 1080px; }</style>", encoding="utf-8")
+        (upload / "report.html").write_text("<style>.slide { width: 1600px; height: 900px; }</style>", encoding="utf-8")
         (upload / "pages/page.html").write_text("<style>.slide { width: 1280px; height: 720px; }</style>", encoding="utf-8")
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -69,12 +69,14 @@ def main():
         args = dict(extracted_root=root, detect_dimensions=detect_html_dimensions, now_ms=now_ms, next_candidate_asset_code=next_code, next_asset_version_no=next_version, merge_tags=tags, read_text_sample=lambda path: Path(path).read_text(encoding="utf-8")[:500])
         first = normalize_report_page_canvases(conn, "report-1", **args)
         assert first["normalized"] == 1 and len(first["created"]) == 1, first
+        assert first["target"] == [1920, 1080], first
         normalized_id = conn.execute("select control_id from report_page_slots where report_id = 'report-1'").fetchone()[0]
         assert normalized_id != "control-1"
         normalized = conn.execute("select * from assets where id = ?", (normalized_id,)).fetchone()
         assert normalized["version_group"] == "control-1" and normalized["version_parent_id"] == "control-1"
         wrapper_path = root / normalized["upload_id"] / normalized["source_path"]
         wrapper_html = wrapper_path.read_text(encoding="utf-8")
+        assert "width:1920px;height:1080px" in wrapper_html, wrapper_html
         assert 'src="/extracted/' not in wrapper_html, wrapper_html
         assert "pages/page.html?embed=1" in wrapper_html, wrapper_html
         assert conn.execute("select count(*) from assets where id = 'control-1'").fetchone()[0] == 1

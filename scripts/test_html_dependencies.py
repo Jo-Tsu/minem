@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from minem.html_dependencies import audit_dependency_closure
+from minem.html_dependencies import audit_dependency_closure, normalize_ephemeral_runtime_references
 from minem.imports import copy_html_dependency_bundle
 
 
@@ -63,6 +63,26 @@ def main() -> None:
         )
         missing = audit_dependency_closure(script_case)["missing"]
         assert len(missing) == 1 and missing[0]["resolved"] == "assets/missing.png", missing
+
+        runtime_case = root / "runtime-case"
+        (runtime_case / "assets" / "gsap").mkdir(parents=True)
+        (runtime_case / "assets" / "gsap" / "gsap.min.js").write_text("window.gsap = {};", encoding="utf-8")
+        signed_base = "/decks/example/.runtime/signed-token/assets"
+        (runtime_case / "index.html").write_text(
+            f'<link rel="stylesheet" href="{signed_base}/framework/extra-layouts.css">'
+            f'<script src="{signed_base}/gsap/gsap.min.js"></script>'
+            f'<script src="{signed_base}/gsap/CustomEase.min.js"></script>'
+            f'<img src="{signed_base}/images/required.png">',
+            encoding="utf-8",
+        )
+        report = normalize_ephemeral_runtime_references(runtime_case)
+        normalized = (runtime_case / "index.html").read_text(encoding="utf-8")
+        assert report["changeCount"] == 3, report
+        assert 'src="assets/gsap/gsap.min.js"' in normalized, normalized
+        assert "extra-layouts.css" not in normalized and "CustomEase.min.js" not in normalized, normalized
+        assert f'{signed_base}/images/required.png' in normalized, normalized
+        missing = audit_dependency_closure(runtime_case)["missing"]
+        assert len(missing) == 1 and missing[0]["resolved"].endswith("images/required.png"), missing
     print("html dependency checks passed")
 
 

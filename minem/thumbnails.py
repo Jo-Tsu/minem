@@ -1,7 +1,10 @@
+import os
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -111,23 +114,6 @@ def save_contained_thumbnail(source_image, output_path, html_path, *, image_modu
     return True
 
 
-def nearby_preview_image(html_path):
-    candidates = [
-        html_path.with_name("preview.png"),
-        html_path.with_name("preview.jpg"),
-        html_path.with_name("preview.jpeg"),
-        html_path.with_name("poster.png"),
-        html_path.with_name("cover.png"),
-        html_path.parent / "assets" / "poster.png",
-        html_path.parent / "assets" / "preview.png",
-        html_path.parent / "assets" / "cover.png",
-    ]
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    return None
-
-
 def thumbnail_is_low_variance(path, *, image_module):
     if not image_module or not path.exists():
         return True
@@ -136,6 +122,62 @@ def thumbnail_is_low_variance(path, *, image_module):
         return sum(high - low for low, high in image.getextrema()) < 20
     except Exception:
         return True
+
+
+def thumbnail_is_background_only(path, *, image_module):
+    """Reject animation first frames that contain only a dark background."""
+    if not image_module or not path.exists():
+        return True
+    try:
+        image = image_module.open(path).convert("RGB").resize((128, 72))
+        pixel_reader = getattr(image, "get_flattened_data", image.getdata)
+        pixels = list(pixel_reader())
+        bright_pixels = sum(1 for pixel in pixels if max(pixel) >= 120)
+        return bright_pixels / max(len(pixels), 1) < 0.0005
+    except Exception:
+        return True
+
+
+def thumbnail_has_nested_canvas(path, html_path=None, *, image_module):
+    if not image_module or not path.exists():
+        return False
+    try:
+        image = image_module.open(path).convert("RGB")
+        width, height = image.size
+        if width < 320 or height < 180:
+            return False
+        mask = image.convert("L").point(lambda value: 255 if value > 5 else 0)
+        bounds = mask.getbbox()
+        if not bounds:
+            return False
+        left, top, right, bottom = bounds
+        content_width = right - left
+        content_height = bottom - top
+        scale_x = content_width / width
+        scale_y = content_height / height
+        expected_ratio = detect_html_aspect_ratio(html_path) if html_path else width / height
+        return (
+            left <= width * 0.02
+            and top <= height * 0.02
+            and 0.4 < scale_x < 0.96
+            and 0.4 < scale_y < 0.96
+            and abs(scale_x - scale_y) < 0.025
+            and abs((content_width / content_height) - expected_ratio) < 0.04
+        )
+    except Exception:
+        return False
+
+
+def thumbnail_is_usable(path, html_path, *, image_module):
+    return (
+        not thumbnail_is_low_variance(path, image_module=image_module)
+        and not thumbnail_is_background_only(path, image_module=image_module)
+        and not thumbnail_has_nested_canvas(
+            path,
+            html_path,
+            image_module=image_module,
+        )
+    )
 
 
 def chrome_path():
@@ -175,27 +217,60 @@ def capture_html_with_chrome(html_path, output_path, *, image_module):
             "--no-first-run",
             "--no-pings",
             "--no-sandbox",
+            "--force-device-scale-factor=1",
             "--force-prefers-reduced-motion=reduce",
             "--virtual-time-budget=5000",
+            f"--user-data-dir={Path(temp_dir) / 'profile'}",
             "--host-resolver-rules=MAP * 0.0.0.0, EXCLUDE localhost, EXCLUDE 127.0.0.1",
             f"--window-size={width},{height}",
             f"--screenshot={screenshot}",
             Path(html_path).resolve().as_uri(),
         ]
+        process = None
+        screenshot_ready = False
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=24,
-                check=False,
+                start_new_session=True,
             )
-        except (OSError, subprocess.TimeoutExpired):
+            deadline = time.monotonic() + 12
+            stable_size = 0
+            stable_checks = 0
+            while time.monotonic() < deadline:
+                size = screenshot.stat().st_size if screenshot.exists() else 0
+                if size >= 1000 and size == stable_size:
+                    stable_checks += 1
+                    if stable_checks >= 2:
+                        screenshot_ready = True
+                        break
+                else:
+                    stable_size = size
+                    stable_checks = 0
+                if process.poll() is not None:
+                    screenshot_ready = size >= 1000
+                    break
+                time.sleep(0.1)
+        except OSError:
             return False
-        if result.returncode != 0 or not screenshot.exists() or screenshot.stat().st_size < 1000:
+        finally:
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+        if not screenshot_ready or not screenshot.exists() or screenshot.stat().st_size < 1000:
             return False
         save_contained_thumbnail(screenshot, output_path, html_path, image_module=image_module)
-        return not thumbnail_is_low_variance(output_path, image_module=image_module)
+        if thumbnail_is_usable(output_path, html_path, image_module=image_module):
+            return True
+        output_path.unlink(missing_ok=True)
+        return False
 
 
 def load_preview_font(size, *, image_font_module):
@@ -327,19 +402,11 @@ def generate_html_thumbnail(
             )
         )
 
-    def use_nearby_preview():
-        if not image_module:
-            return False
-        image_path = nearby_preview_image(html_path)
-        if not image_path:
-            return False
-        return save_contained_thumbnail(image_path, output_path, html_path, image_module=image_module)
-
     try:
-        if use_nearby_preview():
-            return output_path.exists() and output_path.stat().st_size > 0
-        if capture_html_with_chrome(html_path, output_path, image_module=image_module):
-            return output_path.exists() and output_path.stat().st_size > 0
+        if chrome_path():
+            if capture_html_with_chrome(html_path, output_path, image_module=image_module):
+                return output_path.exists() and output_path.stat().st_size > 0
+            return fallback()
         with tempfile.TemporaryDirectory() as temp_dir:
             result = subprocess.run(
                 ["qlmanage", "-t", "-s", "1280", "-o", temp_dir, str(html_path)],
@@ -355,8 +422,9 @@ def generate_html_thumbnail(
                 return fallback()
             if image_module:
                 save_contained_thumbnail(candidates[0], output_path, html_path, image_module=image_module)
-                if thumbnail_is_low_variance(output_path, image_module=image_module):
-                    fallback()
+                if not thumbnail_is_usable(output_path, html_path, image_module=image_module):
+                    output_path.unlink(missing_ok=True)
+                    return fallback()
             else:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(candidates[0], output_path)

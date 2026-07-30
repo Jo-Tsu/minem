@@ -90,7 +90,7 @@ const VIEW_META = {
   storyline: ["故事线", "可复用的汇报材料结构，也包含从汇报收藏生成的故事线记录。"]
 } as const;
 
-type Toast = { id: number; text: string };
+type Toast = { id: number; text: string; duration?: number };
 type StorylineCollectMode = "new" | "version";
 type StorylineReportMode = "chat" | "manual" | "copy";
 type ManualMergeMode = "keep" | "version";
@@ -382,7 +382,10 @@ function App() {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, pageSize: ASSET_PAGE_SIZE, total: 0, totalPages: 1, hasPrev: false, hasNext: false });
   const [storylines, setStorylines] = useState<Storyline[]>([]);
   const [loading, setLoading] = useState("正在加载素材");
+  const [isLoading, setIsLoading] = useState(true);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const [pendingDeleteAsset, setPendingDeleteAsset] = useState<Asset | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [arrangementAsset, setArrangementAsset] = useState<Asset | null>(null);
   const [lineage, setLineage] = useState<{ section: LineageSection; items: LineageItem[]; selectedIndex: number } | null>(null);
   const [storylineAsset, setStorylineAsset] = useState<Asset | null>(null);
@@ -398,6 +401,7 @@ function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [importMode, setImportMode] = useState<ImportMode>("general");
   const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
+  const [importTasksConnectionLost, setImportTasksConnectionLost] = useState(false);
   const [dismissedImportTaskIds, setDismissedImportTaskIds] = useState<Set<string>>(() => loadDismissedImportTaskIds());
   const [dismissedImportTasksUntil, setDismissedImportTasksUntil] = useState(() => loadDismissedImportTasksUntil());
   const [toast, setToast] = useState<Toast | null>(null);
@@ -418,13 +422,13 @@ function App() {
     [dismissedImportTaskIds, dismissedImportTasksUntil, importTasks]
   );
 
-  const showToast = useCallback((text: string) => {
-    setToast({ id: Date.now(), text });
+  const showToast = useCallback((text: string, duration = 2600) => {
+    setToast({ id: Date.now(), text, duration });
   }, []);
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 2600);
+    const timer = window.setTimeout(() => setToast(null), toast.duration || 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -437,40 +441,59 @@ function App() {
 
   const loadAssets = useCallback(async (page = 1, append = false) => {
     const seq = ++requestSeq.current;
+    setIsLoading(true);
     setLoading(append ? "正在加载更多素材" : query ? "正在搜索素材" : "正在加载素材");
-    const data = await api.assets({
-      view: "list",
-      type: assetType,
-      category: "all",
-      resource_kind: assetType === "resource" ? resourceKind : "all",
-      control_role: assetType === "control" && controlRole !== "全部" ? controlRole : undefined,
-      q: query || undefined,
-      page,
-      page_size: ASSET_PAGE_SIZE
-    });
-    if (seq !== requestSeq.current) return;
-    const incoming = sortAssetsByNewest(data.assets || []);
-    setAssets((current) => {
-      if (!append) return incoming;
-      const seen = new Set(current.map((asset) => asset.id));
-      const nextItems = incoming.filter((asset) => !seen.has(asset.id));
-      return [...current, ...nextItems];
-    });
-    setPagination(data.pagination);
-    setPipeline(data.pipeline || null);
+    if (!append) setAssets([]);
+    try {
+      const data = await api.assets({
+        view: "list",
+        type: assetType,
+        category: "all",
+        resource_kind: assetType === "resource" ? resourceKind : "all",
+        control_role: assetType === "control" && controlRole !== "全部" ? controlRole : undefined,
+        q: query || undefined,
+        page,
+        page_size: ASSET_PAGE_SIZE
+      });
+      if (seq !== requestSeq.current) return;
+      const incoming = sortAssetsByNewest(data.assets || []);
+      setAssets((current) => {
+        if (!append) return incoming;
+        const seen = new Set(current.map((asset) => asset.id));
+        const nextItems = incoming.filter((asset) => !seen.has(asset.id));
+        return [...current, ...nextItems];
+      });
+      setPagination(data.pagination);
+      setPipeline(data.pipeline || null);
+      setLoading(incoming.length || append ? "" : query ? "没有匹配的素材" : "暂无素材");
+    } catch {
+      if (seq === requestSeq.current) setLoading("素材读取失败，请刷新重试");
+    } finally {
+      if (seq === requestSeq.current) setIsLoading(false);
+    }
   }, [assetType, controlRole, query, resourceKind]);
 
   const loadStorylines = useCallback(async () => {
     const seq = ++requestSeq.current;
+    setIsLoading(true);
     setLoading(query ? "正在搜索故事线" : "正在加载故事线");
-    const data = await api.storylines({ q: query || undefined });
-    if (seq !== requestSeq.current) return;
-    if (data.ok === false) {
-      showToast(data.error || "故事线读取失败");
-      return;
+    setStorylines([]);
+    try {
+      const data = await api.storylines({ q: query || undefined });
+      if (seq !== requestSeq.current) return;
+      if (data.ok === false) {
+        setLoading(data.error || "故事线读取失败");
+        return;
+      }
+      const incoming = sortStorylinesByNewest(data.storylines || []);
+      setStorylines(incoming);
+      setLoading(incoming.length ? "" : query ? "没有匹配的故事线" : "暂无故事线");
+    } catch {
+      if (seq === requestSeq.current) setLoading("故事线读取失败，请刷新重试");
+    } finally {
+      if (seq === requestSeq.current) setIsLoading(false);
     }
-    setStorylines(sortStorylinesByNewest(data.storylines || []));
-  }, [query, showToast]);
+  }, [query]);
 
   const loadWorkbench = useCallback(async () => {
     const seq = ++requestSeq.current;
@@ -532,11 +555,17 @@ function App() {
   }, [assetType, view]);
 
   const refreshImportTasks = useCallback(async () => {
-    const data = await api.importTasks();
-    if (data.ok === false) return;
-    setImportTasks(sortImportTasksByNewest(data.tasks || []));
-    if ((data.tasks || []).some((task) => task.status === "queued" || task.status === "running")) {
-      window.setTimeout(() => void refreshImportTasks(), 1200);
+    try {
+      const data = await api.importTasks();
+      if (data.ok === false) throw new Error(data.error || "任务读取失败");
+      setImportTasksConnectionLost(false);
+      setImportTasks(sortImportTasksByNewest(data.tasks || []));
+      if ((data.tasks || []).some((task) => task.status === "queued" || task.status === "running")) {
+        window.setTimeout(() => void refreshImportTasks(), 1200);
+      }
+    } catch {
+      setImportTasksConnectionLost(true);
+      window.setTimeout(() => void refreshImportTasks(), 2500);
     }
   }, []);
 
@@ -696,21 +725,33 @@ function App() {
   }, [showToast]);
 
   const deleteAsset = useCallback(async (asset: Asset) => {
-    const confirmed = window.confirm(`删除素材 ${asset.asset_code}？\n\n这会从素材库数据库移除记录，并删除库内复制的文件；不会删除原始来源文件。`);
-    if (!confirmed) return;
-    const data = await api.deleteAsset(asset.id);
-    if (data.ok === false) {
-      showToast(data.error || "删除失败");
-      return;
+    setPendingDeleteAsset(asset);
+  }, []);
+
+  const confirmDeleteAsset = useCallback(async () => {
+    const asset = pendingDeleteAsset;
+    if (!asset || deleteBusy) return;
+    setDeleteBusy(true);
+    try {
+      const data = await api.deleteAsset(asset.id);
+      if (data.ok === false) {
+        showToast(data.error || "删除失败", 3600);
+        return;
+      }
+      showToast(`已删除 ${data.assetCode || asset.asset_code}`);
+      setPendingDeleteAsset(null);
+      setSelectedAsset(null);
+      await refreshCurrent();
+    } catch (error) {
+      showToast(error instanceof Error ? `删除失败：${error.message}` : "删除失败，请稍后重试", 3600);
+    } finally {
+      setDeleteBusy(false);
     }
-    showToast(`已删除 ${data.assetCode || asset.asset_code}`);
-    setSelectedAsset(null);
-    await refreshCurrent();
-  }, [refreshCurrent, showToast]);
+  }, [deleteBusy, pendingDeleteAsset, refreshCurrent, showToast]);
 
   const copyText = useCallback(async (text: string, message: string) => {
     await navigator.clipboard.writeText(text);
-    showToast(message);
+    showToast(message || "复制成功", 1000);
   }, [showToast]);
 
   const openStorylineDialog = useCallback(async (asset: Asset) => {
@@ -855,8 +896,34 @@ function App() {
     }
   }, [importTasks]);
 
+  const retryImportTask = useCallback(async (taskId: string) => {
+    const data = await api.retryImportTask(taskId);
+    if (data.ok === false || !data.task) {
+      showToast(data.error || "任务重试失败");
+      return;
+    }
+    setImportTasks((current) => sortImportTasksByNewest([
+      data.task!,
+      ...current.filter((task) => task.id !== taskId)
+    ]));
+    showToast("已重新开始导入");
+    window.setTimeout(() => void refreshImportTasks(), 500);
+  }, [refreshImportTasks, showToast]);
+
   const actionButtons = useMemo(() => (
     <div className="shell-actions">
+      <button
+        className="secondary creator-assistant-entry"
+        type="button"
+        onClick={() => {
+          void api.openCreatorAssistant().then((data) => {
+            showToast(data.ok === false ? data.error || "无法打开创作助手" : "创作助手已打开");
+          });
+        }}
+        title="打开创作助手"
+      >
+        <Sparkles size={16} /> 创作
+      </button>
       <button className="icon-btn" type="button" onClick={() => void refreshCurrent()} title="刷新">
         <RefreshCw size={16} />
       </button>
@@ -864,7 +931,7 @@ function App() {
         <Upload size={16} /> 导入
       </button>
     </div>
-  ), [refreshCurrent]);
+  ), [refreshCurrent, showToast]);
 
   return (
     <main className="app-shell">
@@ -911,6 +978,7 @@ function App() {
             assetType={assetType}
             assets={assets}
             loading={loading}
+            isLoading={isLoading}
             pagination={pagination}
             resourceKind={resourceKind}
             setResourceKind={setResourceKind}
@@ -941,12 +1009,11 @@ function App() {
               }
             }}
             onAiTag={async () => {
-              showToast("正在补充标签...");
+              showToast("正在创建标签任务...");
               const data = await api.aiTag(assetType);
               if (data.ok === false) showToast(data.error || "AI 打标签失败");
               else {
-                showToast(`已分析 ${data.scanned} 个素材，更新 ${data.updated} 个`);
-                await Promise.all([loadAssets(1), loadStats()]);
+                showToast(`已创建 ${data.scanned} 个素材的标签任务，完成后刷新列表即可查看`);
               }
             }}
             onMergeSimilar={async () => {
@@ -961,7 +1028,7 @@ function App() {
           />
         )}
         {view === "caseControl" && <CaseControlLibrary copyText={copyText} />}
-        {view === "storyline" && <StorylineLibrary storylines={storylines} loading={loading} copyText={copyText} openStoryline={setSelectedStoryline} openCreateReport={openCreateReportDialog} />}
+        {view === "storyline" && <StorylineLibrary storylines={storylines} loading={loading} isLoading={isLoading} copyText={copyText} openStoryline={setSelectedStoryline} openCreateReport={openCreateReportDialog} />}
       </section>
 
       {manualMergeAssets ? (
@@ -989,6 +1056,35 @@ function App() {
           openArrangement={(asset) => { setSelectedAsset(null); setArrangementAsset(asset); window.history.pushState({}, "", `?arrange=${encodeURIComponent(asset.id)}`); }}
         />
       )}
+      {pendingDeleteAsset ? (
+        <div className="modal" role="dialog" aria-modal="true" aria-labelledby="delete-asset-title">
+          <button
+            className="modal-mask"
+            type="button"
+            onClick={() => { if (!deleteBusy) setPendingDeleteAsset(null); }}
+            aria-label="取消删除"
+          />
+          <section className="modal-panel confirm-panel">
+            <h2 id="delete-asset-title">删除{pendingDeleteAsset.typeLabel || "素材"}？</h2>
+            <p><code>{pendingDeleteAsset.asset_code}</code> · {pendingDeleteAsset.title}</p>
+            {(pendingDeleteAsset.versionCount || 1) > 1 && !pendingDeleteAsset.version_parent_id
+              ? <p>该素材包含 {pendingDeleteAsset.versionCount} 个版本，将一并删除。</p>
+              : null}
+            <p>
+              {pendingDeleteAsset.asset_type === "control"
+                ? "仍被汇报引用的页面会被保护，请先在对应汇报中移出。"
+                : "汇报引用的页面和资源会继续保留，原始导入文件也不会被删除。"}
+            </p>
+            <footer>
+              <button className="secondary" type="button" disabled={deleteBusy} onClick={() => setPendingDeleteAsset(null)}>取消</button>
+              <button className="danger" type="button" disabled={deleteBusy} onClick={() => void confirmDeleteAsset()}>
+                {deleteBusy ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                {deleteBusy ? "正在删除" : "确认删除"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
       {arrangementAsset ? <ReportArrangementWorkspace asset={arrangementAsset} close={() => { setArrangementAsset(null); window.history.pushState({}, "", window.location.pathname); }} showToast={showToast} refreshAsset={openAsset} /> : null}
       {storylineAsset ? (
         <StorylineCollectionDialog
@@ -1048,7 +1144,12 @@ function App() {
       ) : null}
 
       {importOpen && <ImportDialog mode={importMode} close={() => setImportOpen(false)} startImport={startImport} />}
-      <ImportTaskDock tasks={visibleImportTasks} dismissTask={dismissImportTask} />
+      <ImportTaskDock
+        tasks={visibleImportTasks}
+        dismissTask={dismissImportTask}
+        retryTask={(taskId) => void retryImportTask(taskId)}
+        connectionLost={importTasksConnectionLost}
+      />
       {toast?.text ? <div className="toast" role="status">{toast.text}</div> : null}
     </main>
   );
@@ -1058,6 +1159,7 @@ function AssetLibrary(props: {
   assetType: AssetType;
   assets: Asset[];
   loading: string;
+  isLoading: boolean;
   pagination: Pagination;
   resourceKind: string;
   setResourceKind: (kind: string) => void;
@@ -1082,7 +1184,7 @@ function AssetLibrary(props: {
   onAiTag: () => Promise<void>;
   onMergeSimilar: () => Promise<void>;
 }) {
-  const { assetType, assets, loading, pagination, openAsset, renameAsset, loadAssets, onCollectStoryline, selectedControlIds, selectedResourceIds } = props;
+  const { assetType, assets, loading, isLoading, pagination, openAsset, renameAsset, loadAssets, onCollectStoryline, selectedControlIds, selectedResourceIds } = props;
   const visibleControlIds = useMemo(() => assets.filter((asset) => asset.asset_type === "control").map((asset) => asset.id), [assets]);
   const allVisibleControlsSelected = visibleControlIds.length > 0 && visibleControlIds.every((assetId) => selectedControlIds.has(assetId));
   const visibleResourceIds = useMemo(() => assets.filter((asset) => asset.asset_type === "resource").map((asset) => asset.id), [assets]);
@@ -1140,7 +1242,7 @@ function AssetLibrary(props: {
           </div>
         </section>
       ) : null}
-      {!assets.length ? <div className="empty-state"><Loader2 size={18} />{loading}</div> : (
+      {!assets.length ? <div className="empty-state">{isLoading ? <Loader2 className="spin" size={18} /> : null}{loading || "暂无素材"}</div> : (
         <section className={classNames("asset-grid", assetType === "resource" && "resource-grid")}>
           {assets.map((asset, index) => (
             <AssetCard
@@ -1181,6 +1283,8 @@ function AssetCard({
   selectable?: boolean;
   onToggleSelect?: (assetId: string) => void;
 }) {
+  const isReport = asset.asset_type === "report";
+  const supportsInteractivePreview = asset.media_kind === "html" || Boolean(asset.preview_url);
   if (asset.asset_type === "resource") {
     return (
       <article className={classNames("resource-card asset-card", selected && "is-selected")}>
@@ -1210,7 +1314,7 @@ function AssetCard({
     );
   }
   return (
-    <article className={classNames("report-card asset-card", selected && "is-selected")}>
+    <article className={classNames("report-card", isReport ? "report-material-card" : "page-material-card", "asset-card", selected && "is-selected")}>
       {selectable ? (
         <button
           className={classNames("select-toggle", selected && "is-selected")}
@@ -1226,11 +1330,18 @@ function AssetCard({
         </button>
       ) : null}
       <button className="asset-card-hit" type="button" onClick={() => void openAsset(asset.id)}>
-        <div className="card-preview"><Preview asset={asset} mode="thumbnail" compact /></div>
+        <div className="card-preview">
+          <Preview asset={asset} mode="thumbnail" compact />
+          <div className="material-preview-chrome" aria-hidden="true">
+            <span className="material-kind">{isReport ? "汇报材料" : "页面材料"}</span>
+            <span className="material-canvas">1920 × 1080</span>
+          </div>
+          {supportsInteractivePreview ? <span className="interactive-badge"><span />可交互</span> : null}
+        </div>
         <div className="card-copy">
-          <span>#{String(index + 1).padStart(3, "0")} · {asset.asset_type === "report" ? `${reportPageCount(asset)} 页` : roleForControl(asset)}</span>
+          <span>#{String(index + 1).padStart(3, "0")} · {isReport ? `${reportPageCount(asset)} 页` : roleForControl(asset)}</span>
           <strong>{asset.title}</strong>
-          <small><code>{asset.asset_code}</code> · {asset.asset_type === "report" ? scenarioForReport(asset) : sourceTypeLabel(asset.source_type)}</small>
+          <small><code>{asset.asset_code}</code> · {isReport ? scenarioForReport(asset) : sourceTypeLabel(asset.source_type)}</small>
         </div>
       </button>
       <div className="card-footer">
@@ -1343,8 +1454,8 @@ function PaginationBar({ pagination, loadAssets }: { pagination: Pagination; loa
   );
 }
 
-function StorylineLibrary({ storylines, loading, copyText, openStoryline, openCreateReport }: { storylines: Storyline[]; loading: string; copyText: (text: string, message: string) => Promise<void>; openStoryline: (storyline: Storyline) => void; openCreateReport: () => Promise<void> }) {
-  const body = !storylines.length ? <div className="empty-state">{loading}</div> : (
+function StorylineLibrary({ storylines, loading, isLoading, copyText, openStoryline, openCreateReport }: { storylines: Storyline[]; loading: string; isLoading: boolean; copyText: (text: string, message: string) => Promise<void>; openStoryline: (storyline: Storyline) => void; openCreateReport: () => Promise<void> }) {
+  const body = !storylines.length ? <div className="empty-state">{isLoading ? <Loader2 className="spin" size={18} /> : null}{loading || "暂无故事线"}</div> : (
     <section className="storyline-grid">
       {storylines.map((item) => (
         <article className="storyline-card" key={item.id}>

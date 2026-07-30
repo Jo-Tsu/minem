@@ -7,6 +7,10 @@ This page is the documentation entry point. Public community documents are
 bilingual. Product and implementation documents may be Chinese-first, while
 their filenames remain stable and all repository links are relative.
 
+## 使用 / Getting started
+
+- [MineM 使用指南 / MineM user guide](USER_GUIDE.md)
+
 ## 产品与设计 / Product and design
 
 - [产品需求文档 / Product requirements](MineM_PRD.md)
@@ -31,7 +35,7 @@ their filenames remain stable and all repository links are relative.
 
 ## 开源与贡献 / Open source and contribution
 
-- [公开版本边界 / Open-source release boundary](OPEN_SOURCE_RELEASE.md)
+- [完整开源说明与客户端源码构建 / Open-source guide and desktop source build](OPEN_SOURCE_RELEASE.md)
 - [GitHub 发布检查清单 / GitHub release checklist](GITHUB_RELEASE_CHECKLIST.md)
 - [贡献指南 / Contributing](../CONTRIBUTING.md)
 - [安全策略 / Security](../SECURITY.md)

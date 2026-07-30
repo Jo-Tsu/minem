@@ -2,11 +2,16 @@ import re
 import sqlite3
 
 
+LEGACY_TAGS_ENABLED = False
+
+
 def split_tags(value):
     return [tag.strip() for tag in (value or "").split(",") if tag.strip()]
 
 
 def merge_tags(*tag_groups):
+    if not LEGACY_TAGS_ENABLED:
+        return []
     seen = set()
     merged = []
     for group in tag_groups:

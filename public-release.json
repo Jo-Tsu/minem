@@ -11,6 +11,7 @@
     "local-tts/server.py",
     "minem",
     "scripts",
+    "skills",
     "templates",
     ".dockerignore",
     ".env.example",
@@ -66,6 +67,7 @@
     "desktop/src-tauri/binaries",
     "desktop/src-tauri/gen",
     "desktop/src-tauri/target",
+    ".workbuddy",
     "docs/MineM_PROJECT_AUDIT_2026-07-18.md"
   ]
 }

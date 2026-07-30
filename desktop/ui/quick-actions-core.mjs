@@ -1,249 +1,173 @@
 export const MODE_META = {
   report: { label: "汇报", shortcut: "⌘1" },
   page: { label: "页面", shortcut: "⌘2" },
+  case: { label: "案例", shortcut: "⌘3" },
 };
 
-export const ACTION_META = {
+export const SCENARIO_META = {
   import_report: {
     mode: "report",
-    label: "导入",
+    label: "导入汇报",
+    description: "外部多页材料入库，每页同步为页面素材",
     icon: "upload",
-    sourceLabel: "外部汇报",
-    sourcePlaceholder: "文件路径、HTML/PPT/PDF 或外部链接",
-    instruction: "导入外部多页材料，整体生成一个汇报素材，并将每一页分别生成页面素材。",
-    needsSource: true,
+    skill: "minem-report-workflow",
+    inputs: [
+      "外部材料（文件、文件夹或链接）",
+      "汇报名称（可选）",
+      "补充要求（可选）",
+    ],
+    constraint: "多页材料生成一个汇报，每页同步为一个页面素材。",
   },
   create_report: {
     mode: "report",
-    label: "新建",
+    label: "新建汇报",
+    description: "按主题或已有页面组装新的完整汇报",
     icon: "report",
-    sourceLabel: "汇报主题",
-    sourcePlaceholder: "标题、目标或已有内容说明",
-    instruction: "创建新的汇报素材；如提供页面引用，严格按引用顺序组装。",
-    needsSource: true,
+    skill: "minem-report-workflow",
+    inputs: [
+      "汇报主题与目标",
+      "已有页面编号或链接（可选）",
+      "顺序、受众或表达要求（可选）",
+    ],
+    constraint: "优先复用已有页面，缺少的页面再创建。",
   },
   insert_page: {
     mode: "report",
-    label: "插入",
+    label: "插入页面",
+    description: "把一个或多个页面插入指定汇报位置",
     icon: "insert",
-    sourceLabel: "插入说明",
-    sourcePlaceholder: "说明插入位置与页面衔接要求",
-    instruction: "把引用页面插入指定汇报；只新增汇报页面槽位，不复制或删除页面素材。",
-    needsReport: true,
-    needsTarget: true,
-    needsPageRefs: true,
+    skill: "minem-report-workflow",
+    inputs: [
+      "目标汇报编号或链接",
+      "页面编号或链接（可多项）",
+      "插入位置",
+    ],
+    constraint: "只修改目标汇报的编排，不复制或删除页面素材。",
   },
   replace_page: {
     mode: "report",
-    label: "替换",
+    label: "替换页面",
+    description: "用已有或新页面替换当前汇报某一页",
     icon: "replace",
-    sourceLabel: "替换说明",
-    sourcePlaceholder: "说明替换后的表达目标",
-    instruction: "用引用页面替换指定汇报页；保留被替换页面素材，只更新当前汇报的页面槽位。",
-    needsReport: true,
-    needsTarget: true,
-    needsPageRefs: true,
+    skill: "minem-report-workflow",
+    inputs: [
+      "目标汇报编号或链接",
+      "被替换的页码或页面编号",
+      "替换页面编号、链接或新内容要求",
+    ],
+    constraint: "只替换汇报中的页面引用，保留原页面。",
   },
   modify_report_page: {
     mode: "report",
-    label: "修改",
+    label: "修改页面",
+    description: "修改汇报中的一页并保留原页面版本",
     icon: "edit",
-    sourceLabel: "修改说明",
-    sourcePlaceholder: "说明要调整的内容、布局或表达",
-    instruction: "基于指定汇报页创建页面新版本，并仅在当前汇报中引用新版本。",
-    needsReport: true,
-    needsTarget: true,
-  },
-  extract_case: {
-    mode: "report",
-    label: "案例",
-    icon: "case",
-    sourceLabel: "外部文档",
-    sourcePlaceholder: "飞书文档、Markdown、PDF 或其他来源",
-    instruction: "从外部文档提炼案例组和多张单页案例素材，再按要求插入指定汇报。",
-    needsSource: true,
+    skill: "minem-report-workflow",
+    inputs: [
+      "目标汇报编号或链接",
+      "目标页码或页面编号",
+      "修改要求",
+    ],
+    constraint: "创建页面新版本，只更新当前汇报引用，保留旧版本。",
   },
   import_page: {
     mode: "page",
-    label: "导入",
+    label: "导入页面",
+    description: "导入一个外部单页并登记为页面素材",
     icon: "upload",
-    sourceLabel: "外部单页",
-    sourcePlaceholder: "单页 HTML、图片、PDF 页或外部链接",
-    instruction: "导入一个单页并生成页面素材；检测到多页时停止并提示改用汇报导入。",
-    needsSource: true,
+    skill: "minem-html-page",
+    inputs: [
+      "单页文件或链接",
+      "页面名称（可选）",
+      "保真要求（可选）",
+    ],
+    constraint: "页面素材只能是一页；多页材料请改用导入汇报或提炼案例。",
   },
   create_page: {
     mode: "page",
-    label: "新建",
+    label: "新建页面",
+    description: "从零生成一个可复用的 HTML 页面素材",
     icon: "page",
-    sourceLabel: "页面主题",
-    sourcePlaceholder: "页面目标、关键信息与表达要求",
-    instruction: "从零创建一个 16:9 单页页面素材，并返回新页面编号和真实链接。",
-    needsSource: true,
+    skill: "minem-html-page",
+    inputs: [
+      "页面主题与关键信息",
+      "目标受众",
+      "版式或可用素材（可选）",
+    ],
+    constraint: "生成一个 1920×1080 单页，页面内不添加平台工具栏。",
   },
   duplicate_page: {
     mode: "page",
-    label: "复制",
+    label: "复制页面",
+    description: "复制已有页面并创建独立的新版本",
     icon: "copy",
-    sourceLabel: "复制要求",
-    sourcePlaceholder: "说明需要保留和修改的内容",
-    instruction: "复制引用页面并创建独立的新版本，不覆盖来源页面。",
-    needsPageRefs: true,
+    skill: "minem-html-page",
+    inputs: [
+      "来源页面编号或链接",
+      "需要保留的内容",
+      "需要变化的内容",
+    ],
+    constraint: "创建独立的新版本，保留来源页面和既有引用。",
   },
   modify_page: {
     mode: "page",
-    label: "修改",
+    label: "修改页面",
+    description: "基于已有页面生成一个修改后的新版本",
     icon: "edit",
-    sourceLabel: "修改要求",
-    sourcePlaceholder: "说明内容、布局、尺寸或资源修改",
-    instruction: "基于引用页面创建新版本，保留旧版本和全部既有引用。",
-    needsPageRefs: true,
+    skill: "minem-html-page",
+    inputs: [
+      "来源页面编号或链接",
+      "内容修改要求",
+      "布局、尺寸或素材要求（可选）",
+    ],
+    constraint: "生成页面新版本，不覆盖旧页面或既有引用。",
   },
-  custom_prompt: {
-    mode: "both",
-    label: "指令",
-    icon: "command",
-    sourceLabel: "上下文",
-    sourcePlaceholder: "补充需要带给 AI 的上下文",
-    instruction: "使用当前上下文生成自定义指令。",
-    custom: true,
+  extract_case: {
+    mode: "case",
+    label: "提炼案例",
+    description: "把外部文档整理为案例组和多张案例页",
+    icon: "case",
+    skill: "minem-case-material",
+    inputs: [
+      "外部文档或链接",
+      "目标受众",
+      "案例数量与重点（可选）",
+    ],
+    constraint: "创建案例组和独立案例页，不登记为汇报素材，不编造事实。",
+  },
+  insert_case: {
+    mode: "case",
+    label: "插入汇报",
+    description: "将已有案例页批量插入指定汇报",
+    icon: "insert",
+    skill: "minem-case-material",
+    inputs: [
+      "案例组或案例页面编号、链接",
+      "目标汇报编号或链接",
+      "插入位置与顺序",
+    ],
+    constraint: "只插入选中的案例页，不删除案例素材。",
   },
 };
 
-export function actionsForMode(mode) {
-  return Object.entries(ACTION_META)
-    .filter(([, meta]) => meta.mode === mode || meta.mode === "both")
+export function scenariosForMode(mode) {
+  return Object.entries(SCENARIO_META)
+    .filter(([, meta]) => meta.mode === mode)
     .map(([value, meta]) => ({ value, ...meta }));
 }
 
-function cleanUrl(raw) {
-  return raw.replace(/[),，。；;\]}>]+$/g, "");
-}
-
-export function parseMineMReferences(value) {
-  const text = String(value || "").trim();
-  if (!text) return [];
-
-  const refs = [];
-  const add = (ref) => {
-    const key = `${ref.type}:${ref.code || ref.url}`;
-    const index = refs.findIndex((item) => item.key === key);
-    if (index < 0) refs.push({ ...ref, key });
-    else refs[index] = { ...refs[index], code: refs[index].code || ref.code, url: refs[index].url || ref.url };
-  };
-
-  for (const match of text.matchAll(/CTRL-PAGE-[A-Z0-9-]+/gi)) {
-    add({ type: "page", code: match[0].toUpperCase(), url: "" });
-  }
-  for (const match of text.matchAll(/RPT-[A-Z0-9-]+/gi)) {
-    add({ type: "report", code: match[0].toUpperCase(), url: "" });
-  }
-  for (const match of text.matchAll(/https?:\/\/[^\s]+/gi)) {
-    const url = cleanUrl(match[0]);
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch (_) {
-      continue;
-    }
-    const pageMatch = parsed.pathname.match(/\/pages\/([^/?#]+)(?:\/index\.html)?/i);
-    const reportMatch = parsed.pathname.match(/\/reports\/([^/?#]+)(?:\/index\.html)?/i);
-    if (pageMatch) {
-      add({ type: "page", code: pageMatch[1].toUpperCase(), url });
-    } else if (reportMatch) {
-      add({ type: "report", code: reportMatch[1].toUpperCase(), url });
-    } else {
-      add({ type: "source", code: "", url });
-    }
-  }
-  return refs.map(({ key, ...ref }) => ref);
-}
-
-export function mergeReference(target, incoming) {
-  if (!incoming) return target;
-  const existingIndex = target.findIndex(
-    (item) => item.type === incoming.type && ((item.code && item.code === incoming.code) || (item.url && item.url === incoming.url)),
-  );
-  if (existingIndex < 0) return [...target, incoming];
-  const next = [...target];
-  next[existingIndex] = {
-    ...next[existingIndex],
-    code: next[existingIndex].code || incoming.code,
-    url: next[existingIndex].url || incoming.url,
-  };
-  return next;
-}
-
-export function validateOperation(state) {
-  const meta = ACTION_META[state.action];
-  if (!meta) return "请选择操作。";
-  if (meta.needsSource && !state.source?.trim()) return `请填写${meta.sourceLabel}。`;
-  if (meta.needsReport && !state.reportRef?.trim()) return "请填写汇报链接或编号。";
-  if (meta.needsTarget && !String(state.targetPage || "").trim()) return "请填写目标页码。";
-  if (meta.needsPageRefs && !state.pageRefs?.length) return "请添加页面链接或 CTRL-PAGE 编号。";
-  if (state.pageRefs?.some((item) => item.type !== "page")) return "页面引用中只能包含页面链接或 CTRL-PAGE 编号。";
-  return "";
-}
-
-function renderRef(ref) {
-  if (ref.code && ref.url) return `${ref.code} | ${ref.url}`;
-  return ref.code || ref.url;
-}
-
-export function buildOperationPackage(state) {
-  const meta = ACTION_META[state.action];
-  const error = validateOperation(state);
-  if (error) throw new Error(error);
-
-  if (meta.custom) {
-    const body = state.customBody?.trim();
-    if (!body) throw new Error("请输入自定义指令。" );
-    const values = {
-      mode: MODE_META[state.mode]?.label || state.mode,
-      action: meta.label,
-      page_refs: (state.pageRefs || []).map(renderRef).join("\n"),
-      report_ref: state.reportRef?.trim() || "",
-      target_page: String(state.targetPage || ""),
-      source_ref: state.source?.trim() || "",
-      requirements: state.requirements?.trim() || "",
-    };
-    return body.replace(/\{\{(mode|action|page_refs|report_ref|target_page|source_ref|requirements)\}\}/g, (_, key) => values[key]);
-  }
-
-  const payload = {
-    schema: "minem.codex-operation.v1",
-    mode: state.mode,
-    action: state.action,
-    report_ref: state.reportRef?.trim() || null,
-    target_page: Number(state.targetPage) || null,
-    page_refs: (state.pageRefs || []).map(({ type, code, url }) => ({ type, code: code || null, url: url || null })),
-    source_ref: state.source?.trim() || null,
-    requirements: state.requirements?.trim() || null,
-  };
-  const context = [
-    payload.report_ref ? `- 当前汇报：${payload.report_ref}` : "",
-    payload.target_page ? `- 目标页：第 ${payload.target_page} 页` : "",
-    ...payload.page_refs.map((ref) => `- 页面引用：${renderRef(ref)}`),
-    payload.source_ref ? `- 来源/主题：${payload.source_ref}` : "",
-    payload.requirements ? `- 补充要求：${payload.requirements}` : "",
-  ].filter(Boolean);
+export function buildScenarioInstruction(scenarioId) {
+  const scenario = SCENARIO_META[scenarioId];
+  if (!scenario) throw new Error("未知的创作场景。");
 
   return [
-    "MineM / Codex 操作包 v1",
-    `模式：${MODE_META[state.mode]?.label || state.mode}`,
-    `任务：${meta.label}`,
+    `请使用已安装的 MineM 客户端完成「${scenario.label}」。`,
+    `调用 Skill：\`${scenario.skill}\`，通过 \`minem\` CLI 实际执行。`,
     "",
-    meta.instruction,
-    ...(context.length ? ["", "上下文：", ...context] : []),
+    "请把信息贴到下面后发送：",
+    ...scenario.inputs.map((label) => `- ${label}：`),
     "",
-    "执行约束：",
-    "1. 只操作 MineM 平台，不改写 superclub 原始素材、既有生成方式或无关数据。",
-    "2. 页面素材必须是单页；多页内容只能创建汇报素材或案例素材，并为每页建立页面素材。",
-    "3. 修改或复制页面必须创建新版本，保留旧版本及其引用；插入或移出汇报不得删除页面素材。",
-    "4. 预览统一按 16:9 画布适配，校验资源闭包、真实链接、编号、页数和页面顺序。",
-    "5. 完成后返回最终编号、真实页面链接、变更清单和验证结果。",
-    "",
-    "结构化参数：",
-    JSON.stringify(payload, null, 2),
+    `注意：${scenario.constraint}`,
+    "信息不足时只追问缺失项；完成后返回素材编号、可打开链接和验证结果。",
   ].join("\n");
 }

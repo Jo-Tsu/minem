@@ -58,6 +58,7 @@ async function deleteJson<T>(path: string) {
 }
 
 export const api = {
+  openCreatorAssistant: () => postEmpty<ApiOk>("/api/desktop/creator-assistant"),
   stats: () => getJson<StatsResponse>("/api/stats"),
   caseGroups: () => getJson<ApiOk<{ caseGroups: CaseControlGroup[]; total: number }>>("/api/case-groups"),
   assets: (params: Params) => getJson<AssetsResponse>("/api/assets", params),
@@ -87,6 +88,8 @@ export const api = {
     postJson<ApiOk<PresenterScriptStatus>>(`/api/reports/${encodeURIComponent(reportId)}/presenter-script`, body),
   importTasks: () => getJson<ApiOk<{ tasks: ImportTask[] }>>("/api/import-tasks"),
   createImportTask: (formData: FormData) => postForm<ApiOk<{ task: ImportTask }>>("/api/import-tasks", formData),
+  retryImportTask: (taskId: string) =>
+    postEmpty<ApiOk<{ task: ImportTask }>>(`/api/import-tasks/${encodeURIComponent(taskId)}/retry`),
   autoImport: () => postEmpty<ApiOk<{ scanned: number; assetCount: number }>>("/api/auto-import"),
   aiTag: (assetType: string) => postJson<ApiOk<{ scanned: number; updated: number }>>("/api/ai-tag", { asset_type: assetType }),
   createTagAnalysisTask: (assetId: string) => postJson<ApiOk<{ task: { id: string; status: string } }>>("/api/tag-analysis/tasks", { assetIds: [assetId] }),

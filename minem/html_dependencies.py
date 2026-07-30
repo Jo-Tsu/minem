@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -12,6 +13,27 @@ from urllib.parse import unquote, urlparse
 HTML_SUFFIXES = {".html", ".htm"}
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^)'\"]+)\1\s*\)", re.IGNORECASE)
 MAX_REFERENCES = 20_000
+EPHEMERAL_RUNTIME_REFERENCE_RE = re.compile(
+    r"^/decks/[^/?#]+/\.runtime/[^/?#]+/assets/(?P<asset>[^?#]+)(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+HTML_LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+HTML_SCRIPT_TAG_RE = re.compile(r"<script\b[^>]*>\s*</script\s*>", re.IGNORECASE)
+TAG_URL_RE = {
+    "link": re.compile(r"\bhref\s*=\s*(['\"])(?P<value>.*?)\1", re.IGNORECASE),
+    "script": re.compile(r"\bsrc\s*=\s*(['\"])(?P<value>.*?)\1", re.IGNORECASE),
+}
+RUNTIME_LOCAL_CANDIDATES = {
+    "framework/extra-layouts.css": (
+        "assets/framework/extra-layouts.css",
+        "assets/deck-json/templates/extra-layouts.css",
+        "assets/extra-layouts.css",
+    ),
+    "gsap/gsap.min.js": ("assets/gsap/gsap.min.js", "assets/vendor/gsap.min.js", "assets/gsap.min.js"),
+    "gsap/customease.min.js": ("assets/gsap/CustomEase.min.js", "assets/vendor/CustomEase.min.js"),
+    "gsap/splittext.min.js": ("assets/gsap/SplitText.min.js", "assets/vendor/SplitText.min.js"),
+    "feishu-deck-motion.js": ("assets/feishu-deck-motion.js",),
+}
 
 
 class DependencyParser(HTMLParser):
@@ -178,3 +200,65 @@ def write_dependency_audit(root: Path, audit: dict) -> Path:
     path = Path(root) / ".minem-dependency-audit.json"
     path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def _local_runtime_candidate(root: Path, source: Path, runtime_asset: str) -> str:
+    candidates = RUNTIME_LOCAL_CANDIDATES.get(runtime_asset.lower(), ())
+    for relative in candidates:
+        candidate = root / relative
+        if candidate.is_file():
+            return Path(os.path.relpath(candidate, source.parent)).as_posix()
+    return ""
+
+
+def normalize_ephemeral_runtime_references(root: Path) -> dict:
+    """Remove or localize expired signed runtime CSS/JS references in HTML imports."""
+    root = Path(root).resolve()
+    changes: list[dict] = []
+
+    def normalize_tag(source: Path, tag_name: str, tag: str) -> str:
+        url_match = TAG_URL_RE[tag_name].search(tag)
+        if not url_match:
+            return tag
+        reference = url_match.group("value").strip()
+        runtime_match = EPHEMERAL_RUNTIME_REFERENCE_RE.match(reference)
+        if not runtime_match:
+            return tag
+        runtime_asset = unquote(runtime_match.group("asset")).lstrip("/")
+        expected_suffix = ".css" if tag_name == "link" else ".js"
+        if not runtime_asset.lower().endswith(expected_suffix):
+            return tag
+        replacement = _local_runtime_candidate(root, source, runtime_asset)
+        action = "rewritten" if replacement else "removed"
+        changes.append({
+            "source": source.relative_to(root).as_posix(),
+            "tag": tag_name,
+            "reference": reference,
+            "runtimeAsset": runtime_asset,
+            "action": action,
+            "replacement": replacement,
+            "reason": "ephemeral-signed-runtime",
+        })
+        if not replacement:
+            return ""
+        start, end = url_match.span("value")
+        return f"{tag[:start]}{replacement}{tag[end:]}"
+
+    for source in sorted(path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in HTML_SUFFIXES):
+        text = _read(source)
+        if "/.runtime/" not in text:
+            continue
+        normalized = HTML_LINK_TAG_RE.sub(lambda match: normalize_tag(source, "link", match.group(0)), text)
+        normalized = HTML_SCRIPT_TAG_RE.sub(lambda match: normalize_tag(source, "script", match.group(0)), normalized)
+        if normalized != text:
+            source.write_text(normalized, encoding="utf-8")
+
+    report = {
+        "schemaVersion": 1,
+        "changedFiles": len({item["source"] for item in changes}),
+        "changeCount": len(changes),
+        "changes": changes,
+    }
+    path = root / ".minem-import-normalization.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report

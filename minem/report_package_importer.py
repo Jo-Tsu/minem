@@ -3,6 +3,7 @@ import re
 import shutil
 from pathlib import Path
 
+from .html_splitter import extract_page_node_spans
 from .paths import is_path_within
 
 
@@ -87,15 +88,20 @@ def load_report_package_manifest(extract_root, *, read_json_file):
             content = inline_html.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        slide_frames = len(re.findall(r'<(?:div|section|article)\b[^>]*\bslide-frame\b', content, re.IGNORECASE))
-        slide_nodes = len(re.findall(r'<(?:div|section|article)\b[^>]*\bdata-(?:slide|page)\b', content, re.IGNORECASE))
+        page_roots = extract_page_node_spans(content)
+        page_count = len(page_roots)
+        slide_frames = len(re.findall(
+            r'<(?:div|section|article)\b(?=[^>]*class=["\'][^"\']*\bslide-frame\b[^"\']*["\'])[^>]*>',
+            content,
+            re.IGNORECASE,
+        ))
         is_deck = bool(re.search(r'<meta\b[^>]*\bfs-deck-generator\b', content, re.IGNORECASE) or slide_frames)
-        if is_deck and max(slide_frames, slide_nodes) > 1:
+        if is_deck and page_count > 1:
             rel = inline_html.relative_to(extract_root)
             inline_candidates.append((
                 len(rel.parts),
                 0 if inline_html.name.lower() in {"index.html", "index.htm"} else 1,
-                -max(slide_frames, slide_nodes),
+                -page_count,
                 rel.as_posix(),
                 inline_html,
                 content,

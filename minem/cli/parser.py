@@ -127,7 +127,12 @@ def build_parser() -> MineMParser:
     asset_search.add_argument("--limit", type=int, default=30)
     asset_search.add_argument("--include-versions", action="store_true")
     asset_search.set_defaults(handler=commands.asset_list, command_name="asset.search")
-    for action, handler in (("get", commands.asset_get), ("open", commands.asset_open), ("versions", commands.asset_versions), ("lineage", commands.asset_lineage)):
+    for action, handler in (
+        ("get", commands.asset_get),
+        ("open", commands.asset_open),
+        ("versions", commands.asset_versions),
+        ("lineage", commands.asset_lineage),
+    ):
         item = asset_actions.add_parser(action)
         item.add_argument("reference")
         item.add_argument("--type", choices=("report", "page", "resource"))
@@ -157,6 +162,14 @@ def build_parser() -> MineMParser:
     page_import = page_actions.add_parser("import", aliases=["create"])
     _add_import_options(page_import)
     page_import.set_defaults(handler=lambda ctx, args: commands.import_material(ctx, args, "page"), command_name="page.import")
+    page_build = page_actions.add_parser("build", help="Render a self-contained 1920x1080 HTML page from a JSON specification")
+    page_build.add_argument("--spec", required=True, help="JSON page specification")
+    page_build.add_argument("--file", "--html-output", dest="html_file", help="Generated HTML destination")
+    page_build.add_argument("--publish", "--import", dest="publish", action="store_true", help="Import the generated HTML into MineM")
+    page_build.add_argument("--name", help="Material name; defaults to the page title")
+    page_build.add_argument("--description")
+    page_build.add_argument("--wait", action=argparse.BooleanOptionalAction, default=True)
+    page_build.set_defaults(handler=commands.page_build, command_name="page.build")
 
     case = resources.add_parser("case", help="Import deterministic case page material")
     case_actions = case.add_subparsers(dest="case_command", required=True)

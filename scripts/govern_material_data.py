@@ -32,12 +32,15 @@ class RefParser(HTMLParser):
         super().__init__()
         self.refs: list[tuple[str, str]] = []
         self.base_href = ""
+        self.inline_styles: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
         attrs_dict = dict(attrs)
         if tag == "base" and attrs_dict.get("href"):
             self.base_href = attrs_dict["href"]
+        if attrs_dict.get("style"):
+            self.inline_styles.append(attrs_dict["style"])
         for name in ("src", "poster"):
             value = attrs_dict.get(name)
             if value:
@@ -132,7 +135,12 @@ def html_missing_refs(row) -> list[str]:
     parser = RefParser()
     parser.feed(text[:2_000_000])
     refs = list(parser.refs)
-    css_text = re.sub(r"/\*.*?\*/", "", text[:2_000_000], flags=re.S)
+    css_chunks = re.findall(r"<style\b[^>]*>(.*?)</style\s*>", text[:2_000_000], flags=re.I | re.S)
+    # HTMLParser preserves quoted values such as style="--photo:url('...')".
+    # A regex that accepts either quote as the terminator truncates these
+    # declarations and can join unrelated style attributes into a fake URL.
+    css_chunks.extend(parser.inline_styles)
+    css_text = re.sub(r"/\*.*?\*/", "", "\n".join(css_chunks), flags=re.S)
     refs.extend(("css-url", match.group(1).strip("'\"")) for match in re.finditer(r"url\(([^)]+)\)", css_text, re.I))
     base_dir = base_dir_for_html(path, parser)
     missing = []

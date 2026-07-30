@@ -1,6 +1,6 @@
 # MineM 本地 AI 客户端技术设计
 
-> 文档状态：CLI v1 已实施，客户端能力网关仍在规划
+> 文档状态：已确认，CLI v1 已实施，客户端能力网关分阶段实施中
 > 目标版本：MineM vNext
 > 更新日期：2026-07-19
 > 关联文档：[本地 AI 客户端 PRD](MineM_LOCAL_AI_CLIENT_PRD.md)、[现有 macOS 客户端技术设计](macos-desktop-client.md)
@@ -95,9 +95,7 @@ MineM.app/
   Contents/
     MacOS/
       MineM
-      minem-server
-      minem-cli
-      minem-mcp
+      minem-server  # server / CLI / future MCP multi-call runtime
     Resources/
       frontend/
       templates/
@@ -171,7 +169,8 @@ not_started
 ### 5.3 启动锁
 
 - 使用进程锁防止两个客户端同时初始化或迁移同一数据库。
-- 已有健康服务时复用；端口被非 MineM 进程占用时选择新的本机端口，不停止其他进程。
+- 仅复用同一数据目录、同一客户端版本且 `managedByClient=true` 的健康服务；不得自动复用 Docker、开发服务、旧版或其他 MineM 实例。
+- `8790` 被任何其他进程占用时选择新的本机端口，不停止、不接管外部进程。
 - 服务地址写入 `runtime/service.json`，CLI/MCP 通过该文件发现，不硬编码 `8790`。
 
 ## 6. 内置资源包
@@ -298,10 +297,10 @@ case.extract
 
 ### 9.1 安装与发现
 
-- `minem-cli` 随应用打包。
-- 客户端可提供“安装命令行工具”，在用户授权后把稳定启动器链接到常用 PATH；也可直接使用应用包内路径。
-- CLI 从 `runtime/service.json` 获取当前服务地址和令牌，不要求用户输入端口。
-- MineM 未运行时，CLI 可通过 `minem://launch` 唤起客户端并等待服务就绪。
+- CLI 代码随 `minem-server` 一体多用运行时打包，避免重复携带 Python 环境。
+- 客户端首次启动自动写入 `~/.local/bin/minem` 用户级启动器，无需管理员授权；升级与修复继续维护该入口，创作助手只复制稳定命令名 `minem`，不暴露本机绝对路径。
+- CLI 只从客户端专属 `runtime/service.json` 获取当前服务地址和令牌，不要求用户输入端口；显式 `--base-url` 或 `MINEM_BASE_URL` 才允许连接其他实例。
+- MineM 未运行时，CLI 使用 macOS `open -gj -a MineM` 后台唤起客户端并等待专属运行时清单就绪。
 
 ### 9.2 输出契约
 
@@ -322,7 +321,7 @@ minem report page replace RPT-20260714-001 \
 
 ## 10. MCP Server 设计
 
-- MCP Server 作为应用 sidecar 或由 `minem-cli mcp serve` 启动。
+- MCP Server 由应用 sidecar 或 `minem mcp serve` 启动，并优先复用同一多调用运行时。
 - 工具定义由 `capabilities.json` 生成，参数 schema 与能力网关保持一致。
 - MCP 工具不直接调用数据库，只调用本地能力网关。
 - 首版资源可暴露 MineM 素材详情、任务状态和能力说明；不得暴露整个用户目录。
@@ -353,17 +352,30 @@ minem_open
 ### 11.1 快捷浮窗
 
 - 继续使用独立轻量 WebView，不加载主 React 列表和缩略图。
-- 从 MineM 当前标签、剪贴板和手动输入收集引用；不监听其他应用历史。
-- 默认动作是复制 `minem.operation.v1` 操作包和简短中文指令。
+- UI 只展示汇报、页面和案例三组固定场景，不读取当前标签、剪贴板或手动输入。
+- 默认动作是复制包含固定技能、最少追问和 MineM CLI 执行协议的完整 AI 指令。
+- 首次成功初始化后自动显示一次；本地只写入引导标记，不保存业务草稿、模板或剪贴板历史。
+- 后续优先由 `Option + Command + M` 唤醒，同时注册 `Control + Option + M` 规避 macOS 原生菜单或前台应用抢占；菜单栏入口为可见备用路径。快捷键总是展开右侧抽屉，失焦保持显示。
+- 静态 WebView 必须启用 Tauri 全局 API，并仅暴露受限 command；`set_collapsed` 在 `420` 点抽屉与 `48` 点图标间切换，`hide` 完全隐藏。抽屉不启用 drag region。
+- WebView 启动先进入 CLI 检查状态。用户级 CLI 缺失或不可执行时显示修复门禁，不初始化素材列表、不复制指令；修复后原地复检并切换为就绪状态。指令使用发现到的绝对 CLI 路径。
+- `main.rs` 只装配插件和应用生命周期；Sidecar、导航、创作助手和原生桥接分别位于 `desktop_runtime`、`navigation`、`quick_actions`、`native_bridge`，避免窗口和 Shell 逻辑继续集中增长。
+- 除菜单栏与全局快捷键外，`--assistant`、`--creator-assistant` 和 `minem://assistant` 可从外部调用；单实例回调只展开已有抽屉。
 - 后续可提供“发送到已配置 AI”入口，但必须通过显式适配器，不模拟键盘或绕过系统权限。
+
+### 11.1.1 macOS 图标打包
+
+- 品牌源文件位于 `desktop/src-tauri/icons/icon-source.svg`，构建前生成标准 PNG 尺寸和 `icon.icns`。
+- `tauri.conf.json` 必须显式声明应用图标，确保 `Info.plist` 包含 `CFBundleIconFile`，并将 `.icns` 写入应用包资源目录。
+- Dock、Finder、应用切换器与菜单栏复用同一品牌语义；菜单栏允许使用模板渲染，但不得显示通用 WebView 占位图标。
+- 发布验收必须解包检查 `Info.plist` 和图标资源，不能只检查源码中是否存在 `icon.png`。
 
 ### 11.2 AI 适配器
 
 适配器只负责协议转换和启动方式，不实现 MineM 业务逻辑：
 
-- Codex：优先 CLI 或 MCP；快捷浮窗作为通用回退。
-- WorkBuddy 类产品：优先 MCP；不支持 MCP 时使用本地 API 或复制操作包。
-- 其他 AI：至少支持复制操作包；可按相同协议增加适配器。
+- Codex：优先加载固定 Skill 并使用 CLI 或 MCP；快捷浮窗提供标准场景指令。
+- WorkBuddy 类产品：优先 MCP；不支持 MCP 时粘贴场景指令并执行 MineM CLI。
+- 其他可执行命令的 AI：使用场景指令内嵌的完整协议，不依赖专有 Skill 机制。
 
 适配器配置保存在本地，不随诊断包导出密钥。第三方 AI 凭证不进入 MineM 数据库。
 
@@ -425,7 +437,7 @@ minem://launch
 ### 15.1 构建流水线
 
 1. 构建 React 前端和快捷浮窗。
-2. 使用 PyInstaller 构建 `minem-server`、`minem-cli` 和 `minem-mcp`。
+2. 使用 PyInstaller 构建支持服务/CLI/未来 MCP 模式的 `minem-server` 一体多用运行时。
 3. 下载或读取锁定版本的 Chromium，校验哈希和许可证。
 4. 构建并签名内置资源包清单。
 5. 构建 Tauri `.app`，签名所有可执行文件、框架和 sidecar。
@@ -478,7 +490,7 @@ minem://launch
 - 未安装 Python、Node、Docker、Chrome。
 - 断网完成安装、初始化、导入、预览、页面创建和汇报导出。
 - 初始化中断后恢复，不产生重复数据。
-- 覆盖升级后用户素材、汇报编排、历史版本和自定义指令保留。
+- 覆盖升级后用户素材、汇报编排和历史版本保留；创作助手场景来自当前客户端版本，不迁移旧表单草稿或模板。
 - 从 Codex 通过 CLI 或 MCP 完成一次创建、插入和结果回链。
 - 从不支持 MCP 的 AI 通过快捷操作包完成同一业务闭环。
 
@@ -499,3 +511,32 @@ minem://launch
 3. MCP 首版的写操作范围及风险等级。
 4. 后台常驻策略，以及关闭主窗口时 CLI/MCP 是否继续运行。
 5. 本地 API 第三方适配器的授权和令牌撤销方式。
+
+## 21. 当前实施状态
+
+截至 2026-07-19，第一阶段已完成以下基础实现：
+
+- 新增 Rust `BootstrapSession`，状态原子写入 `runtime/bootstrap-state.json`。
+- 创建兼容现有服务的 `data/`、`uploads/`、`extracted/`、`thumbnails/`、`report-exports/`，并新增 `config/`、`packs/`、`runtime/` 与 `logs/`。
+- 使用跨进程文件锁阻止两个客户端并发初始化同一数据目录。
+- 优先使用 `8790`；端口已被 Docker、旧版 MineM 或任意其他进程占用时选择新的本机端口，绝不复用外部服务。
+- 服务健康检查使用 `/api/version` 并验证 MineM 产品标识，不再把任意 HTTP 200 当成 MineM。
+- 写入 `runtime/service.json`，记录实际 `baseUrl`、端口、PID、版本和托管状态。
+- CLI 只自动读取 `managedByClient=true` 的客户端服务清单，也支持 `MINEM_BASE_URL` 和 `--base-url` 显式覆盖；未发现运行实例时自动后台唤起客户端。
+- `minem-server` 采用一体多用打包：客户端启动时进入服务模式，`minem --cli` 进入命令行模式，避免重复打包 Python 运行时。
+- `v0.5.0-alpha.12` 将 PyInstaller 从 onefile 改为 onedir，运行时安装在 `Contents/Resources/sidecar/`，消除每次冷启动的临时解压。
+- Tauri 单实例插件在其他插件和初始化前注册；重复启动只激活现有窗口，不生成第二个 Sidecar。
+- 主窗口先加载本地启动页，服务初始化在后台线程执行；健康检查成功后原窗口导航到动态服务地址。
+- Sidecar 接收 `MINEM_PARENT_PID` 并监控父进程；正常退出由 Tauri 回收进程组，异常退出由服务端主动停止。
+- 服务日志每次启动轮转为当前文件与 `.old`，避免长期追加和无限增长。
+- 客户端首次启动自动生成 `~/.local/bin/minem`；菜单栏和“创作助手”提供同一用户级入口的修复能力，不再请求管理员授权写入 `/usr/local/bin`。启动器优先定位 `/Applications/MineM.app`，覆盖升级后自动使用新版运行时。
+- 新安装包优先读取 `Contents/Resources/sidecar/minem-server`；旧版同级单文件路径只作为升级兼容回退。
+- 本机服务标准输出与错误输出写入客户端日志目录，并按启动轮转。
+- 打包 sidecar 在独立进程组内运行；客户端退出时终止整个进程组，避免 PyInstaller 工作进程残留并阻塞下一次冷启动。
+- `v0.5.0-alpha.13` 将原生壳拆分为 `desktop_runtime`、`navigation`、`quick_actions` 和 `native_bridge`，主入口只负责装配。
+- 创作助手使用 `420×480–520` 点右侧抽屉与 `48×48` 点收起图标；三组场景由统一注册表渲染，AI 指令使用稳定命令名 `minem`、固定 Skill 和可填写空白项，剪贴板写入完成后逐字回读。
+- 单实例支持 `--assistant`、`--creator-assistant` 和 `minem://assistant`，供快捷工具和第三方 AI 唤起既有助手窗口。
+- `v0.5.0-alpha.14` 增加覆盖升级接管：运行时只回收清单中 `managedByClient=true` 且进程组可验证的旧版 Sidecar，确认旧端口释放后再启动当前版本；外部服务保持隔离。
+- 启动子进程退出或超时时读取轮转错误日志的末尾摘要并返回启动页，避免仅暴露无诊断价值的退出码。
+
+尚未在第一阶段实现：固定 Chromium、资源包安装器、数据库迁移器、访问令牌、能力网关、MCP、深度链接与初始化进度 UI。这些能力继续按第 19 节顺序交付。

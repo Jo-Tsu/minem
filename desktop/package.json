@@ -1,14 +1,18 @@
 {
   "name": "minem-desktop",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.0-alpha.28",
   "description": "MineM macOS desktop client",
   "license": "Apache-2.0",
   "scripts": {
     "dev": "tauri dev",
+    "prebuild": "npm run sidecar:build && npm run test:release",
     "build": "tauri build && node scripts/package-macos-dmg.mjs",
     "sidecar:build": "node scripts/build-sidecar.mjs",
-    "test:creator": "node --test tests/quick-actions-core.test.mjs"
+    "test": "npm run test:creator",
+    "test:creator": "node --test tests/*.test.mjs",
+    "test:runtime": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:release": "npm run test:creator && npm run test:runtime"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

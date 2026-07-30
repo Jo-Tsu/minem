@@ -8,7 +8,11 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from minem.html_dependencies import audit_dependency_closure, write_dependency_audit
+from minem.html_dependencies import (
+    audit_dependency_closure,
+    normalize_ephemeral_runtime_references,
+    write_dependency_audit,
+)
 
 
 HTML_RESOURCE_DIRS = {
@@ -252,7 +256,8 @@ def normalized_package_hash(extract_root):
     """Hash a package by relative paths and bytes, independent of ZIP metadata."""
     extract_root = Path(extract_root)
     digest = hashlib.sha256()
-    for path in sorted(item for item in extract_root.rglob("*") if item.is_file() and item.name != ".minem-dependency-audit.json"):
+    metadata_files = {".minem-dependency-audit.json", ".minem-import-normalization.json"}
+    for path in sorted(item for item in extract_root.rglob("*") if item.is_file() and item.name not in metadata_files):
         digest.update(path.relative_to(extract_root).as_posix().encode("utf-8"))
         digest.update(b"\0")
         with path.open("rb") as source:
@@ -299,6 +304,8 @@ def run_import_task(
             extract_root.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(stored_path, extract_root / original)
 
+        update_task(task_id, progress=28, message="正在归一化页面依赖")
+        normalize_ephemeral_runtime_references(extract_root)
         dependency_audit = audit_dependency_closure(extract_root)
         write_dependency_audit(extract_root, dependency_audit)
         if dependency_audit["missing"]:
@@ -452,6 +459,7 @@ def import_zip_file(
     except handled_errors:
         stored.unlink(missing_ok=True)
         return 0, 0
+    normalize_ephemeral_runtime_references(extract_root)
     dependency_audit = audit_dependency_closure(extract_root)
     write_dependency_audit(extract_root, dependency_audit)
     if dependency_audit["missing"]:

@@ -91,6 +91,9 @@ DEFAULT_TASK = {
     "storedPath": "",
 }
 
+INTERRUPTED_TASK_MESSAGE = "导入已中断"
+INTERRUPTED_TASK_ERROR = "MineM 服务已重新启动，原导入进程无法继续；请点击重试"
+
 
 def now_ms():
     return int(time.time() * 1000)
@@ -150,6 +153,26 @@ class ImportTaskStore:
                 (limit,),
             ).fetchall()
         return [public_import_task(self._row_to_task(row)) for row in rows]
+
+    def recover_interrupted(self):
+        """Fail tasks that belonged to a previous server process."""
+        self.ensure_schema()
+        timestamp = now_ms()
+        with self.lock:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    """
+                    update import_tasks
+                    set status = 'failed',
+                        progress = 100,
+                        message = ?,
+                        error = ?,
+                        updated_at = ?
+                    where status in ('queued', 'running')
+                    """,
+                    (INTERRUPTED_TASK_MESSAGE, INTERRUPTED_TASK_ERROR, timestamp),
+                )
+                return max(0, cursor.rowcount)
 
     def get(self, task_id, include_private=False):
         self.ensure_schema()

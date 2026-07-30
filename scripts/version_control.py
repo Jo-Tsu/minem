@@ -40,20 +40,16 @@ def cargo_version() -> str:
     return match.group(1) if match else ""
 
 
+def python_version(version: str) -> str:
+    return re.sub(r"-(alpha|beta|rc)\.(\d+)$", lambda match: {"alpha": "a", "beta": "b", "rc": "rc"}[match.group(1)] + match.group(2), version)
+
+
 def pyproject_version() -> str:
+    if not PYPROJECT.exists():
+        return ""
     content = PYPROJECT.read_text(encoding="utf-8")
     match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', content)
     return match.group(1) if match else ""
-
-
-def python_package_version(version: str) -> str:
-    """Convert supported SemVer prereleases to their PEP 440 spelling."""
-    match = re.match(r"^([0-9]+\.[0-9]+\.[0-9]+)-(alpha|beta|rc)\.?([0-9]+)$", version)
-    if not match:
-        return version
-    base, phase, number = match.groups()
-    marker = {"alpha": "a", "beta": "b", "rc": "rc"}[phase]
-    return f"{base}{marker}{number}"
 
 
 def check(manifest: dict) -> list[str]:
@@ -65,9 +61,9 @@ def check(manifest: dict) -> list[str]:
             issues.append(f"{path.relative_to(ROOT)}: {value!r} != {version!r}")
     if cargo_version() != version:
         issues.append(f"desktop/src-tauri/Cargo.toml: {cargo_version()!r} != {version!r}")
-    package_version = python_package_version(version)
-    if pyproject_version() != package_version:
-        issues.append(f"pyproject.toml: {pyproject_version()!r} != {package_version!r}")
+    expected_python_version = python_version(version)
+    if pyproject_version() != expected_python_version:
+        issues.append(f"pyproject.toml: {pyproject_version()!r} != {expected_python_version!r}")
     cargo_lock = CARGO_LOCK.read_text(encoding="utf-8")
     desktop_lock = re.search(r'(?ms)^name = "minem-desktop"\nversion = "([^"]+)"', cargo_lock)
     if not desktop_lock or desktop_lock.group(1) != version:
@@ -85,6 +81,12 @@ def check(manifest: dict) -> list[str]:
 
 
 def next_version(version: str, level: str) -> str:
+    if level == "prerelease":
+        match = re.match(r"^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$", version)
+        if not match:
+            raise ValueError("prerelease 仅适用于 alpha、beta 或 rc 版本")
+        base, stage, number = match.groups()
+        return f"{base}-{stage}.{int(number) + 1}"
     major, minor, patch = (int(value) for value in version.split("-", 1)[0].split("."))
     if level == "major":
         return f"{major + 1}.0.0"
@@ -103,12 +105,6 @@ def synchronize(version: str) -> None:
     if count != 1:
         raise ValueError("无法同步 desktop/src-tauri/Cargo.toml 版本")
     CARGO.write_text(updated, encoding="utf-8")
-    pyproject = PYPROJECT.read_text(encoding="utf-8")
-    package_version = python_package_version(version)
-    pyproject, count = re.subn(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{package_version}"', pyproject, count=1)
-    if count != 1:
-        raise ValueError("无法同步 pyproject.toml 版本")
-    PYPROJECT.write_text(pyproject, encoding="utf-8")
     cargo_lock = CARGO_LOCK.read_text(encoding="utf-8")
     cargo_lock, count = re.subn(
         r'(?ms)(^name = "minem-desktop"\nversion = ")[^"]+("$)',
@@ -119,6 +115,17 @@ def synchronize(version: str) -> None:
     if count != 1:
         raise ValueError("无法同步 desktop/src-tauri/Cargo.lock 版本")
     CARGO_LOCK.write_text(cargo_lock, encoding="utf-8")
+    if PYPROJECT.exists():
+        pyproject = PYPROJECT.read_text(encoding="utf-8")
+        pyproject, count = re.subn(
+            r'(?m)^version\s*=\s*"[^"]+"',
+            f'version = "{python_version(version)}"',
+            pyproject,
+            count=1,
+        )
+        if count != 1:
+            raise ValueError("无法同步 pyproject.toml 版本")
+        PYPROJECT.write_text(pyproject, encoding="utf-8")
     lock = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
     lock["version"] = version
     lock.setdefault("packages", {}).setdefault("", {})["version"] = version
@@ -146,7 +153,7 @@ def main() -> int:
     commands.add_parser("show", help="show current product version")
     commands.add_parser("check", help="verify all version entry points")
     bump = commands.add_parser("bump", help="bump and synchronize version metadata")
-    bump.add_argument("level", choices=("major", "minor", "patch"))
+    bump.add_argument("level", choices=("major", "minor", "patch", "prerelease"))
     bump.add_argument("--headline", required=True, help="release headline for CHANGELOG draft")
     args = parser.parse_args()
 

@@ -90,7 +90,7 @@ def sync_report_material_package(
             on conflict(id) do update set
               title=excluded.title,
               usage=excluded.usage,
-              tags=excluded.tags,
+              tags=assets.tags,
               snippet=excluded.snippet,
               source_type=excluded.source_type,
               source_path=excluded.source_path,
@@ -196,14 +196,13 @@ def sync_report_material_package(
             conn.execute(
                 """
                 update assets
-                set title = ?, category = ?, usage = ?, tags = ?, snippet = ?, source_hash = ?, source_path = ?, preview_url = ?, updated_at = ?
+                set title = ?, category = ?, usage = ?, snippet = ?, source_hash = ?, source_path = ?, preview_url = ?, updated_at = ?
                 where id = ?
                 """,
                 (
                     display_title,
                     existing["category"] if existing else "page",
                     f"从汇报素材 {report_code or upload_id} 自动同步的第 {page_number} 页页面素材。",
-                    ",".join(tags),
                     read_text_sample(control_html),
                     control_source_hash,
                     rel,

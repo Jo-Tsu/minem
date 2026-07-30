@@ -44,7 +44,7 @@ minem completion bash|zsh|fish
 
 minem asset list|get|search|versions|lineage|open|rename|delete
 minem import report|page <source>
-minem page import
+minem page build|import
 minem report create|get|pages|open|export
 minem report page add|replace|move|hide|show|remove
 minem case import
@@ -68,7 +68,23 @@ minem asset get CTRL-PAGE-001
 minem asset open CTRL-PAGE-001
 ```
 
-### 4.2 创建和修改汇报
+### 4.2 生成标准 HTML 页面
+
+AI 将用户需求整理为受控 JSON 页面规范，MineM CLI 负责确定性渲染、自包含资源、
+1920×1080 画布和正式导入：
+
+```bash
+minem page build \
+  --spec ./customer-value.json \
+  --file ./customer-value.html \
+  --publish --wait --output json --no-input
+```
+
+不加 `--publish` 时只生成 HTML 文件，不写入平台。页面规范支持标题、说明、正文、
+要点、指标、本地图片、主题和布局；本地图片会嵌入 HTML，远程图片地址被拒绝。生成
+页面不得包含翻页、全屏、复制链接、刷新或缩放控件，这些能力统一由 MineM 查看器提供。
+
+### 4.3 创建和修改汇报
 
 ```bash
 minem report create --name "2026 制造业方案" \
@@ -89,15 +105,16 @@ minem report page remove RPT-20260719-001 --page CTRL-PAGE-003 --confirm
 
 隐藏和移出只改变当前汇报，不删除页面素材。替换页面也不删除旧页面或历史版本。
 
-### 4.3 AI Agent 调用
+### 4.4 AI Agent 调用
 
 ```bash
 minem agent capabilities --output json
 minem agent schema report.page.add --output json
 
-# 模型先生成单页 HTML，再调用确定性素材能力
-minem page import ./generated-page.html \
-  --name "客户价值" --wait --output json --no-input
+# 模型先生成页面 JSON 规范，再由 MineM 构建并正式导入
+minem page build --spec ./customer-value.json \
+  --file ./customer-value.html --publish \
+  --wait --output json --no-input
 
 minem report page add RPT-20260719-001 \
   --page CTRL-PAGE-009 --after CTRL-PAGE-004 \
@@ -194,10 +211,11 @@ CLI 调用现有 MineM HTTP API，不建立第二套数据库或素材目录。�
 2. 人类表格与 JSON 输出互不污染；全局输出参数放在命令前后都可解析；
 3. 使用编号、内部 ID 和链接能解析到同一素材；
 4. 页面与案例导入返回最终编号、标题和有效预览；
-5. 汇报创建、插入、替换、移动、隐藏、显示和移出正确；
-6. `--dry-run` 不写数据，缺少确认不会写数据；
-7. 正式汇报链接展示已确认编排，原页面仍然存在；
-8. 错误 JSON、错误码和进程退出码稳定；
-9. README 展示的每条命令均由自动化测试覆盖。
+5. `page build` 生成自包含 1920×1080 HTML，并可通过正式导入任务返回页面编号；
+6. 汇报创建、插入、替换、移动、隐藏、显示和移出正确；
+7. `--dry-run` 不写数据，缺少确认不会写数据；
+8. 正式汇报链接展示已确认编排，原页面仍然存在；
+9. 错误 JSON、错误码和进程退出码稳定；
+10. README 展示的每条命令均由自动化测试覆盖。
 
 GitHub CI 使用临时数据目录执行完整链路，不写入用户素材库。

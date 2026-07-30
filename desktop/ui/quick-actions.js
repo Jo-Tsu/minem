@@ -1,113 +1,154 @@
 import {
-  ACTION_META,
-  actionsForMode,
-  buildOperationPackage,
-  mergeReference,
-  parseMineMReferences,
-  validateOperation,
+  MODE_META,
+  buildScenarioInstruction,
+  scenariosForMode,
 } from "./quick-actions-core.mjs";
 
 const invoke = window.__TAURI__?.core?.invoke;
-const templateStorageKey = "minem.creator-assistant.templates.v2";
-const glyphs = {
-  upload: "↥",
-  report: "▤",
-  insert: "⊕",
-  replace: "⇄",
-  edit: "✎",
-  case: "◇",
-  page: "▱",
-  copy: "⧉",
-  command: "⌘",
+const iconPaths = {
+  upload: '<path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/>',
+  report: '<path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M9 13h6"/><path d="M9 17h6"/>',
+  insert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
+  replace: '<path d="m7 7-4 4 4 4"/><path d="M3 11h14"/><path d="m17 3 4 4-4 4"/><path d="M21 7H7"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>',
+  case: '<path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M3 12h18"/>',
+  page: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  command: '<path d="M18 9a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3z"/>',
+  collapse: '<path d="m15 18-6-6 6-6"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
 };
+
+const icon = (name) =>
+  `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24">${iconPaths[name] || iconPaths.command}</svg>`;
+const $ = (id) => document.getElementById(id);
+const status = $("status");
 const state = {
   mode: "report",
-  action: "import_report",
-  pageRefs: [],
-  currentUrl: "",
-  templates: [],
-  selectedTemplate: "",
+  cliExecutable: "",
+  cliChecking: false,
+  cliInstalling: false,
+  copying: "",
+  copied: "",
+  collapsed: false,
 };
-const $ = (id) => document.getElementById(id);
-const source = $("source");
-const report = $("report");
-const targetPage = $("target-page");
-const requirements = $("requirements");
-const status = $("status");
+let toastTimer = 0;
+let copiedTimer = 0;
+
+function setIcon(id, name) {
+  const element = $(id);
+  if (element) element.innerHTML = icon(name);
+}
 
 function setStatus(message = "", error = false) {
   status.textContent = message;
   status.className = `status${error ? " error" : ""}`;
 }
 
-function currentOperationState() {
-  return {
-    mode: state.mode,
-    action: state.action,
-    reportRef: report.value,
-    targetPage: targetPage.value,
-    pageRefs: state.pageRefs,
-    source: source.value,
-    requirements: requirements.value,
-    customBody: $("template-body").value,
-  };
+function showToast(message, error = false) {
+  window.clearTimeout(toastTimer);
+  const toast = $("toast");
+  toast.textContent = message;
+  toast.className = `toast visible${error ? " error" : ""}`;
+  toastTimer = window.setTimeout(() => toast.classList.remove("visible"), error ? 3000 : 1800);
 }
 
-function updateCopyState() {
-  $("copy").disabled = Boolean(validateOperation(currentOperationState()));
+function withTimeout(promise, milliseconds, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(message)), milliseconds);
+    }),
+  ]).finally(() => window.clearTimeout(timer));
 }
 
-function renderActions() {
-  const container = $("actions");
-  const actions = actionsForMode(state.mode);
-  container.style.gridTemplateColumns = `repeat(${actions.length}, minmax(0, 1fr))`;
-  container.replaceChildren(
-    ...actions.map((meta) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `action${meta.value === state.action ? " active" : ""}`;
-      button.dataset.action = meta.value;
-      button.title = meta.instruction;
-      button.innerHTML = `<span class="glyph" aria-hidden="true">${glyphs[meta.icon] || "·"}</span>${meta.label}`;
-      return button;
+async function writeBrowserClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // WebView clipboard permissions vary; the selection fallback still works on a user gesture.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.cssText = "position:fixed;inset:0;opacity:0;pointer-events:none";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("浏览器未允许访问剪贴板");
+}
+
+function normalizeClipboardText(text) {
+  return String(text ?? "").replace(/\r\n?/g, "\n");
+}
+
+async function verifySystemClipboard(text) {
+  if (!invoke) return;
+  const written = await withTimeout(invoke("clipboard_read"), 1500, "剪贴板校验超时");
+  if (normalizeClipboardText(written) !== normalizeClipboardText(text)) {
+    throw new Error("系统剪贴板没有保存指令");
+  }
+}
+
+async function writeClipboard(text) {
+  let nativeError;
+  if (invoke) {
+    try {
+      await withTimeout(invoke("clipboard_write", { text }), 3000, "原生复制超时");
+      await verifySystemClipboard(text);
+      return;
+    } catch (error) {
+      nativeError = error;
+    }
+  }
+  try {
+    await withTimeout(writeBrowserClipboard(text), 1500, "备用复制超时");
+    await verifySystemClipboard(text);
+  } catch (error) {
+    const reason = nativeError || error;
+    throw new Error(reason?.message || String(reason) || "系统剪贴板不可用");
+  }
+}
+
+function renderScenarios() {
+  $("scenarios").replaceChildren(
+    ...scenariosForMode(state.mode).map((scenario) => {
+      const row = document.createElement("article");
+      const copied = state.copied === scenario.value;
+      row.className = `scenario${copied ? " copied" : ""}`;
+      row.dataset.scenario = scenario.value;
+
+      const leading = document.createElement("span");
+      leading.className = "scenario-icon";
+      leading.innerHTML = icon(scenario.icon);
+
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "copy-button";
+      copy.dataset.copyScenario = scenario.value;
+      copy.title = `复制“${scenario.label}”指令`;
+      copy.setAttribute("aria-label", `复制“${scenario.label}”指令`);
+      copy.innerHTML = icon(copied ? "check" : "copy");
+      copy.disabled = state.copying === scenario.value;
+
+      const content = document.createElement("button");
+      content.type = "button";
+      content.className = "scenario-content";
+      content.dataset.copyScenario = scenario.value;
+      content.title = `复制“${scenario.label}”指令`;
+      content.innerHTML = `<strong>${scenario.label}</strong><span>${scenario.description}</span>`;
+      content.disabled = state.copying === scenario.value;
+
+      row.append(leading, content, copy);
+      return row;
     }),
   );
-}
-
-function renderRefs() {
-  const container = $("refs");
-  container.replaceChildren();
-  if (!state.pageRefs.length) {
-    const empty = document.createElement("span");
-    empty.className = "empty";
-    empty.textContent = "粘贴页面链接或 CTRL-PAGE 编号";
-    container.append(empty);
-    return;
-  }
-  state.pageRefs.forEach((ref, index) => {
-    const chip = document.createElement("span");
-    chip.className = "ref";
-    const label = ref.code || ref.url;
-    chip.innerHTML = `<span>${label}</span><button type="button" title="移除引用" aria-label="移除引用">×</button>`;
-    chip.querySelector("button").onclick = () => {
-      state.pageRefs.splice(index, 1);
-      renderRefs();
-      updateCopyState();
-    };
-    container.append(chip);
-  });
-}
-
-function renderActionFields() {
-  const meta = ACTION_META[state.action];
-  $("source-label").textContent = meta.sourceLabel;
-  source.placeholder = meta.sourcePlaceholder;
-  $("report-field").hidden = !(meta.needsReport || state.action === "extract_case");
-  $("target-field").hidden = !meta.needsTarget;
-  $("reference-field").hidden = !(meta.needsPageRefs || state.action === "create_report");
-  $("template-panel").hidden = !meta.custom;
-  renderTemplates();
-  updateCopyState();
 }
 
 function renderMode() {
@@ -116,203 +157,186 @@ function renderMode() {
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
   });
-  const available = actionsForMode(state.mode).map((item) => item.value);
-  if (!available.includes(state.action)) state.action = available[0];
-  renderActions();
-  renderActionFields();
-  renderRefs();
+  renderScenarios();
+  setStatus("复制后粘贴到 AI 对话");
 }
 
 function setMode(mode) {
-  if (!Object.hasOwn({ report: true, page: true }, mode)) return;
+  if (!MODE_META[mode] || mode === state.mode) return;
   state.mode = mode;
   renderMode();
 }
 
-function consumeContext(raw, origin) {
-  const text = String(raw || "").trim();
-  if (!text) {
-    setStatus(`${origin}没有可识别内容。`, true);
+function renderCliState(path, message = "") {
+  state.cliExecutable = path || "";
+  const ready = Boolean(path);
+  $("workspace").hidden = !ready;
+  $("cli-gate").hidden = ready;
+  $("native-state").className = `native-state ${ready ? "ready" : "error"}`;
+  $("native-state").innerHTML = `<i></i>${ready ? "平台已连接" : "需要修复"}`;
+  $("cli-gate-title").textContent = ready ? "MineM 已连接" : "需要修复 CLI";
+  $("cli-gate-copy").textContent = ready
+    ? ""
+    : "本地命令入口不可用，修复后才能复制可执行指令。";
+  $("cli-gate-status").textContent = message || "";
+  $("cli-gate-status").classList.toggle("error", !ready && Boolean(message));
+  $("cli-gate-install").disabled = ready || state.cliChecking || state.cliInstalling;
+}
+
+async function refreshCliState() {
+  if (state.cliChecking || state.cliInstalling) return Boolean(state.cliExecutable);
+  state.cliChecking = true;
+  $("workspace").hidden = true;
+  $("cli-gate").hidden = false;
+  $("native-state").className = "native-state";
+  $("native-state").innerHTML = "<i></i>正在连接";
+  $("cli-gate-title").textContent = "正在准备 CLI";
+  $("cli-gate-status").textContent = "正在检查本地入口";
+  $("cli-gate-install").disabled = true;
+  try {
+    const path = invoke ? await invoke("cli_tool_path") : "minem";
+    renderCliState(path, invoke ? "" : "浏览器预览模式");
+    return Boolean(path);
+  } catch (error) {
+    renderCliState("", "无法检查 CLI，请重试");
+    return false;
+  } finally {
+    state.cliChecking = false;
+  }
+}
+
+async function installCli() {
+  if (!invoke || state.cliInstalling) return;
+  state.cliInstalling = true;
+  $("cli-gate-install").disabled = true;
+  $("cli-gate-title").textContent = "正在修复 CLI";
+  $("cli-gate-status").textContent = "正在写入用户命令目录";
+  try {
+    const path = await withTimeout(invoke("install_cli_tool"), 6000, "CLI 修复超时");
+    renderCliState(path);
+    showToast("MineM 已连接");
+  } catch (error) {
+    renderCliState("", error.message || String(error));
+  } finally {
+    state.cliInstalling = false;
+  }
+}
+
+async function copyScenarioInstruction(scenarioId) {
+  if (state.copying) return;
+  let instruction;
+  try {
+    instruction = buildScenarioInstruction(scenarioId);
+  } catch (error) {
+    const message = error.message || String(error);
+    showToast(message, true);
+    setStatus(message, true);
     return;
   }
-  const refs = parseMineMReferences(text);
-  const reportRef = refs.find((item) => item.type === "report");
-  const pageRefs = refs.filter((item) => item.type === "page");
-  const sourceRef = refs.find((item) => item.type === "source");
-  if (reportRef) report.value = reportRef.url || reportRef.code;
-  for (const ref of pageRefs) state.pageRefs = mergeReference(state.pageRefs, ref);
-  if (!source.value && sourceRef) source.value = sourceRef.url;
-  if (!reportRef && !pageRefs.length && !sourceRef && !source.value) source.value = text;
-  $("context-title").textContent = reportRef || pageRefs.length
-    ? `${origin} · ${reportRef ? "汇报" : "页面"} · ${reportRef?.code || pageRefs[0]?.code || "已识别"}`
-    : `${origin} · 已作为来源带入`;
-  renderRefs();
-  updateCopyState();
-  setStatus("上下文已识别。" );
-}
 
-function loadTemplates() {
+  state.copying = scenarioId;
+  renderScenarios();
+  setStatus("正在写入剪贴板");
   try {
-    const value = JSON.parse(localStorage.getItem(templateStorageKey) || "[]");
-    state.templates = Array.isArray(value)
-      ? value.filter((item) => item && typeof item.name === "string" && typeof item.body === "string").slice(0, 30)
-      : [];
-  } catch (_) {
-    state.templates = [];
-  }
-}
-
-function saveTemplates() {
-  localStorage.setItem(templateStorageKey, JSON.stringify(state.templates.slice(0, 30)));
-}
-
-function renderTemplates() {
-  const select = $("template-select");
-  select.replaceChildren(new Option("新建指令", ""));
-  state.templates.forEach((template) => select.add(new Option(template.name, template.id)));
-  select.value = state.selectedTemplate;
-}
-
-async function copyOperationPackage() {
-  try {
-    const text = buildOperationPackage(currentOperationState());
-    if (invoke) await invoke("quick_clipboard_write", { text });
-    else await navigator.clipboard.writeText(text);
-    setStatus("操作包已复制，可直接粘贴到 Codex。" );
+    await writeClipboard(instruction);
+    window.clearTimeout(copiedTimer);
+    state.copied = scenarioId;
+    showToast("已复制");
+    setStatus("已复制，可粘贴到 AI 对话");
+    copiedTimer = window.setTimeout(() => {
+      state.copied = "";
+      renderScenarios();
+    }, 1800);
   } catch (error) {
-    setStatus(error.message || String(error), true);
+    const message = error.message || String(error) || "系统剪贴板不可用";
+    showToast("复制失败", true);
+    setStatus(message, true);
+  } finally {
+    state.copying = "";
+    renderScenarios();
   }
 }
+
+async function hideQuickActions() {
+  try {
+    if (invoke) await invoke("hide");
+    else window.close();
+  } catch (error) {
+    setStatus("无法关闭创作助手", true);
+  }
+}
+
+function applyDrawerState(collapsed) {
+  state.collapsed = collapsed;
+  document.body.classList.toggle("collapsed", collapsed);
+}
+
+async function setCollapsed(collapsed) {
+  applyDrawerState(collapsed);
+  try {
+    if (invoke) await invoke("set_collapsed", { collapsed });
+    if (!collapsed) refreshCliState();
+  } catch (error) {
+    applyDrawerState(false);
+    setStatus(`窗口状态调整失败：${error}`, true);
+  }
+}
+
+window.setMineMDrawerCollapsed = (collapsed) => applyDrawerState(Boolean(collapsed));
 
 document.querySelector(".mode-switch").addEventListener("click", (event) => {
   const button = event.target.closest("[data-mode]");
   if (button) setMode(button.dataset.mode);
 });
+$("scenarios").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-copy-scenario]");
+  if (button) copyScenarioInstruction(button.dataset.copyScenario);
+});
+$("cli-gate-install").addEventListener("click", installCli);
+$("collapse").addEventListener("click", () => setCollapsed(true));
+$("close").addEventListener("click", hideQuickActions);
 
-$("actions").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-action]");
-  if (!button) return;
-  state.action = button.dataset.action;
-  renderActions();
-  renderActionFields();
-  setStatus("");
+document.querySelector(".topbar").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || event.target.closest("button")) return;
+  invoke?.("start_dragging").catch(() => {});
 });
 
-$("read-current").onclick = async () => {
-  try {
-    const current = invoke ? await invoke("quick_current_url") : window.location.href;
-    state.currentUrl = current || "";
-    consumeContext(current, "当前页面");
-  } catch (error) {
-    setStatus(String(error), true);
-  }
-};
-
-$("read-clipboard").onclick = async () => {
-  try {
-    const text = invoke ? await invoke("quick_clipboard_read") : await navigator.clipboard.readText();
-    consumeContext(text, "剪贴板");
-  } catch (error) {
-    setStatus(String(error), true);
-  }
-};
-
-$("add-reference").onclick = () => {
-  const pageRefs = parseMineMReferences(source.value).filter((item) => item.type === "page");
-  if (!pageRefs.length) {
-    setStatus("未识别到页面链接或 CTRL-PAGE 编号。", true);
+const launcher = $("drawer-launcher");
+let launcherPointer = null;
+launcher.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  launcherPointer = { x: event.clientX, y: event.clientY, moved: false };
+  launcher.setPointerCapture?.(event.pointerId);
+});
+launcher.addEventListener("pointermove", (event) => {
+  if (!launcherPointer || launcherPointer.moved) return;
+  if (Math.hypot(event.clientX - launcherPointer.x, event.clientY - launcherPointer.y) < 4) return;
+  launcherPointer.moved = true;
+  invoke?.("start_dragging").catch(() => {});
+});
+launcher.addEventListener("click", (event) => {
+  const moved = launcherPointer?.moved;
+  launcherPointer = null;
+  if (moved) {
+    event.preventDefault();
     return;
   }
-  for (const ref of pageRefs) state.pageRefs = mergeReference(state.pageRefs, ref);
-  renderRefs();
-  updateCopyState();
-  setStatus("页面引用已添加。" );
-};
-
-$("copy").onclick = copyOperationPackage;
-$("preview").onclick = () => {
-  const error = validateOperation(currentOperationState());
-  setStatus(error || "上下文完整，可以生成操作包。", Boolean(error));
-};
-$("clear").onclick = () => {
-  state.pageRefs = [];
-  state.currentUrl = "";
-  source.value = "";
-  report.value = "";
-  targetPage.value = "";
-  requirements.value = "";
-  $("context-title").textContent = "尚未识别页面上下文";
-  setStatus("");
-  renderRefs();
-  updateCopyState();
-};
-$("close").onclick = () => invoke?.("hide_quick_actions");
-
-$("template-select").onchange = (event) => {
-  state.selectedTemplate = event.target.value;
-  const template = state.templates.find((item) => item.id === state.selectedTemplate);
-  $("template-name").value = template?.name || "";
-  $("template-body").value = template?.body || "";
-  updateCopyState();
-};
-$("save-template").onclick = () => {
-  const name = $("template-name").value.trim();
-  const body = $("template-body").value.trim();
-  if (!name || !body) {
-    setStatus("请填写指令名称和内容。", true);
-    return;
-  }
-  const id = state.selectedTemplate || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const template = { id, name, body };
-  const index = state.templates.findIndex((item) => item.id === id);
-  if (index >= 0) state.templates[index] = template;
-  else if (state.templates.length < 30) state.templates.push(template);
-  else {
-    setStatus("最多保留 30 条自定义指令。", true);
-    return;
-  }
-  state.selectedTemplate = id;
-  saveTemplates();
-  renderTemplates();
-  updateCopyState();
-  setStatus("自定义指令已保存。" );
-};
-$("delete-template").onclick = () => {
-  if (!state.selectedTemplate) return;
-  state.templates = state.templates.filter((item) => item.id !== state.selectedTemplate);
-  state.selectedTemplate = "";
-  $("template-name").value = "";
-  $("template-body").value = "";
-  saveTemplates();
-  renderTemplates();
-  updateCopyState();
-  setStatus("自定义指令已删除。" );
-};
-
-for (const element of [source, report, targetPage, requirements, $("template-body")]) {
-  element.addEventListener("input", updateCopyState);
-}
+  setCollapsed(false);
+});
 
 document.addEventListener("keydown", (event) => {
-  if (event.metaKey && event.key === "1") {
+  if ((event.metaKey || event.ctrlKey) && ["1", "2", "3"].includes(event.key)) {
     event.preventDefault();
-    setMode("report");
-  } else if (event.metaKey && event.key === "2") {
-    event.preventDefault();
-    setMode("page");
-  } else if (event.metaKey && event.key.toLowerCase() === "k") {
-    event.preventDefault();
-    $("actions").querySelector(".active")?.focus();
-  } else if (event.metaKey && event.key === "Enter") {
-    event.preventDefault();
-    copyOperationPackage();
-  } else if (event.metaKey && event.shiftKey && event.key.toLowerCase() === "c") {
-    event.preventDefault();
-    copyOperationPackage();
+    setMode(["report", "page", "case"][Number(event.key) - 1]);
   } else if (event.key === "Escape") {
-    invoke?.("hide_quick_actions");
+    event.preventDefault();
+    hideQuickActions();
   }
 });
 
-loadTemplates();
+setIcon("collapse", "collapse");
+setIcon("close", "close");
+setIcon("gate-icon", "command");
+setIcon("footer-mark", "command");
 renderMode();
+refreshCliState();

@@ -1,119 +1,205 @@
-# MineM 公开版本边界 / Open-Source Release Boundary
+# MineM 开源说明 / Open-Source Guide
 
-状态 / Status：已公开发布 / Published
-许可证 / License：Apache-2.0
-版权 / Copyright：MineM contributors
-首个公开版本目标 / First public release target：v0.4.0
+当前版本 / Current version：`0.5.0-alpha.28`
 
-## 1. 目标 / Goal
+许可证 / License：[Apache License 2.0](../LICENSE)
 
-发布一个可复现的 MineM 源码仓库，任何人都可以检查、运行、修改和再分发，同时
-不暴露用户数据、客户材料、私有路径、模型权重或生成的二进制文件。
+公开仓库 / Public repository：[github.com/Jo-Tsu/minem](https://github.com/Jo-Tsu/minem)
 
-Publish a reproducible MineM source repository that anyone can inspect, run,
-modify, and redistribute without exposing user data, customer materials,
-private paths, model weights, or generated binaries.
+MineM 的 Web 平台、Python 服务、CLI、Agent Skills、macOS 客户端和创作助手均以
+源码形式公开。个人、团队和企业可以免费使用、修改、私有部署、商业使用和再发布，
+不需要 MineM 账号、许可证密钥、付费订阅或额外授权。
 
-公开仓库采用干净的源码快照，不继承当前内部 Git 历史，确保已删除的实验代码和
-下线模块无法通过公开历史恢复。
+MineM publishes the Web platform, Python service, CLI, Agent Skills, macOS
+client, and Creator Assistant as source code. Individuals, teams, and
+companies may use, modify, self-host, commercialize, and redistribute the
+software without a MineM account, license key, subscription, or separate
+permission.
 
-The public repository is a clean source snapshot. It does not inherit the
-current internal Git history, so removed experiments and retired modules do
-not remain accessible through public history.
+## 1. 开放的能力 / What is open
 
-## 2. 纳入的源码 / Included source
+| 范围 / Area | 源码位置 / Source | 说明 / Description |
+| --- | --- | --- |
+| Web 管理平台 | `frontend/` | React + TypeScript 素材库、预览、搜索、编排、导入与导出界面 |
+| 本地服务 | `server.py`, `minem/` | Python HTTP API、SQLite 数据模型、导入、预览、版本与数据治理 |
+| CLI | `minem/cli/` | 面向人和 AI Agent 的稳定命令与 `minem.cli/v1` JSON 输出 |
+| Agent Skills | `skills/` | 页面生成、汇报工作流和案例素材的可复用执行说明 |
+| macOS 客户端 | `desktop/` | Tauri + Rust 客户端、浏览窗口、创作助手、快捷浮窗和打包脚本 |
+| 页面运行时 | `templates/` | 汇报与页面的统一画布、翻页、全屏、刷新和链接能力 |
+| 工程工具 | `scripts/` | 测试、版本校验、公开边界检查和数据治理脚本 |
+| 文档 | `docs/` | PRD、技术设计、设计规范、测试计划和用户指南 |
 
-- `frontend/` 下的 React 与 TypeScript 源码。React and TypeScript source
-  under `frontend/`.
-- `server.py` 与 `minem/` 下的 Python 服务及领域模块。Python service and
-  domain modules under `server.py` and `minem/`.
-- `scripts/` 下安全的维护、校验、版本和 CLI 脚本。Safe maintenance,
-  validation, version, and CLI scripts under `scripts/`.
-- `desktop/` 下的 macOS 客户端源码与打包脚本。macOS client source and
-  packaging scripts under `desktop/`.
-- `local-tts/` 下的可选本地语音服务源码。Optional local speech service
-  source under `local-tts/`.
-- `templates/` 下的运行时 HTML 模板。Runtime HTML templates under
-  `templates/`.
-- 产品、技术、设计、测试、安全和贡献文档。Product, technical, design,
-  testing, security, and contribution documents.
-- 可复现的包清单、锁文件、Docker 文件和示例配置。Reproducible package
-  manifests, lockfiles, Docker files, and example configuration.
+The public repository contains the complete source needed to run the platform,
+invoke it through the CLI, use it from an AI coding agent, and build the macOS
+client. The desktop application is not a closed wrapper around a private
+service: its Rust host, WebView UI, native bridge, navigation, clipboard
+integration, local runtime launcher, quick-command window, tests, icons, and
+packaging scripts are included.
 
-## 3. 排除的内容 / Excluded content
+## 2. 许可证授予的自由 / License freedoms
 
-以下内容不得进入公开源码仓库 / The following never enter the public source
-repository:
+Apache-2.0 允许：
 
-- `data/`、SQLite 文件、服务锁和数据库备份。`data/`, SQLite files, server
-  locks, and database backups.
-- `uploads/`、`extracted/`、`thumbnails/`、`report-exports/` 和 `artifacts/`。
-- `import-sources.json`、本地 Docker 覆盖配置、凭据、令牌和机器专属环境文件。
-  `import-sources.json`, local Docker overrides, credentials, tokens, and
-  machine-specific environment files.
-- 客户汇报、案例材料、Logo、导入资源、会议转写、演讲稿和生成的预览。
-  Customer reports, case materials, logos, imported resources, meeting
-  transcripts, presenter scripts, and generated previews.
-- `local-tts/models/`、AI 或语音模型权重、生成的音频和日志。AI or speech
-  model weights, generated audio, and logs.
-- macOS sidecar 二进制、`.app`、DMG、构建缓存及 Rust 或 Node 构建产物。
-  macOS sidecar binaries, app bundles, DMG files, build caches, and Rust or
-  Node build output.
-- `public/` 下生成的 Vite 生产文件；发行构建必须从 `frontend/` 重新生成。
-  Generated Vite production files under `public/`; release builds recreate
-  them from `frontend/`.
-- 披露本地路径或非公开运行环境的内部日期审计报告。Internal dated audit
-  reports that disclose local paths or non-public operating context.
+- 个人与商业使用。Personal and commercial use.
+- 修改源码并创建衍生产品。Modification and derivative works.
+- 私有部署，无需公开自己的业务数据或私有改动。Private deployment without
+  publishing business data or private modifications.
+- 复制和再发布源码或二进制版本。Source and binary redistribution.
+- 在许可证范围内使用贡献者授予的专利许可。Use of the patent grant provided
+  by contributors under the license.
 
-## 4. 商标与示例 / Trademark and examples
+再发布时需要保留适用的许可证、版权和 NOTICE 声明，并标注自己做出的重大修改。
+软件按“现状”提供，不附带担保。完整法律条款以 [LICENSE](../LICENSE) 和
+[NOTICE](../NOTICE) 为准。
 
-Apache-2.0 授权代码，但不授予 MineM 名称、产品标识或 Logo 的使用权。公开示例
-必须使用合成内容、自有素材或许可兼容的素材，不得将客户或雇主材料作为示例包。
+When redistributing MineM, retain the applicable license, copyright, and NOTICE
+text, and identify significant changes you made. The software is provided
+without warranty. [LICENSE](../LICENSE) and [NOTICE](../NOTICE) are the
+authoritative legal terms.
 
-Apache-2.0 licenses the code but does not grant rights to the MineM name,
-product identity, or logos. Public examples must use synthetic content and
-self-owned or permissively licensed assets. Customer or employer material
-must not be used as a demonstration package.
+## 3. 三种运行方式 / Three ways to run
 
-## 5. 依赖与模型策略 / Dependency and model policy
+### 轻量本地启动 / Lightweight local startup
 
-- 直接依赖许可证记录在 `THIRD_PARTY_NOTICES.md`。Direct dependency
-  licenses are recorded in `THIRD_PARTY_NOTICES.md`.
-- CI 和二进制发布任务必须为传递依赖生成完整的软件物料清单。CI and binary
-  release jobs must generate a complete software bill of materials.
-- 模型权重必须单独下载，不得镜像到 MineM 仓库或源码发行包。Model weights
-  are downloaded separately and are never mirrored in the MineM repository.
-- 二进制与容器发行必须满足实际捆绑依赖的许可证，包括可选的 LGPL-3.0
-  `edge-tts`。Binary and container releases must satisfy the licenses of all
-  bundled dependencies, including the optional LGPL-3.0 `edge-tts` package.
+```bash
+git clone https://github.com/Jo-Tsu/minem.git
+cd minem
+./start.sh
+```
 
-## 6. 发布方式 / Publication model
+该方式使用本机 Python 与 Node.js，不要求 Docker。启动器会创建隔离环境、安装依赖、
+构建前端并启动 `http://127.0.0.1:8790/`。
 
-1. 准备并测试内部工作目录。Prepare and test the internal working tree.
-2. 仅将批准范围内的源码导出到新目录。Export only the approved source boundary
-   into a new directory.
-3. 对导出目录运行 `scripts/check_public_boundary.py`。Run the public boundary
-   checker against the export.
-4. 初始化新的 Git 仓库并创建单个干净的初始提交。Initialize a new Git
-   repository with one clean initial commit.
-5. 使用 GitHub Desktop 添加并发布为公开仓库。Add it to GitHub Desktop and
-   publish it as a public repository.
-6. CI 通过后将测试提交标记为 `v0.4.0`。Tag the tested commit as `v0.4.0`
-   after CI succeeds.
+This mode uses the local Python and Node.js runtimes and does not require
+Docker. The launcher creates an isolated environment, installs dependencies,
+builds the frontend, and starts `http://127.0.0.1:8790/`.
 
-## 7. 必须通过的门禁 / Required gates
+### Docker
 
-- Apache `LICENSE`、`NOTICE`、安全和贡献文档齐全。Required legal, security,
-  and contribution documents exist.
-- GitHub Issue Forms、Pull Request 模板和 `SUPPORT.md` 齐全。GitHub issue
-  forms, the pull request template, and `SUPPORT.md` exist.
-- 不包含禁止的运行目录或私有配置。No forbidden runtime path or private
-  configuration is present.
-- 不包含用户主目录绝对路径或明显密钥特征。No absolute user-home path or
-  obvious secret marker is present.
-- 前端、Python、版本、公开边界和 Docker 检查通过。Frontend, Python,
-  version, boundary, and Docker checks pass.
-- 默认安装以空素材库启动，不挂载私有来源。The default install starts with an
-  empty library and no private source mount.
-- 公开 README 同时说明轻量本地启动和可选 Docker 启动。The public README
-  explains both lightweight local startup and optional Docker.
+```bash
+docker compose up -d --build
+```
+
+默认容器从空素材库启动，不扫描主机目录。外部来源必须通过本地
+`docker-compose.override.yml` 显式只读挂载。
+
+The default container starts with an empty library and scans no host
+directory. External sources must be mounted explicitly and read-only through a
+local `docker-compose.override.yml`.
+
+### macOS 客户端源码构建 / Build the macOS client from source
+
+要求 / Requirements:
+
+- macOS 13 或更新版本。macOS 13 or later.
+- Apple Silicon Mac。Apple Silicon Mac.
+- Xcode Command Line Tools 与已接受的 Xcode 许可。Xcode Command Line
+  Tools with the Xcode license accepted.
+- Python 3.12、Node.js `^20.19.0` 或 `>=22.12.0`、Rust stable。
+
+```bash
+npm ci
+npm --prefix desktop ci
+npm run desktop:build
+```
+
+构建过程会先生成当前平台的本地服务 sidecar，再运行客户端测试并打包应用。
+生成的 `.app`、DMG、sidecar 和构建缓存位于忽略目录，不提交到源码仓库。GitHub
+Release 可以单独发布经过同一提交构建和签名的安装包。
+
+The build creates the local service sidecar for the current platform, runs the
+desktop tests, and packages the application. Generated app bundles, DMGs,
+sidecars, and build caches are intentionally ignored. A GitHub Release may
+publish signed installers built from the same source commit.
+
+## 4. AI 与 CLI 集成 / AI and CLI integration
+
+MineM 不绑定模型供应商。能够执行 Shell 命令的 Codex、Claude Code、Gemini CLI
+或其他 Agent，可以调用同一套 CLI：
+
+```bash
+python3 -m pip install --no-deps -e .
+minem page build --spec ./page.json --file ./page.html \
+  --publish --wait --output json
+minem report create --name "Customer review" \
+  --page CTRL-PAGE-001 --page CTRL-PAGE-002 --output json
+```
+
+`skills/` 提供固定的业务规则和执行流程，macOS 创作助手提供可直接粘贴到 AI 对话
+中的短模板。模型负责理解和生成内容，MineM 负责可验证的导入、分类、编号、版本、
+预览、编排与结果链接。
+
+MineM is model-agnostic. Any agent that can run shell commands can use the same
+CLI. The `skills/` directory carries stable workflow rules, while the macOS
+Creator Assistant provides short prompts that can be pasted into an AI
+conversation. The model interprets and generates content; MineM performs the
+verifiable import, classification, ID, version, preview, arrangement, and
+result-link operations.
+
+## 5. 不进入 Git 的内容 / What is not committed
+
+开源客户端不等于公开使用者的数据。以下内容不会进入源码仓库：
+
+- `data/`、SQLite 数据库、服务锁和数据库备份。
+- `uploads/`、`extracted/`、`thumbnails/`、`report-exports/`、`artifacts/`
+  和生成的 `public/`。
+- 客户汇报、页面、案例、图片、Logo、视频、GIF、会议转写和演讲稿。
+- `.env`、令牌、凭据、本机绝对路径和私有 Docker 覆盖配置。
+- 模型权重、生成音频、日志和可选 TTS 运行数据。
+- Node、Python、Rust 构建缓存，以及 macOS `.app`、DMG 和 sidecar 二进制。
+
+The repository excludes runtime databases, imported or generated material,
+customer content, credentials, machine-local configuration, model weights,
+audio, logs, installers, sidecars, and build caches. These exclusions protect
+user data and keep the source repository reproducible; they do not hide product
+functionality.
+
+具体纳入与排除路径由 [public-release.json](../public-release.json) 管理，并由
+`scripts/check_public_boundary.py` 自动检查。
+
+The exact include and exclude paths are defined in
+[public-release.json](../public-release.json) and validated by
+`scripts/check_public_boundary.py`.
+
+## 6. 发布与质量门禁 / Release and quality gates
+
+每个公开提交至少执行：
+
+```bash
+npm run check
+python3 -m compileall -q minem scripts server.py
+python3 scripts/run_core_tests.py
+npm --prefix desktop run test:release
+python3 scripts/check_public_boundary.py
+python3 scripts/check_repository_docs.py
+python3 scripts/version_control.py check
+git diff --check
+```
+
+CI 还会验证真实 CLI 工作流，包括创建页面、生成案例、组装汇报、插入或替换页面，
+以及正式预览链接。发布前同时检查：
+
+- 版本号、变更记录、Python、Node、Tauri 与 Rust 包清单一致。
+- 默认启动使用空素材库，不隐式读取本机目录。
+- 无用户主目录绝对路径、明显密钥、数据库或客户素材。
+- macOS 客户端源码可构建，创作助手与原生运行时测试通过。
+- README、用户指南、PRD、技术文档和测试计划与当前行为一致。
+
+CI also exercises real CLI workflows: page creation, case generation, report
+assembly, page insertion or replacement, and final preview URLs. Version
+manifests, source boundaries, privacy defaults, desktop buildability, and
+documentation consistency are release gates.
+
+## 7. 参与项目 / Participate
+
+- 使用问题和建议：提交 [Issue](https://github.com/Jo-Tsu/minem/issues)。
+- 代码贡献：阅读 [CONTRIBUTING.md](../CONTRIBUTING.md) 后提交 Pull Request。
+- 安全问题：按 [SECURITY.md](../SECURITY.md) 私下报告。
+- 使用方法：阅读 [USER_GUIDE.md](USER_GUIDE.md)。
+
+- Questions and proposals: open an
+  [Issue](https://github.com/Jo-Tsu/minem/issues).
+- Code contributions: follow [CONTRIBUTING.md](../CONTRIBUTING.md) and open a
+  pull request.
+- Security reports: use the private process in [SECURITY.md](../SECURITY.md).
+- Product usage: start with [USER_GUIDE.md](USER_GUIDE.md).

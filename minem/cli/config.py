@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from minem.runtime_discovery import discover_service_manifest, resolve_base_url
+from minem.runtime_discovery import discover_service_manifest, resolve_or_launch_base_url
 
 from .contracts import CliError
 
@@ -62,7 +62,8 @@ def unset_value(key: str) -> dict:
 
 def effective_server(explicit: str | None = None) -> str:
     config = load_config()
-    return resolve_base_url(explicit, configured=config.get("server"))
+    configured = config.get("server")
+    return resolve_or_launch_base_url(explicit or configured)
 
 
 def runtime_details() -> dict:

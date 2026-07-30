@@ -9,6 +9,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.workbuddy/
 
 # Runtime data and user-imported material. These are local state, not source code.
 /data/
@@ -32,7 +33,16 @@ local-tts/*.pid
 desktop/.build/
 desktop/node_modules/
 desktop/src-tauri/binaries/minem-server-*
+desktop/src-tauri/binaries/sidecar/*
 desktop/src-tauri/gen/
 desktop/src-tauri/target/
 desktop/*.app/
 desktop/*.dmg
+
+# Tauri icon command also emits platform assets not used by the macOS bundle.
+desktop/src-tauri/icons/android/
+desktop/src-tauri/icons/ios/
+desktop/src-tauri/icons/Square*Logo.png
+desktop/src-tauri/icons/StoreLogo.png
+desktop/src-tauri/icons/64x64.png
+desktop/src-tauri/icons/icon.ico
