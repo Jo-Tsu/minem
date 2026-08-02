@@ -67,6 +67,8 @@ jobs:
           python3 scripts/test_html_page_builder.py
           python3 scripts/test_import_pipeline.py
           python3 scripts/test_report_canvas_normalization.py
+          python3 scripts/test_runtime_foundation.py
+          python3 scripts/test_version_control.py
 
       - name: Run empty-library API smoke test
         shell: bash

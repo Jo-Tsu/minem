@@ -154,8 +154,12 @@ function renderScenarios() {
 function renderMode() {
   document.querySelectorAll("[data-mode]").forEach((button) => {
     const active = button.dataset.mode === state.mode;
+    const meta = MODE_META[button.dataset.mode];
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.innerHTML = icon(button.dataset.mode);
+    button.title = meta?.label || "";
+    button.setAttribute("aria-label", meta?.label || button.dataset.mode);
   });
   renderScenarios();
   setStatus("复制后粘贴到 AI 对话");

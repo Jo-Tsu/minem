@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -79,15 +80,33 @@ def is_included(path: str, includes: list[str], excludes: list[str]) -> bool:
     return matches_path(path, includes) and not matches_path(path, excludes)
 
 
+def is_excluded_directory(path: str, excludes: list[str]) -> bool:
+    normalized = normalize(path)
+    probes = (
+        normalized,
+        f"{normalized}/__minem_scan_probe__",
+        f"__root__/{normalized}",
+        f"__root__/{normalized}/__minem_scan_probe__",
+    )
+    return normalized == ".git" or any(matches_path(probe, excludes) for probe in probes)
+
+
 def iter_candidate_files(root: Path, includes: list[str], excludes: list[str]) -> Iterable[Path]:
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix()
-        if relative.startswith(".git/"):
-            continue
-        if is_included(relative, includes, excludes):
-            yield path
+    for current_root, dirnames, filenames in os.walk(root, topdown=True):
+        current_path = Path(current_root)
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if not is_excluded_directory(
+                (current_path / dirname).relative_to(root).as_posix(),
+                excludes,
+            )
+        ]
+        for filename in filenames:
+            path = current_path / filename
+            relative = path.relative_to(root).as_posix()
+            if is_included(relative, includes, excludes):
+                yield path
 
 
 def scan_text(path: Path) -> list[str]:

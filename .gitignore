@@ -19,6 +19,7 @@ __pycache__/
 /report-exports/
 /artifacts/
 /public/
+/runtime/
 import-sources.json
 import-sources.docker.json
 docker-compose.override.yml
@@ -31,6 +32,7 @@ local-tts/*.pid
 
 # Generated macOS desktop runtime and installers.
 desktop/.build/
+desktop/.npm-cache/
 desktop/node_modules/
 desktop/src-tauri/binaries/minem-server-*
 desktop/src-tauri/binaries/sidecar/*

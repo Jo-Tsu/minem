@@ -31,6 +31,147 @@ def prepare(conn):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="minem-import-test-") as temp_dir:
+        viewer_html = server.report_viewer_html("体验回归", [{
+            "title": "第一页",
+            "code": "CTRL-TEST-001",
+            "src": "/pages/test-page/index.html",
+        }])
+        assert 'class="page-state is-loading"' in viewer_html, viewer_html[:1000]
+        assert "页面加载时间过长" in viewer_html
+        assert 'class="retry-page"' in viewer_html
+        assert 'querySelector("[data-minem-preview-error]")' in viewer_html
+        assert "body?.textContent" not in viewer_html
+        assert "素材不存在/i.test(bodyText)" not in viewer_html
+        malicious_title = "</script><script>window.minemPwned=true</script>&\u2028"
+        malicious_viewer = server.report_viewer_html("安全回归", [{
+            "title": malicious_title,
+            "code": "CTRL-SECURITY-001",
+            "src": "/extracted/security/index.html",
+        }])
+        assert malicious_viewer.count("<script>") == 1
+        assert "</script><script>window.minemPwned" not in malicious_viewer
+        assert "\\u003c/script\\u003e\\u003cscript\\u003ewindow.minemPwned" in malicious_viewer
+        assert "\\u0026\\u2028" in malicious_viewer
+        parsed_pages = server.js_const_json_value(malicious_viewer, "pages", "[", "]", [])
+        assert parsed_pages[0]["title"] == malicious_title
+        error_html = server.preview_error_html("预览不可用", "来源文件不存在")
+        assert 'data-minem-preview-error="true"' in error_html
+        assert "重新加载" in error_html
+        assert server.Handler.do_GET is not server.Handler._dispatch_get
+        assert server.Handler.do_DELETE is not server.Handler._dispatch_delete
+        server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+        assert 'start_new_session=True' in server_source
+        assert 'os.killpg(process.pid, signal.SIGTERM)' in server_source
+        assert 'capture_report_export_page(f"{page_url}{separator}embed=1", screenshot)' in server_source
+
+        preview_security = (ROOT / "frontend" / "src" / "previewSecurity.ts").read_text(encoding="utf-8")
+        preview_component = (
+            ROOT / "frontend" / "src" / "components" / "AssetPreview.tsx"
+        ).read_text(encoding="utf-8")
+        case_library = (ROOT / "frontend" / "src" / "components" / "CaseControlLibrary.tsx").read_text(encoding="utf-8")
+        assert 'current === "loading" ? "slow" : current' in preview_component
+        assert 'loadState === "slow"' in preview_component
+        assert "页面资源较多，仍在加载" in preview_component
+        assert "previewDocumentHasError" in preview_component
+        assert 'querySelector("[data-minem-preview-error]")' in preview_component
+        assert "body?.textContent" not in preview_component
+        assert "素材不存在/i.test(bodyText)" not in preview_component
+        assert 'target.origin !== window.location.origin' in preview_security
+        assert 'const SOURCE_PREVIEW_SANDBOX = "allow-scripts allow-forms allow-modals allow-popups allow-downloads"' in preview_security
+        assert "sandbox={previewSandbox(item.controlUrl)}" in case_library
+        assert 'sandbox="allow-scripts allow-same-origin' not in case_library
+
+        arrangement_root = Path(temp_dir) / "arrangement-conflict"
+        arrangement_data = arrangement_root / "data"
+        arrangement_extracted = arrangement_root / "extracted"
+        arrangement_thumbnails = arrangement_root / "thumbnails"
+        arrangement_exports = arrangement_root / "report-exports"
+        arrangement_data.mkdir(parents=True)
+        (arrangement_extracted / "arrangement-upload").mkdir(parents=True)
+        arrangement_thumbnails.mkdir()
+        arrangement_exports.mkdir()
+        for page_no in (1, 2):
+            (arrangement_extracted / "arrangement-upload" / f"page-{page_no}.html").write_text(
+                f"<html><body>Page {page_no}</body></html>",
+                encoding="utf-8",
+            )
+        original_arrangement_paths = (
+            server.DB_PATH,
+            server.EXTRACTED,
+            server.THUMBNAILS,
+            server.REPORT_EXPORTS,
+        )
+        try:
+            server.DB_PATH = arrangement_data / "materials.db"
+            server.EXTRACTED = arrangement_extracted
+            server.THUMBNAILS = arrangement_thumbnails
+            server.REPORT_EXPORTS = arrangement_exports
+            with server.db() as arrangement_conn:
+                prepare(arrangement_conn)
+                arrangement_conn.execute(
+                    "insert into uploads(id,filename,stored_path,extract_path,created_at) values('arrangement-upload','test','','',1)"
+                )
+                for page_no in (1, 2):
+                    control_id = f"arrangement-control-{page_no}"
+                    arrangement_conn.execute(
+                        """
+                        insert into assets
+                        (id,title,category,asset_type,asset_code,media_kind,source_type,source_path,
+                         preview_url,upload_id,source_hash,version_group,created_at,updated_at)
+                        values (?,?,'page','control',?,'html','test',?,?,'arrangement-upload',?,?,1,1)
+                        """,
+                        (
+                            control_id,
+                            f"Page {page_no}",
+                            f"CTRL-ARRANGEMENT-{page_no}",
+                            f"page-{page_no}.html",
+                            f"/extracted/arrangement-upload/page-{page_no}.html",
+                            control_id,
+                            control_id,
+                        ),
+                    )
+                arrangement_conn.execute(
+                    """
+                    insert into assets
+                    (id,title,category,asset_type,asset_code,media_kind,source_type,source_path,
+                     preview_url,upload_id,source_hash,version_group,created_at,updated_at)
+                    values ('arrangement-report','Report','report','report','RPT-ARRANGEMENT-001',
+                            'html','test','report.html','/reports/arrangement-report/index.html',
+                            'arrangement-upload','arrangement-report','arrangement-report',1,1)
+                    """
+                )
+                for page_no in (1, 2):
+                    arrangement_conn.execute(
+                        "insert into report_page_slots values ('arrangement-report',?,?,'attached',?,'','',1,1)",
+                        (page_no, f"Page {page_no}", f"arrangement-control-{page_no}"),
+                    )
+            initial_arrangement = server.report_arrangement_payload("arrangement-report")
+            first_update = server.update_report_arrangement(
+                "arrangement-report",
+                {
+                    "pageOrder": ["arrangement-control-2", "arrangement-control-1"],
+                    "hiddenPageIds": [],
+                    "expectedUpdatedAt": initial_arrangement["updatedAt"],
+                },
+            )
+            stale_update = server.update_report_arrangement(
+                "arrangement-report",
+                {
+                    "pageOrder": ["arrangement-control-1", "arrangement-control-2"],
+                    "hiddenPageIds": [],
+                    "expectedUpdatedAt": initial_arrangement["updatedAt"],
+                },
+            )
+            assert first_update["ok"] is True, first_update
+            assert stale_update["ok"] is False and stale_update["conflict"] is True, stale_update
+        finally:
+            (
+                server.DB_PATH,
+                server.EXTRACTED,
+                server.THUMBNAILS,
+                server.REPORT_EXPORTS,
+            ) = original_arrangement_paths
+
         task_store = ImportTaskStore(Path(temp_dir) / "task-recovery.db")
         task_store.create({
             "id": "interrupted-import",

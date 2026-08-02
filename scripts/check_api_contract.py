@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 import argparse
 import json
+from pathlib import Path
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from minem.runtime_discovery import resolve_session_token  # noqa: E402
+from minem.security import API_TOKEN_HEADER  # noqa: E402
 
 
 def fetch_json(base_url, path, query=None):
     url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
     if query:
         url = f"{url}?{urllib.parse.urlencode(query)}"
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    headers = {"Accept": "application/json"}
+    token = resolve_session_token(base_url)
+    if token:
+        headers[API_TOKEN_HEADER] = token
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             payload = response.read().decode("utf-8")

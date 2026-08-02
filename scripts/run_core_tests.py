@@ -16,6 +16,7 @@ import argparse
 import hashlib
 from http.client import HTTPException
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from minem.tag_taxonomy import CONTROLLED_TAGS, FORBIDDEN_TAGS  # noqa: E402
 
 DEFAULT_DB = ROOT / "data" / "materials.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:8790"
+RUNTIME_ROOT = ROOT
 
 
 class Reporter:
@@ -64,7 +66,10 @@ class Reporter:
 def connect(db_path: Path) -> sqlite3.Connection:
     if not db_path.is_file():
         raise FileNotFoundError(f"数据库不存在：{db_path}")
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    wal_path = db_path.with_name(f"{db_path.name}-wal")
+    if wal_path.is_file() and wal_path.stat().st_size > 0:
+        raise RuntimeError("数据库仍有未归并的 WAL；请先停止 MineM 服务后再执行只读核心巡检")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -93,7 +98,7 @@ def canonical_preview_url(row: sqlite3.Row) -> str:
     upload_id = row["upload_id"] or ""
     source_path = row["source_path"] or ""
     if upload_id and source_path:
-        source = ROOT / "extracted" / upload_id / source_path
+        source = RUNTIME_ROOT / "extracted" / upload_id / source_path
         if source.exists():
             return f"/extracted/{upload_id}/{source_path}"
     return preview_url
@@ -109,17 +114,20 @@ def thumbnail_source_fingerprint(row: sqlite3.Row) -> str:
     ]
     html_path = None
     if row["upload_id"] and row["source_path"]:
-        candidate = (ROOT / "extracted" / row["upload_id"] / row["source_path"]).resolve()
-        if candidate.is_relative_to(ROOT / "extracted") and candidate.is_file():
+        candidate = (RUNTIME_ROOT / "extracted" / row["upload_id"] / row["source_path"]).resolve()
+        if candidate.is_relative_to(RUNTIME_ROOT / "extracted") and candidate.is_file():
             html_path = candidate
     if html_path is None and preview_url.startswith("/"):
-        candidate = (ROOT / urlparse(preview_url).path.lstrip("/")).resolve()
-        if candidate.is_relative_to(ROOT) and candidate.is_file():
+        candidate = (RUNTIME_ROOT / urlparse(preview_url).path.lstrip("/")).resolve()
+        if candidate.is_relative_to(RUNTIME_ROOT) and candidate.is_file():
             html_path = candidate
     if html_path and html_path.suffix.lower() in {".html", ".htm"}:
-        stat = html_path.stat()
-        relative = html_path.relative_to(ROOT).as_posix()
-        parts.append(f"file:{relative}:{stat.st_size}:{stat.st_mtime_ns}")
+        try:
+            stat = html_path.stat()
+            relative = html_path.relative_to(ROOT).as_posix()
+            parts.append(f"file:{relative}:{stat.st_size}:{stat.st_mtime_ns}")
+        except (OSError, ValueError):
+            pass
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -201,7 +209,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
             if not row["preview_url"]:
                 blank_previews.append(code)
             else:
-                target = preview_file(ROOT, row["preview_url"])
+                target = preview_file(RUNTIME_ROOT, row["preview_url"])
                 public_report_entry = asset_type == "report" and (row["preview_url"] or "").startswith("/reports/")
                 if not public_report_entry and (not target or not target.is_file() or target.stat().st_size == 0):
                     missing_previews.append((code, row["preview_url"]))
@@ -230,9 +238,14 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         reporter.passed("DATA-002", "所有活跃素材预览文件存在且非空")
 
     governance = ROOT / "scripts" / "govern_material_data.py"
+    governance_environment = {
+        **os.environ,
+        "MINEM_DATA_DIR": str(RUNTIME_ROOT),
+    }
     governance_result = subprocess.run(
         [sys.executable, str(governance)],
         cwd=ROOT,
+        env=governance_environment,
         capture_output=True,
         text=True,
         check=False,
@@ -268,7 +281,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         """
     ).fetchall()
     for row in thumbnail_rows:
-        thumbnail_path = ROOT / "thumbnails" / f"{row['id']}.png"
+        thumbnail_path = RUNTIME_ROOT / "thumbnails" / f"{row['id']}.png"
         metadata_path = thumbnail_path.with_suffix(".json")
         issue = {"assetCode": row["asset_code"], "assetId": row["id"]}
         if not thumbnail_path.is_file() or not metadata_path.is_file():
@@ -446,6 +459,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
             invalidRelations=invalid_relations[:30],
             cacheMismatches=cache_mismatches[:30],
             untaggedVisible=untagged_visible[:30],
+            untaggedVisibleTotal=len(untagged_visible),
         )
     else:
         reporter.passed(
@@ -488,7 +502,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
     else:
         reporter.passed("DATA-020", "导入批次路径可迁移，且不存在零产物垃圾记录")
 
-    backup_files = sorted((ROOT / "data").glob("materials.db.before-*"))
+    backup_files = sorted((RUNTIME_ROOT / "data").glob("materials.db.before-*"))
     if backup_files:
         reporter.fail("DATA-021", "项目运行目录仍含历史数据库副本", files=[path.name for path in backup_files[:30]])
     else:
@@ -804,15 +818,26 @@ def write_report(payload: dict, output: Path | None) -> Path:
 
 
 def main() -> int:
+    global RUNTIME_ROOT
     parser = argparse.ArgumentParser(description="Run read-only MineM core data and click-link tests.")
     parser.add_argument("--suite", choices=["data", "click", "all"], default="all")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        help="Runtime root containing extracted/, thumbnails/ and report-exports/.",
+    )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     parser.add_argument("--full", action="store_true", help="Check every primary material detail and preview link, not only representative samples.")
     args = parser.parse_args()
+    RUNTIME_ROOT = (
+        args.runtime_root.expanduser().resolve()
+        if args.runtime_root
+        else args.db.expanduser().resolve().parent.parent
+    )
 
     reporter = Reporter()
     started = time.time()

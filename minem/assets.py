@@ -66,7 +66,6 @@ def list_assets_response(
     category = query.get("category", ["all"])[0]
     asset_type = query.get("type", ["all"])[0]
     resource_kind = query.get("resource_kind", ["all"])[0]
-    control_role = query.get("control_role", ["全部"])[0]
     search = query.get("q", [""])[0].strip()
     include_versions = query.get("include_versions", ["0"])[0] == "1"
     view = query.get("view", ["full"])[0]
@@ -83,9 +82,6 @@ def list_assets_response(
     if resource_kind != "all":
         where.append("asset_type = 'resource' and resource_kind = ?")
         params.append(resource_kind)
-    if asset_type == "control" and control_role and control_role != "全部":
-        where.append("instr(',' || tags || ',', ?) > 0")
-        params.append(f",{control_role},")
     if search:
         search_terms = [search]
         link_path = urlparse(search).path.strip()

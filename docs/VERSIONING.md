@@ -46,6 +46,11 @@ python3 scripts/version_control.py check
 python3 scripts/version_control.py bump patch --headline "修复预览链接"
 python3 scripts/version_control.py bump minor --headline "新增案例工作流"
 python3 scripts/version_control.py bump major --headline "素材模型升级"
+
+# 预发布阶段晋级；alpha → beta/rc 时序号从 1 重新开始并同步 channel
+python3 scripts/version_control.py bump beta --headline "首个公开测试版本"
+python3 scripts/version_control.py bump rc --headline "发布候选版本"
+python3 scripts/version_control.py bump prerelease --headline "当前阶段下一版"
 ```
 
 `bump` 只修改代码仓库内的版本元数据，不修改数据库、用户素材或运行数据。执行后仍需人工完善 CHANGELOG 内容并完成测试。

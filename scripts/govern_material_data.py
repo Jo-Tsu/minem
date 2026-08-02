@@ -20,11 +20,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE_ROOT))
 
 import server
-ROOT = Path(__file__).resolve().parents[1]
-EXTRACTED = ROOT / "extracted"
+
+RUNTIME_ROOT = server.RUNTIME_ROOT
+EXTRACTED = server.EXTRACTED
 
 
 class RefParser(HTMLParser):
@@ -79,7 +81,7 @@ def asset_path(row) -> Path | None:
         return path
     preview_url = str(row["preview_url"] or "").split("?", 1)[0]
     if preview_url.startswith("/extracted/"):
-        candidate = (ROOT / preview_url.lstrip("/")).resolve()
+        candidate = (RUNTIME_ROOT / preview_url.lstrip("/")).resolve()
         if server.is_path_within(candidate, EXTRACTED):
             return candidate
     return None
@@ -112,10 +114,10 @@ def local_ref_path(html_path: Path, base_dir: Path, value: str) -> Path | None:
     if not path_text:
         return None
     if path_text.startswith("/"):
-        candidate = (ROOT / path_text.lstrip("/")).resolve()
+        candidate = (RUNTIME_ROOT / path_text.lstrip("/")).resolve()
     else:
         candidate = (base_dir / path_text).resolve()
-    if not server.is_path_within(candidate, ROOT):
+    if not server.is_path_within(candidate, RUNTIME_ROOT):
         return None
     return candidate
 
@@ -419,7 +421,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Audit MineM material data; pass --apply to perform repairs.")
     parser.add_argument("--apply", action="store_true", help="Apply repairs after reviewing the read-only audit output.")
     args = parser.parse_args()
-    with server.db() as conn:
+    if args.apply:
+        connection = server.db()
+    else:
+        database_uri = f"file:{server.DB_PATH.resolve().as_posix()}?mode=ro&immutable=1"
+        connection = sqlite3.connect(database_uri, uri=True)
+        connection.row_factory = sqlite3.Row
+    with connection as conn:
         before = audit(conn)
         if not args.apply:
             print(json.dumps({

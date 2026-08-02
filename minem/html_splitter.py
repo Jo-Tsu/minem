@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+from .html_safety import json_for_html_script
+
 
 def find_balanced_element(html, start, tag):
     pattern = re.compile(rf"<(/?){tag}\b[^>]*>", re.IGNORECASE)
@@ -184,7 +186,7 @@ def sync_manifest_viewer_pages(source, *, read_json_file, safe_int, slugify):
     if not span:
         return {"updated": False, "reason": "viewer-pages-missing", "pageCount": len(manifest_pages), "viewerPageCount": 0}
     pages = build_viewer_pages_from_manifest(manifest, safe_int=safe_int, slugify=slugify)
-    page_json = json.dumps(pages, ensure_ascii=False, indent=6)
+    page_json = json_for_html_script(pages, indent=6)
     replacement = "const pages = " + page_json.replace("\n", "\n    ") + ";"
     new_html = f"{report_html[:span[0]]}{replacement}{report_html[span[1]:]}"
     new_html = re.sub(

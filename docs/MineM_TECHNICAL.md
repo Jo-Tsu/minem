@@ -1,6 +1,6 @@
 # MineM 技术文档
 
-版本：0.5.0 · 2026-07-26
+版本：0.5.0-alpha.31 · 2026-08-02
 
 ## 1. 技术栈
 
@@ -46,11 +46,44 @@ flowchart TB
   DB --> Storylines
 ```
 
+### 2.1 数据库迁移与任务运行时
+
+- SQLite Schema 使用 `schema_migrations` 记录已应用版本、名称、实现校验和与应用时间。`product-version.json` 的 `databaseSchemaVersion` 必须与代码迁移目标一致，否则服务拒绝启动。
+- 现有无迁移记录的数据库先完成一次兼容整理，再登记 `legacy-schema-baseline`。后续已登记数据库不再重复执行旧兼容迁移。
+- 从数据库版本 `v2` 开始，存在待执行迁移时先通过 SQLite Online Backup 写入 `state/backups/`，迁移成功后最多保留最近三份。无待执行迁移时不生成重复备份。
+- 迁移使用 `BEGIN IMMEDIATE`；嵌套在测试或外部事务中时使用 Savepoint。任一迁移失败会回滚本轮所有 Schema 变更，已应用迁移的名称或校验和发生漂移时拒绝继续启动。
+- 导入、导出、标签分析和缩略图统一进入进程内 `JobRuntime`。四类任务使用独立有界通道，当前均单 Worker 串行执行，避免多个 Chromium、文件复制或 SQLite 写任务无上限并发。
+- 相同通道与任务键重复提交时复用同一个 Future；队列达到容量后接口返回可重试的 `503`，并把已创建的持久化任务标记为失败，禁止永久停留在 `queued`。
+- 服务重启后，遗留的导入、导出和标签 `queued/running` 任务统一转为带可操作原因的 `failed`；缩略图是可再生缓存，重新进入列表时按内容指纹再次排队。
+- `/api/version` 在原有发布信息之外返回数据库迁移版本与各任务通道的 workers、容量、排队数、完成数和失败数；诊断信息不返回数据库备份绝对路径。
+
+### 2.2 本地 API 会话与预览隔离
+
+- 服务每次启动生成新的随机会话令牌，原子写入 `runtime/session-token`，文件权限固定为当前用户可读写的 `0600`；也可通过 `MINEM_SESSION_TOKEN` 显式提供。令牌不写数据库、日志、预览 URL 或素材 HTML。
+- 生产管理首页只在字面回环 Host（`127.0.0.1`、`localhost`、`::1`）且客户端来自回环地址时注入会话令牌。React API 层自动为 `/api/*` 请求添加 `X-MineM-Session-Token`；CLI 先用桌面 `service.json` 发现服务，再校验同目录 `session.json` 的实际端口和存活 PID，匹配后才读取独立的 `session-token`。源码服务与 Vite 代理遵循同一绑定规则。
+- 普通 `POST/PUT/PATCH/DELETE` API 必须通过会话令牌。浏览器请求还必须是当前服务的同源 `Origin`，`Sec-Fetch-Site` 不得为 cross-site/same-site；CLI 等非浏览器调用可以省略 Origin，但仍必须携带令牌。
+- `GET /api/reports/{id}/trusted-entry` 为保留旧契约的显式重校验端点，会更新可信入口缓存，因此同样要求会话令牌和同源浏览器上下文；普通素材详情 GET 只读取已有缓存，不在读取时隐式写库。
+- 所有请求校验 `Host`，默认只接受字面回环 Host，阻断 DNS rebinding。远程部署必须通过 `MINEM_ALLOWED_HOSTS` 显式列出服务域名；若允许远程浏览器执行写操作，还必须显式设置 `MINEM_ALLOW_REMOTE_SESSION=1` 和固定 `MINEM_SESSION_TOKEN`。否则远程页面不接收写令牌。
+- 内部 Agent API 继续使用独立的 `MINEM_AGENT_API_TOKEN`；临时预览心跳和释放使用不可猜测的临时预览 token。三类令牌用途分离，不能互相替代。
+- 平台生成的汇报、页面、案例和临时查看器属于受信任壳；真正的来源 HTML iframe 使用不包含 `allow-same-origin` 和顶层导航权限的 sandbox，并由响应头再次设置 CSP sandbox。来源脚本无法读取管理页令牌、持久化同源存储或直接导航顶层窗口；嵌入页使用页面级内存 Storage shim 保持依赖 `localStorage/sessionStorage` 的动效可运行。
+- opaque-origin iframe 的相对 `fetch/XHR` 通过 10 分钟、仅限当前导入包的只读 capability 读取 `/extracted/` 静态依赖。capability 不适用于 `/api`、其他导入包或写请求，响应只对 `Origin: null` 返回 CORS，且服务日志统一脱敏。
+- `/extracted/*.html` 的顶层访问统一进入平台查看壳；只有带 `embed=1` 的 iframe 请求返回来源 HTML。管理首页使用 CSP 限制脚本、连接、frame、form 和 frame ancestors，并设置 `Referrer-Policy: no-referrer`。
+
+### 2.3 页面语义去重
+
+- `databaseSchemaVersion=2` 为 `assets` 增加 `semantic_key`、`semantic_text_hash`、`semantic_fingerprint`、`semantic_fingerprint_version` 和 `semantic_dedupe_status`。迁移前使用 SQLite Online Backup 写入 `state/backups/`，原始页面、页槽和资源不在迁移中改写。
+- 页面语义指纹只取单页根节点中的唯一 `data-slide-key/data-page-key` 与去除脚本、样式、模板后的可见正文；标题、导入批次、HTML 外壳和资源绝对路径不能单独触发自动归并。正文不足 12 字或存在多个稳定 key 时不生成自动归并指纹。
+- 新导入页面在发布事务提交后计算指纹。若命中其他主页面，仅定向生成候选和当前页面的最终缩略图；同时满足语义指纹一致、平均像素差不高于 `1.5` 且变化像素不超过 `3%` 时，才使用 `semantic-visual-v1` 收进同一版本链。
+- 主版本按“汇报页槽引用数倒序、创建时间正序、编号正序”选择。归并只更新版本元数据，不迁移 `report_page_slots/report_page_candidates`，不删除页面记录、缩略图、来源文件或资源，因此不同汇报仍可追溯到各自导入的页面记录。
+- 存量数据默认保持 `legacy`，不会因列表浏览自动变化。`scripts/audit_page_duplicates.py` 默认使用只读数据库连接输出 `auto-reuse/review` 清单；只有显式 `--apply` 才归并高置信组，并在提交前验证全部汇报页槽字节级一致。
+
 ## 3. 目录结构
 
 ```text
 minem/
   frontend/                     # React + TypeScript 源码
+    src/productLogic.ts         # 可测试的产品规则、排序与编号解析
+    src/components/AssetPreview.tsx # 统一 HTML/媒体预览生命周期
   minem/                        # Python 领域模块
     agent/                      # 可选自动化能力，默认不开放 HTTP
     html_page_builder.py        # JSON 页面规范到自包含 1920×1080 HTML

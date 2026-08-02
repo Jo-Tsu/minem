@@ -9,6 +9,10 @@ TAXONOMY_VERSION = "taxonomy-v1"
 MODEL_VERSION = "rules-v1"
 MIN_CONFIRM_CONFIDENCE = 0.70
 MAX_CONFIRMED_TAGS = 4
+# Per PRD 4.5 rule 4: when two mutually exclusive candidates in one dimension are
+# within this raw-score gap, the winner is ambiguous, so it is flagged "conflict"
+# and withheld from automatic confirmation instead of being auto-applied.
+CONFLICT_SCORE_GAP = 0.15
 
 TAXONOMY = {
     "内容角色": ["封面", "目录", "问题", "价值", "方案", "案例", "数据", "流程", "总结", "行动"],
@@ -133,6 +137,7 @@ def classify_evidence(evidence):
             "confidence": round(confidence, 3),
             "evidence": matches[tag][:6],
             "conflictStatus": "none",
+            "_score": score,
         })
 
     # The taxonomy permits multiple values per dimension. The automatic confirmation
@@ -141,7 +146,16 @@ def classify_evidence(evidence):
     for candidate in candidates:
         by_dimension[candidate["dimension"]].append(candidate)
     for dimension_candidates in by_dimension.values():
-        dimension_candidates.sort(key=lambda item: (-item["confidence"], item["tag"]))
+        dimension_candidates.sort(key=lambda item: (-item["_score"], item["tag"]))
+        # Flag intra-dimension ambiguity by raw-score gap (PRD 4.5 rule 4): if a
+        # runner-up is within the gap of the leader, neither is trustworthy
+        # enough to auto-confirm, so both are marked "conflict".
+        if len(dimension_candidates) >= 2:
+            leader = dimension_candidates[0]
+            for other in dimension_candidates[1:]:
+                if leader["_score"] - other["_score"] < CONFLICT_SCORE_GAP:
+                    leader["conflictStatus"] = "conflict"
+                    other["conflictStatus"] = "conflict"
 
     confirmed_industry = any(
         item["confidence"] >= MIN_CONFIRM_CONFIDENCE and item["conflictStatus"] == "none"
@@ -159,6 +173,8 @@ def classify_evidence(evidence):
         by_dimension["行业"].append(fallback)
 
     candidates.sort(key=lambda item: (-item["confidence"], item["dimension"], item["tag"]))
+    for candidate in candidates:
+        candidate.pop("_score", None)
     return candidates
 
 

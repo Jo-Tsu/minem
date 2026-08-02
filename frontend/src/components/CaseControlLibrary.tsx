@@ -9,13 +9,44 @@ import {
   Sparkles,
   X
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useModalBehavior } from "../modal";
+import { previewSandbox } from "../previewSecurity";
 import type { CaseAiInfo, CaseControlGroup } from "../types";
 
 type CopyText = (text: string, message: string) => Promise<void>;
 
+// Mount the (heavy) iframe only when it nears the viewport so a large case
+// library / long detail page does not spin up many live iframes at once.
+function LazyFrame({ src, title }: { src: string; title: string }) {
+  const holderRef = useRef<HTMLDivElement | null>(null);
+  const [near, setNear] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const node = holderRef.current;
+    if (!node) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setNear(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => { for (const entry of entries) setNear(entry.isIntersecting); },
+      { rootMargin: "600px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div ref={holderRef} className="lazy-frame-holder">
+      {near && !failed ? <iframe loading="lazy" title={title} src={src} sandbox={previewSandbox(src)} referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <div className="lazy-frame-pending" aria-hidden="true" />}
+      {failed ? <div className="lazy-frame-error"><AlertCircle size={16} /><span>预览不可用</span></div> : null}
+    </div>
+  );
+}
+
 function CaseAiInfoDialog({ info, close, copyText }: { info: CaseAiInfo; close: () => void; copyText: CopyText }) {
+  useModalBehavior(close);
   const assetStructure = [
     info.pageStructure.keyAsset ? `  - 主视觉/重点素材: ${info.pageStructure.keyAsset}` : "",
     info.pageStructure.modalAssets ? `  - 可弹窗查看素材: ${info.pageStructure.modalAssets}` : ""
@@ -86,15 +117,18 @@ function CaseAiInfoDialog({ info, close, copyText }: { info: CaseAiInfo; close: 
   );
 }
 
-export function CaseControlLibrary({ copyText }: { copyText: CopyText }) {
+export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: CopyText; reloadToken?: number }) {
   const [groups, setGroups] = useState<CaseControlGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [aiInfo, setAiInfo] = useState<CaseAiInfo | null>(null);
   const [selectedGroupCode, setSelectedGroupCode] = useState<string | null>(null);
+  const [failedPreviewIds, setFailedPreviewIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError("");
     void api.caseGroups().then((response) => {
       if (cancelled) return;
       if (response.ok === false) {
@@ -110,7 +144,7 @@ export function CaseControlLibrary({ copyText }: { copyText: CopyText }) {
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [reloadToken]);
 
   const selectedGroup = groups.find((item) => item.code === selectedGroupCode) || null;
   const group = selectedGroup || groups[0] || null;
@@ -144,7 +178,7 @@ export function CaseControlLibrary({ copyText }: { copyText: CopyText }) {
                   <div className="case-list-preview" aria-hidden="true">
                     {caseGroup.controls[0]?.thumbnailUrl
                       ? <img loading="lazy" alt="" src={caseGroup.controls[0].thumbnailUrl} />
-                      : <iframe loading="lazy" title={`${caseGroup.title}预览`} src={caseGroup.reportUrl} />}
+                      : <LazyFrame title={`${caseGroup.title}预览`} src={caseGroup.reportUrl} />}
                   </div>
                   <div className="case-list-main">
                     <div className="case-list-badges">
@@ -216,7 +250,9 @@ export function CaseControlLibrary({ copyText }: { copyText: CopyText }) {
                       </header>
                       <div className="case-detail-body">
                         <div className="case-detail-preview">
-                          <iframe loading="lazy" title={`${item.title} 页面素材预览`} src={item.controlUrl} />
+                          {!failedPreviewIds.has(item.id)
+                            ? <iframe loading="lazy" title={`${item.title} 页面素材预览`} src={item.controlUrl} sandbox={previewSandbox(item.controlUrl)} referrerPolicy="no-referrer" onError={() => setFailedPreviewIds((current) => new Set(current).add(item.id))} />
+                            : <div className="case-preview-error"><AlertCircle size={18} /><strong>页面预览不可用</strong><span>可尝试打开页面素材链接查看详情。</span></div>}
                         </div>
                         <div className="case-detail-info">
                           <section><strong>案例总结</strong><p>{item.summary}</p></section>

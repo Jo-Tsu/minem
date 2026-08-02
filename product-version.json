@@ -1,15 +1,14 @@
 {
   "product": "MineM",
-  "version": "0.5.0-alpha.28",
-  "channel": "preview",
-  "releasedAt": "2026-07-30",
+  "version": "0.5.0-beta.1",
+  "channel": "beta",
+  "releasedAt": "2026-08-03",
   "apiVersion": 1,
-  "databaseSchemaVersion": 1,
-  "headline": "修复 macOS Dock 点击无法恢复主窗口",
+  "databaseSchemaVersion": 2,
+  "headline": "MineM 0.5 首个 Beta 版本",
   "releaseNotes": [
-    "macOS Dock 再次点击正在运行的 MineM 时，恢复、显示并聚焦已有主窗口。",
-    "关闭到托盘和最小化状态复用同一恢复路径，不创建重复窗口或重复启动本机服务。",
-    "Web、后端、CLI、Agent Skills、macOS 客户端与创作助手的开源范围和构建方式已完整说明。",
-    "公开边界新增 Skills 源码，继续排除用户数据、模型、sidecar、安装包和本机状态。"
+    "完成素材产品逻辑、统一预览、导入任务、汇报编排、页面语义去重和本机安全边界的系统性稳定化。",
+    "macOS 客户端支持稳定的本机服务接管、重复启动、创作助手和 Smallink 风格拖拽安装盘。",
+    "前端、Python、CLI、真实素材链接、迁移、安装包与桌面运行时均纳入自动化回归门禁。"
   ]
 }

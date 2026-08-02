@@ -145,8 +145,22 @@ fn startup_failure_message(status: &str, stderr_log: &Path) -> String {
     }
 }
 
+fn startup_timeout() -> Duration {
+    // A cold PyInstaller start on a slow disk or a first-run Gatekeeper scan can
+    // exceed a tight fixed budget, surfacing a false "启动超时". Keep a generous
+    // default and let operators tune it. A genuine crash still returns early via
+    // the child.try_wait() check below, so a larger cap does not slow real
+    // failures.
+    let secs = env::var("MINEM_STARTUP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(60);
+    Duration::from_secs(secs)
+}
+
 fn wait_for_service(child: &mut Child, port: u16, stderr_log: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + startup_timeout();
     while Instant::now() < deadline {
         if healthcheck(port) {
             return Ok(());

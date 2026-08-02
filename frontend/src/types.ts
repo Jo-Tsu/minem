@@ -225,7 +225,14 @@ export type ImportTask = {
   message: string;
   error: string;
   progress: number;
+  fileCount?: number;
   assetCount: number;
+  thumbnailCount?: number;
+  uploadId?: string;
+  assetId?: string;
+  assetCode?: string;
+  assetTitle?: string;
+  assetType?: string;
   previewUrl?: string;
   createdAt?: number;
   updatedAt?: number;

@@ -50,7 +50,7 @@ test("drawer collapse and close remain separate native actions", () => {
   assert.match(script, /invoke\("set_collapsed"/);
   assert.match(script, /invoke\("hide"\)/);
   assert.match(script, /window\.setMineMDrawerCollapsed/);
-  assert.match(shell, /EXPANDED_WIDTH: f64 = 420\.0/);
+  assert.match(shell, /EXPANDED_WIDTH: f64 = 340\.0/);
   assert.match(shell, /COLLAPSED_SIZE: f64 = 48\.0/);
   assert.match(shell, /MIN_HEIGHT: f64 = 480\.0/);
   assert.match(shell, /MAX_HEIGHT: f64 = 520\.0/);
@@ -60,9 +60,11 @@ test("drawer collapse and close remain separate native actions", () => {
 });
 
 test("assistant has no user input form and exposes three scenario groups", () => {
-  assert.match(html, /data-mode="report"/);
-  assert.match(html, /data-mode="page"/);
-  assert.match(html, /data-mode="case"/);
+  assert.match(html, /data-mode="report"[^>]*title="汇报"[^>]*aria-label="汇报"/);
+  assert.match(html, /data-mode="page"[^>]*title="页面"[^>]*aria-label="页面"/);
+  assert.match(html, /data-mode="case"[^>]*title="案例"[^>]*aria-label="案例"/);
+  assert.doesNotMatch(html, /data-mode="(?:report|page|case)"[^>]*>[^<\s]+<\/button>/);
+  assert.match(script, /button\.innerHTML = icon\(button\.dataset\.mode\)/);
   assert.match(html, /id="scenarios"/);
   assert.doesNotMatch(html, /<input|<textarea|<select/);
   assert.doesNotMatch(html, /命令预览|补充要求|汇报链接或编号/);

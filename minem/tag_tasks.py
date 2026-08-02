@@ -86,6 +86,23 @@ def ensure_schema(conn):
             )
 
 
+def recover_interrupted(conn):
+    ensure_schema(conn)
+    timestamp = now_ms()
+    cursor = conn.execute(
+        """
+        update tag_analysis_tasks
+        set status = 'failed',
+            message = '标签分析已中断',
+            error = 'MineM 服务已重新启动，原标签分析无法继续；请重新创建任务',
+            updated_at = ?
+        where status in ('queued', 'running')
+        """,
+        (timestamp,),
+    )
+    return max(0, cursor.rowcount)
+
+
 def public_task(row):
     item = dict(row)
     item["scope"] = json.loads(item.pop("scope_json") or "[]")

@@ -12,6 +12,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from minem.runtime_discovery import resolve_session_token
+from minem.security import API_TOKEN_HEADER
+
 from .contracts import CliError, EXIT_CONNECTION
 
 
@@ -27,18 +30,21 @@ STATUS_CODES = {
 
 
 class MineMClient:
-    def __init__(self, base_url: str, timeout: float = 30, request_id: str = ""):
+    def __init__(self, base_url: str, timeout: float = 30, request_id: str = "", session_token: str = ""):
         parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise CliError("INVALID_ARGUMENT", f"Invalid MineM server URL: {base_url}", exit_code=2)
         self.base_url = base_url.rstrip("/")
         self.timeout = max(1.0, float(timeout))
         self.request_id = request_id
+        self.session_token = session_token or resolve_session_token(self.base_url)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json", "User-Agent": "minem-cli/1"}
         if self.request_id:
             headers["X-Request-ID"] = self.request_id
+        if self.session_token:
+            headers[API_TOKEN_HEADER] = self.session_token
         return headers
 
     def _error(self, status: int, payload: Any, fallback: str) -> CliError:
@@ -112,6 +118,8 @@ class MineMClient:
             connection.putheader("User-Agent", "minem-cli/1")
             if self.request_id:
                 connection.putheader("X-Request-ID", self.request_id)
+            if self.session_token:
+                connection.putheader(API_TOKEN_HEADER, self.session_token)
             connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
             connection.putheader("Content-Length", str(len(prefix) + path.stat().st_size + len(suffix)))
             connection.endheaders()

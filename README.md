@@ -207,6 +207,8 @@ npm run desktop:build
 ```
 
 构建会先生成本机 sidecar、运行 JavaScript 与 Rust 测试，再产出 `.app` 和 DMG。
+打开 DMG 后，将 `MineM.app` 拖到右侧“应用程序”快捷入口即可安装或覆盖升级；
+应用数据保留在 `~/Library/Application Support/MineM/`，覆盖安装不会删除素材库。
 安装包、sidecar 和构建缓存是可复现产物，因此不会提交进 Git；源码和必要图标会提交。
 完整说明见[开源说明与客户端构建](docs/OPEN_SOURCE_RELEASE.md)。
 
@@ -427,6 +429,8 @@ npm run desktop:build
 The build creates the local sidecar, runs JavaScript and Rust tests, and then
 packages the app and DMG. Installers, sidecars, and build caches are
 reproducible outputs and are not committed; all source and required icons are.
+Open the DMG and drag `MineM.app` onto the Applications shortcut to install or
+upgrade. Application data remains under `~/Library/Application Support/MineM/`.
 See the [open-source and desktop build guide](docs/OPEN_SOURCE_RELEASE.md).
 
 ### Data and privacy

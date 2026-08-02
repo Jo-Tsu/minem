@@ -55,6 +55,9 @@ DEFAULT_TASK = {
     "error": "",
 }
 
+INTERRUPTED_TASK_MESSAGE = "导出已中断"
+INTERRUPTED_TASK_ERROR = "MineM 服务已重新启动，原导出进程无法继续；请重新导出"
+
 
 def now_ms():
     return int(time.time() * 1000)
@@ -115,6 +118,25 @@ class ReportExportTaskStore:
             return None
         task = self._row_to_task(row)
         return task if include_private else public_report_export_task(task)
+
+    def recover_interrupted(self):
+        self.ensure_schema()
+        timestamp = now_ms()
+        with self.lock:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    """
+                    update report_export_tasks
+                    set status = 'failed',
+                        progress = 100,
+                        message = ?,
+                        error = ?,
+                        updated_at = ?
+                    where status in ('queued', 'running')
+                    """,
+                    (INTERRUPTED_TASK_MESSAGE, INTERRUPTED_TASK_ERROR, timestamp),
+                )
+                return max(0, cursor.rowcount)
 
     def _save(self, task):
         if not task.get("id"):

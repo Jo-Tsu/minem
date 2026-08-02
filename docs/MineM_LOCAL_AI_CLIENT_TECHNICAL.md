@@ -130,6 +130,7 @@ MineM.app/
   runtime/
     bootstrap-state.json
     service.json
+    session.json
     session-token
     locks/
     staging/
@@ -138,6 +139,7 @@ MineM.app/
 
 - 数据目录权限为当前用户可读写，不要求管理员权限。
 - `session-token` 权限限制为当前用户，并在服务重启时轮换。
+- `service.json` 只负责发现桌面托管服务；实际 Python 服务在 `session.json` 写入当前 `baseUrl` 与 PID。CLI 仅在端口匹配且 PID 存活时读取同目录 `session-token`。
 - 临时文件先写入 `staging/`，验证成功后通过原子重命名发布。
 
 ## 5. 首次启动与恢复状态机
@@ -299,7 +301,7 @@ case.extract
 
 - CLI 代码随 `minem-server` 一体多用运行时打包，避免重复携带 Python 环境。
 - 客户端首次启动自动写入 `~/.local/bin/minem` 用户级启动器，无需管理员授权；升级与修复继续维护该入口，创作助手只复制稳定命令名 `minem`，不暴露本机绝对路径。
-- CLI 只从客户端专属 `runtime/service.json` 获取当前服务地址和令牌，不要求用户输入端口；显式 `--base-url` 或 `MINEM_BASE_URL` 才允许连接其他实例。
+- CLI 从客户端专属 `runtime/service.json` 获取当前服务地址，再通过 `runtime/session.json` 校验实际端口与存活 PID，最后读取独立 `session-token`，不要求用户输入端口；显式 `--base-url` 或 `MINEM_BASE_URL` 连接其他实例时仍必须命中对应 session manifest 或显式提供 `MINEM_SESSION_TOKEN`。
 - MineM 未运行时，CLI 使用 macOS `open -gj -a MineM` 后台唤起客户端并等待专属运行时清单就绪。
 
 ### 9.2 输出契约
@@ -356,7 +358,7 @@ minem_open
 - 默认动作是复制包含固定技能、最少追问和 MineM CLI 执行协议的完整 AI 指令。
 - 首次成功初始化后自动显示一次；本地只写入引导标记，不保存业务草稿、模板或剪贴板历史。
 - 后续优先由 `Option + Command + M` 唤醒，同时注册 `Control + Option + M` 规避 macOS 原生菜单或前台应用抢占；菜单栏入口为可见备用路径。快捷键总是展开右侧抽屉，失焦保持显示。
-- 静态 WebView 必须启用 Tauri 全局 API，并仅暴露受限 command；`set_collapsed` 在 `420` 点抽屉与 `48` 点图标间切换，`hide` 完全隐藏。抽屉不启用 drag region。
+- 静态 WebView 必须启用 Tauri 全局 API，并仅暴露受限 command；`set_collapsed` 在 `340` 点抽屉与 `48` 点图标间切换，`hide` 完全隐藏。抽屉不启用 drag region。
 - WebView 启动先进入 CLI 检查状态。用户级 CLI 缺失或不可执行时显示修复门禁，不初始化素材列表、不复制指令；修复后原地复检并切换为就绪状态。指令使用发现到的绝对 CLI 路径。
 - `main.rs` 只装配插件和应用生命周期；Sidecar、导航、创作助手和原生桥接分别位于 `desktop_runtime`、`navigation`、`quick_actions`、`native_bridge`，避免窗口和 Shell 逻辑继续集中增长。
 - 除菜单栏与全局快捷键外，`--assistant`、`--creator-assistant` 和 `minem://assistant` 可从外部调用；单实例回调只展开已有抽屉。
@@ -534,7 +536,7 @@ minem://launch
 - 本机服务标准输出与错误输出写入客户端日志目录，并按启动轮转。
 - 打包 sidecar 在独立进程组内运行；客户端退出时终止整个进程组，避免 PyInstaller 工作进程残留并阻塞下一次冷启动。
 - `v0.5.0-alpha.13` 将原生壳拆分为 `desktop_runtime`、`navigation`、`quick_actions` 和 `native_bridge`，主入口只负责装配。
-- 创作助手使用 `420×480–520` 点右侧抽屉与 `48×48` 点收起图标；三组场景由统一注册表渲染，AI 指令使用稳定命令名 `minem`、固定 Skill 和可填写空白项，剪贴板写入完成后逐字回读。
+- 创作助手使用 `340×480–520` 点右侧抽屉与 `48×48` 点收起图标；汇报、页面、案例以纯图标分组切换并保留无障碍名称，三组场景由统一注册表渲染，AI 指令使用稳定命令名 `minem`、固定 Skill 和可填写空白项，剪贴板写入完成后逐字回读。
 - 单实例支持 `--assistant`、`--creator-assistant` 和 `minem://assistant`，供快捷工具和第三方 AI 唤起既有助手窗口。
 - `v0.5.0-alpha.14` 增加覆盖升级接管：运行时只回收清单中 `managedByClient=true` 且进程组可验证的旧版 Sidecar，确认旧端口释放后再启动当前版本；外部服务保持隔离。
 - 启动子进程退出或超时时读取轮转错误日志的末尾摘要并返回启动页，避免仅暴露无诊断价值的退出码。

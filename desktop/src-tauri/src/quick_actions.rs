@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub const WINDOW_LABEL: &str = "quick-actions";
-pub const EXPANDED_WIDTH: f64 = 420.0;
+pub const EXPANDED_WIDTH: f64 = 340.0;
 pub const COLLAPSED_SIZE: f64 = 48.0;
 const MIN_HEIGHT: f64 = 480.0;
 const MAX_HEIGHT: f64 = 520.0;
@@ -283,8 +283,8 @@ mod tests {
             2.0,
             false,
         );
-        assert_eq!(layout.size, PhysicalSize::new(840, 1040));
-        assert_eq!(layout.position, PhysicalPosition::new(2160, 466));
+        assert_eq!(layout.size, PhysicalSize::new(680, 1040));
+        assert_eq!(layout.position, PhysicalPosition::new(2320, 466));
     }
 
     #[test]
@@ -305,17 +305,17 @@ mod tests {
             PhysicalPosition::new(0, 24),
             PhysicalSize::new(1440, 876),
             PhysicalPosition::new(540, 140),
-            PhysicalSize::new(420, 520),
+            PhysicalSize::new(340, 520),
             PhysicalSize::new(48, 48),
         );
-        assert_eq!(position, PhysicalPosition::new(912, 376));
+        assert_eq!(position, PhysicalPosition::new(832, 376));
 
         let clamped = anchored_position(
             PhysicalPosition::new(0, 24),
             PhysicalSize::new(1440, 876),
             PhysicalPosition::new(10, 30),
             PhysicalSize::new(48, 48),
-            PhysicalSize::new(420, 520),
+            PhysicalSize::new(340, 520),
         );
         assert_eq!(clamped, PhysicalPosition::new(0, 24));
     }

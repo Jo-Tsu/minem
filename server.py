@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 import cgi
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -14,10 +14,10 @@ import io
 import json
 import mimetypes
 import os
-import queue
 import re
 import runpy
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import zipfile
 
 from minem.assets import list_assets_response
@@ -35,7 +36,12 @@ from minem.asset_deletion import (
 )
 from minem.agent import AgentRuntime
 from minem.case_groups import load_case_groups
-from minem.db import connect_database, ensure_asset_schema, initialize_database
+from minem.db import (
+    SCHEMA_MIGRATIONS,
+    connect_database,
+    ensure_asset_schema,
+    initialize_database,
+)
 from minem.html_splitter import (
     build_control_html as split_control_html,
     build_viewer_pages_from_manifest as split_viewer_pages_from_manifest,
@@ -55,6 +61,7 @@ from minem.html_splitter import (
     viewer_pages_array_count as split_viewer_pages_array_count,
     viewer_pages_array_span as split_viewer_pages_array_span,
 )
+from minem.html_safety import json_for_html_script
 from minem.imports import (
     auto_import_sources as run_auto_import_sources,
     copy_html_dependency_bundle,
@@ -70,15 +77,33 @@ from minem.imports import (
     update_import_task as update_import_task_record,
 )
 from minem.import_tasks import ImportTaskStore
+from minem.jobs import ChannelConfig, JobQueueFullError, JobRuntime
+from minem.migrations import migration_status
+from minem.page_duplicates import (
+    FINGERPRINT_VERSION as PAGE_FINGERPRINT_VERSION,
+    attach_duplicate_version,
+    backfill_page_fingerprints,
+    is_auto_reusable_visual,
+    refresh_asset_fingerprint,
+    thumbnail_difference,
+)
 from minem.tag_tasks import (
     changed_asset_ids as tag_changed_asset_ids,
     create_task as create_tag_analysis_task_record,
     ensure_schema as ensure_tag_task_schema,
     public_task as public_tag_analysis_task,
+    recover_interrupted as recover_interrupted_tag_tasks,
     run_task as run_tag_analysis_task_record,
 )
 from minem.tag_taxonomy import TAG_DIMENSION, taxonomy_payload, validate_tags
 from minem.report_exports import ReportExportTaskStore
+from minem.security import (
+    API_TOKEN_HEADER,
+    browser_write_origin_allowed,
+    request_token,
+    rotate_session_token,
+    token_matches,
+)
 from minem.lineage import (
     asset_lineage_details as build_asset_lineage_details,
     attach_source_batches as hydrate_source_batches,
@@ -168,6 +193,8 @@ DB_PATH = DATA / "materials.db"
 AUTO_IMPORT_CONFIG = RUNTIME_ROOT / "import-sources.json"
 STORYLINES_PATH = DATA / "storylines.json"
 VERSION_MANIFEST_PATH = RESOURCE_ROOT / "product-version.json"
+SESSION_TOKEN_PATH = RUNTIME_ROOT / "runtime" / "session-token"
+SESSION_MANIFEST_PATH = RUNTIME_ROOT / "runtime" / "session.json"
 
 
 def load_product_version():
@@ -180,6 +207,7 @@ def load_product_version():
 
 
 PRODUCT_VERSION = load_product_version()
+SESSION_TOKEN = ""
 IMPORT_TASK_STORE = ImportTaskStore(DB_PATH)
 REPORT_EXPORT_TASK_STORE = ReportExportTaskStore(DB_PATH)
 AGENT_RUNTIME = AgentRuntime(ROOT, DATA)
@@ -191,18 +219,34 @@ TEMP_REPORT_STALE_MS = 15 * 1000
 TEMP_REPORT_SESSIONS = {}
 TEMP_REPORT_LOCK = threading.Lock()
 INSTANCE_LOCK_HANDLE = None
-THUMBNAIL_REFRESH_QUEUE = queue.Queue()
 THUMBNAIL_REFRESH_ENQUEUED = set()
 THUMBNAIL_REFRESH_FAILED = {}
 THUMBNAIL_REFRESH_LOCK = threading.Lock()
-THUMBNAIL_REFRESH_WORKER = None
+PAGE_DUPLICATE_RECONCILE_PENDING = set()
+PAGE_DUPLICATE_RECONCILE_LOCK = threading.Lock()
 TAG_SCHEDULER_WORKER = None
+DATABASE_MIGRATION_STATE = {
+    "currentVersion": 0,
+    "targetVersion": max((migration.version for migration in SCHEMA_MIGRATIONS), default=0),
+    "applied": [],
+    "pending": [],
+    "executed": [],
+}
+JOB_RUNTIME = JobRuntime({
+    "imports": ChannelConfig(workers=1, max_pending=8),
+    "exports": ChannelConfig(workers=1, max_pending=4),
+    "tags": ChannelConfig(workers=1, max_pending=4),
+    "thumbnails": ChannelConfig(workers=1, max_pending=512),
+})
 
 ALLOWED_SUFFIXES = {".html", ".htm", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}
 ZIP_SUFFIXES = {".zip"}
 IMPORT_SUFFIXES = ALLOWED_SUFFIXES | ZIP_SUFFIXES
 STATS_CACHE = {"payload": None, "expires_at": 0}
-PREVIEW_META_CACHE = {}
+STATS_CACHE_LOCK = threading.Lock()
+PREVIEW_META_CACHE = OrderedDict()
+PREVIEW_META_CACHE_LOCK = threading.Lock()
+PREVIEW_META_CACHE_LIMIT = 512
 RESOURCE_SUFFIXES = {".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
@@ -217,6 +261,59 @@ def agent_internal_api_enabled():
 
 def agent_internal_api_token():
     return os.environ.get("MINEM_AGENT_API_TOKEN", "").strip()
+
+
+def session_base_url(host, port):
+    browser_host = "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
+    if ":" in browser_host and not browser_host.startswith("["):
+        browser_host = f"[{browser_host}]"
+    return f"http://{browser_host}:{int(port)}"
+
+
+def initialize_session_security(host="127.0.0.1", port=8790):
+    global SESSION_TOKEN
+    configured = os.environ.get("MINEM_SESSION_TOKEN", "").strip()
+    if configured:
+        from minem.security import atomic_write_private
+        atomic_write_private(SESSION_TOKEN_PATH, configured)
+        SESSION_TOKEN = configured
+    else:
+        SESSION_TOKEN = rotate_session_token(SESSION_TOKEN_PATH)
+    from minem.security import atomic_write_private
+    atomic_write_private(
+        SESSION_MANIFEST_PATH,
+        json.dumps(
+            {
+                "status": "running",
+                "baseUrl": session_base_url(host, port),
+                "pid": os.getpid(),
+                "startedAt": now_ms(),
+            },
+            ensure_ascii=False,
+        ),
+    )
+    return SESSION_TOKEN
+
+
+def clear_session_manifest():
+    try:
+        payload = json.loads(SESSION_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return
+    if int(payload.get("pid") or 0) == os.getpid():
+        SESSION_MANIFEST_PATH.unlink(missing_ok=True)
+
+
+def management_index_html(path, token=""):
+    document = Path(path).read_text(encoding="utf-8")
+    meta = '<meta name="minem-session-token" content="">'
+    if token:
+        meta = (
+            '<meta name="minem-session-token" '
+            f'content="{html.escape(token, quote=True)}">'
+        )
+    marker = "</head>"
+    return document.replace(marker, f"  {meta}\n  {marker}", 1) if marker in document else f"{meta}\n{document}"
 
 
 def default_import_sources_from_env():
@@ -667,7 +764,8 @@ def backfill_asset_codes(conn):
 
 
 def init_db():
-    initialize_database(
+    global DATABASE_MIGRATION_STATE
+    DATABASE_MIGRATION_STATE = initialize_database(
         data_dir=DATA,
         uploads_dir=UPLOADS,
         extracted_dir=EXTRACTED,
@@ -679,14 +777,53 @@ def init_db():
         backfill_resource_kinds=backfill_resource_kinds,
         journal_mode=os.environ.get("SQLITE_JOURNAL_MODE", "wal"),
         on_warning=print,
+        migration_backup_dir=RUNTIME_ROOT / "state" / "backups",
+        migration_backup_retain=3,
     )
+    backup_path = DATABASE_MIGRATION_STATE.get("backupPath") or ""
+    if backup_path:
+        DATABASE_MIGRATION_STATE["backupFile"] = Path(backup_path).name
+    DATABASE_MIGRATION_STATE.pop("backupPath", None)
+    declared_schema_version = int(PRODUCT_VERSION.get("databaseSchemaVersion") or 0)
+    target_schema_version = int(DATABASE_MIGRATION_STATE.get("targetVersion") or 0)
+    if declared_schema_version and declared_schema_version != target_schema_version:
+        raise RuntimeError(
+            "数据库迁移目标与产品版本清单不一致"
+            f"（manifest={declared_schema_version}, migrations={target_schema_version}）"
+        )
     REPORT_EXPORTS.mkdir(parents=True, exist_ok=True)
     REPORT_EXPORT_TASK_STORE.ensure_schema()
     interrupted_imports = IMPORT_TASK_STORE.recover_interrupted()
     if interrupted_imports:
         print(f"Recovered {interrupted_imports} interrupted import task(s)")
+    interrupted_exports = REPORT_EXPORT_TASK_STORE.recover_interrupted()
+    if interrupted_exports:
+        print(f"Recovered {interrupted_exports} interrupted export task(s)")
     with db() as conn:
         ensure_tag_task_schema(conn)
+        interrupted_tags = recover_interrupted_tag_tasks(conn)
+    if interrupted_tags:
+        print(f"Recovered {interrupted_tags} interrupted tag task(s)")
+    with db() as conn:
+        page_fingerprint_state = backfill_page_fingerprints(
+            conn,
+            path_for_asset=asset_library_path,
+        )
+        pending_page_ids = [
+            row["id"]
+            for row in conn.execute(
+                """
+                select id
+                from assets
+                where asset_type = 'control'
+                  and version_parent_id = ''
+                  and semantic_dedupe_status = 'pending'
+                """
+            ).fetchall()
+        ]
+    with PAGE_DUPLICATE_RECONCILE_LOCK:
+        PAGE_DUPLICATE_RECONCILE_PENDING.update(pending_page_ids)
+    DATABASE_MIGRATION_STATE["pageFingerprints"] = page_fingerprint_state
     # Reports are served through a stable public entry.  It composes their
     # existing page slots and makes future arrangement changes visible to both
     # newly opened and previously copied report links without modifying source
@@ -755,15 +892,130 @@ PREVIEW_EMBED_STYLE = """
   }
 </style>
 """
+SOURCE_PREVIEW_CAPABILITY_QUERY = "minem_preview_capability"
+SOURCE_PREVIEW_CAPABILITY_TTL_MS = 10 * 60 * 1000
+SOURCE_PREVIEW_CAPABILITY_LIMIT = 1024
+SOURCE_PREVIEW_CAPABILITIES = OrderedDict()
+SOURCE_PREVIEW_CAPABILITIES_LOCK = threading.Lock()
 
 
-def inject_embedded_preview_style(html_text):
-    if "minem-embedded-preview-style" in html_text:
+def source_preview_capability_script(token):
+    token_json = json_for_html_script(token)
+    query_json = json_for_html_script(SOURCE_PREVIEW_CAPABILITY_QUERY)
+    return f"""
+<script id="minem-embedded-preview-compat">
+(() => {{
+  const capability = {token_json};
+  const capabilityQuery = {query_json};
+  const serviceOrigin = new URL(window.location.href).origin;
+  const secureSourceUrl = (value) => {{
+    try {{
+      const target = new URL(String(value), window.location.href);
+      if (target.origin === serviceOrigin && target.pathname.startsWith("/extracted/")) {{
+        target.searchParams.set(capabilityQuery, capability);
+        target.searchParams.set("embed", "1");
+        return target.href;
+      }}
+    }} catch (_) {{}}
+    return value;
+  }};
+  const createMemoryStorage = () => {{
+    const values = new Map();
+    return {{
+      get length() {{ return values.size; }},
+      clear() {{ values.clear(); }},
+      getItem(key) {{ key = String(key); return values.has(key) ? values.get(key) : null; }},
+      key(index) {{ return Array.from(values.keys())[Number(index)] ?? null; }},
+      removeItem(key) {{ values.delete(String(key)); }},
+      setItem(key, value) {{ values.set(String(key), String(value)); }}
+    }};
+  }};
+  for (const name of ["localStorage", "sessionStorage"]) {{
+    try {{
+      void window[name].length;
+    }} catch (_) {{
+      Object.defineProperty(window, name, {{ value: createMemoryStorage(), configurable: true }});
+    }}
+  }}
+  const nativeFetch = window.fetch?.bind(window);
+  if (nativeFetch) {{
+    window.fetch = (input, init) => {{
+      if (typeof Request !== "undefined" && input instanceof Request) {{
+        return nativeFetch(new Request(secureSourceUrl(input.url), input), init);
+      }}
+      return nativeFetch(secureSourceUrl(input), init);
+    }};
+  }}
+  const nativeOpen = window.XMLHttpRequest?.prototype?.open;
+  if (nativeOpen) {{
+    window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {{
+      return nativeOpen.call(this, method, secureSourceUrl(url), ...rest);
+    }};
+  }}
+}})();
+</script>
+"""
+
+
+def inject_embedded_preview_style(html_text, preview_capability=""):
+    additions = []
+    if "minem-embedded-preview-style" not in html_text:
+        additions.append(PREVIEW_EMBED_STYLE)
+    if preview_capability and "minem-embedded-preview-compat" not in html_text:
+        additions.append(source_preview_capability_script(preview_capability))
+    if not additions:
         return html_text
-    marker = re.search(r"</head\s*>", html_text, flags=re.IGNORECASE)
+    injection = "".join(additions)
+    marker = re.search(r"<head\b[^>]*>", html_text, flags=re.IGNORECASE)
     if marker:
-        return f"{html_text[:marker.start()]}{PREVIEW_EMBED_STYLE}{html_text[marker.start():]}"
-    return f"{PREVIEW_EMBED_STYLE}{html_text}"
+        return f"{html_text[:marker.end()]}{injection}{html_text[marker.end():]}"
+    return f"{injection}{html_text}"
+
+
+def create_source_preview_capability(path):
+    path = Path(path).resolve()
+    try:
+        relative = path.relative_to(EXTRACTED.resolve())
+    except ValueError:
+        return ""
+    if len(relative.parts) < 2:
+        return ""
+    scope = (EXTRACTED / relative.parts[0]).resolve()
+    timestamp = now_ms()
+    token = secrets.token_urlsafe(24)
+    with SOURCE_PREVIEW_CAPABILITIES_LOCK:
+        expired = [
+            key
+            for key, item in SOURCE_PREVIEW_CAPABILITIES.items()
+            if int(item.get("expiresAt") or 0) <= timestamp
+        ]
+        for key in expired:
+            SOURCE_PREVIEW_CAPABILITIES.pop(key, None)
+        SOURCE_PREVIEW_CAPABILITIES[token] = {
+            "scope": str(scope),
+            "expiresAt": timestamp + SOURCE_PREVIEW_CAPABILITY_TTL_MS,
+        }
+        while len(SOURCE_PREVIEW_CAPABILITIES) > SOURCE_PREVIEW_CAPABILITY_LIMIT:
+            SOURCE_PREVIEW_CAPABILITIES.popitem(last=False)
+    return token
+
+
+def source_preview_capability_allows(token, path):
+    token = str(token or "").strip()
+    if not token:
+        return False
+    timestamp = now_ms()
+    with SOURCE_PREVIEW_CAPABILITIES_LOCK:
+        item = SOURCE_PREVIEW_CAPABILITIES.get(token)
+        if not item or int(item.get("expiresAt") or 0) <= timestamp:
+            SOURCE_PREVIEW_CAPABILITIES.pop(token, None)
+            return False
+        scope = Path(item["scope"])
+        allowed = is_path_within(Path(path).resolve(), scope)
+        if allowed:
+            item["expiresAt"] = timestamp + SOURCE_PREVIEW_CAPABILITY_TTL_MS
+            SOURCE_PREVIEW_CAPABILITIES.move_to_end(token)
+        return allowed
 
 
 def thumbnail_path(asset_id):
@@ -791,9 +1043,9 @@ def local_html_preview_path(data):
     if not preview_url.startswith("/"):
         return None
     preview_path = urlparse(preview_url).path
-    html_path = (ROOT / preview_path.lstrip("/")).resolve()
+    html_path = (RUNTIME_ROOT / preview_path.lstrip("/")).resolve()
     if (
-        is_path_within(html_path, ROOT)
+        is_path_within(html_path, RUNTIME_ROOT)
         and html_path.exists()
         and html_path.is_file()
         and html_path.suffix.lower() in {".html", ".htm"}
@@ -822,19 +1074,6 @@ def thumbnail_source_fingerprint(data):
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def start_thumbnail_refresh_worker():
-    global THUMBNAIL_REFRESH_WORKER
-    with THUMBNAIL_REFRESH_LOCK:
-        if THUMBNAIL_REFRESH_WORKER and THUMBNAIL_REFRESH_WORKER.is_alive():
-            return
-        THUMBNAIL_REFRESH_WORKER = threading.Thread(
-            target=thumbnail_refresh_loop,
-            name="minem-thumbnail-refresh",
-            daemon=True,
-        )
-        THUMBNAIL_REFRESH_WORKER.start()
-
-
 def enqueue_thumbnail_refresh(asset_id, html_path, source_fingerprint):
     if not asset_id or not html_path or not source_fingerprint:
         return
@@ -847,31 +1086,48 @@ def enqueue_thumbnail_refresh(asset_id, html_path, source_fingerprint):
         if key in THUMBNAIL_REFRESH_ENQUEUED:
             return
         THUMBNAIL_REFRESH_ENQUEUED.add(key)
-    start_thumbnail_refresh_worker()
-    THUMBNAIL_REFRESH_QUEUE.put((key, asset_id, str(html_path), source_fingerprint))
+    try:
+        JOB_RUNTIME.submit(
+            "thumbnails",
+            key,
+            thumbnail_refresh_job,
+            key,
+            asset_id,
+            str(html_path),
+            source_fingerprint,
+        )
+    except JobQueueFullError:
+        with THUMBNAIL_REFRESH_LOCK:
+            THUMBNAIL_REFRESH_ENQUEUED.discard(key)
+            THUMBNAIL_REFRESH_FAILED[key] = now_ms()
+        sys.stderr.write(f"[thumbnail] refresh queue full for {asset_id}\n")
 
 
-def thumbnail_refresh_loop():
-    while True:
-        key, asset_id, html_path, source_fingerprint = THUMBNAIL_REFRESH_QUEUE.get()
-        success = False
-        try:
-            path = Path(html_path)
-            if path.exists() and path.suffix.lower() in {".html", ".htm"}:
-                success = generate_html_thumbnail(asset_id, path, source_fingerprint, allow_text_fallback=False)
-        finally:
-            with THUMBNAIL_REFRESH_LOCK:
-                THUMBNAIL_REFRESH_ENQUEUED.discard(key)
-                if success:
-                    THUMBNAIL_REFRESH_FAILED.pop(key, None)
-                else:
-                    THUMBNAIL_REFRESH_FAILED[key] = now_ms()
-                    if len(THUMBNAIL_REFRESH_FAILED) > 2048:
-                        cutoff = now_ms() - 10 * 60 * 1000
-                        for failed_key, failed_at in list(THUMBNAIL_REFRESH_FAILED.items()):
-                            if failed_at < cutoff:
-                                THUMBNAIL_REFRESH_FAILED.pop(failed_key, None)
-            THUMBNAIL_REFRESH_QUEUE.task_done()
+def thumbnail_refresh_job(key, asset_id, html_path, source_fingerprint):
+    success = False
+    try:
+        path = Path(html_path)
+        if path.exists() and path.suffix.lower() in {".html", ".htm"}:
+            success = generate_html_thumbnail(asset_id, path, source_fingerprint, allow_text_fallback=False)
+            if success:
+                reconcile_pending_page_peers(asset_id)
+    except Exception as error:
+        # One bad asset must not kill the worker and stall every queued
+        # thumbnail; log and move on, marking this item failed below.
+        sys.stderr.write(f"[thumbnail] refresh failed for {asset_id}: {error}\n")
+    finally:
+        with THUMBNAIL_REFRESH_LOCK:
+            THUMBNAIL_REFRESH_ENQUEUED.discard(key)
+            if success:
+                THUMBNAIL_REFRESH_FAILED.pop(key, None)
+            else:
+                THUMBNAIL_REFRESH_FAILED[key] = now_ms()
+                if len(THUMBNAIL_REFRESH_FAILED) > 2048:
+                    cutoff = now_ms() - 10 * 60 * 1000
+                    for failed_key, failed_at in list(THUMBNAIL_REFRESH_FAILED.items()):
+                        if failed_at < cutoff:
+                            THUMBNAIL_REFRESH_FAILED.pop(failed_key, None)
+    return success
 
 
 def thumbnail_meta_matches(asset_id, source_fingerprint=""):
@@ -938,17 +1194,19 @@ def preview_meta_for_asset(data):
     media_kind = data.get("media_kind") or ""
     if media_kind != "html" or not preview_url.startswith("/"):
         return {"width": 0, "height": 0, "aspectRatio": 0, "longPage": False}
-    html_path = (ROOT / preview_url.lstrip("/")).resolve()
-    if not is_path_within(html_path, ROOT) or not html_path.exists() or html_path.suffix.lower() not in {".html", ".htm"}:
+    html_path = (RUNTIME_ROOT / preview_url.lstrip("/")).resolve()
+    if not is_path_within(html_path, RUNTIME_ROOT) or not html_path.exists() or html_path.suffix.lower() not in {".html", ".htm"}:
         return {"width": 1920, "height": 1080, "aspectRatio": round(16 / 9, 6), "longPage": False}
     try:
         stat = html_path.stat()
     except OSError:
         return {"width": 1920, "height": 1080, "aspectRatio": round(16 / 9, 6), "longPage": False}
     cache_key = (str(html_path), stat.st_mtime_ns, stat.st_size)
-    cached = PREVIEW_META_CACHE.get(cache_key)
-    if cached:
-        return cached
+    with PREVIEW_META_CACHE_LOCK:
+        cached = PREVIEW_META_CACHE.get(cache_key)
+        if cached is not None:
+            PREVIEW_META_CACHE.move_to_end(cache_key)
+            return cached
     width, height = detected_html_preview_size(html_path)
     meta = {
         "width": width,
@@ -956,9 +1214,13 @@ def preview_meta_for_asset(data):
         "aspectRatio": round(width / height, 6) if height else 0,
         "longPage": bool(height and height / max(width, 1) > 1.35),
     }
-    if len(PREVIEW_META_CACHE) > 512:
-        PREVIEW_META_CACHE.clear()
-    PREVIEW_META_CACHE[cache_key] = meta
+    with PREVIEW_META_CACHE_LOCK:
+        PREVIEW_META_CACHE[cache_key] = meta
+        PREVIEW_META_CACHE.move_to_end(cache_key)
+        # Evict least-recently-used entries so the long-running sidecar keeps a
+        # bounded footprint instead of dropping the whole cache at the limit.
+        while len(PREVIEW_META_CACHE) > PREVIEW_META_CACHE_LIMIT:
+            PREVIEW_META_CACHE.popitem(last=False)
     return meta
 
 
@@ -1128,6 +1390,285 @@ def asset_library_path(asset):
     if not is_path_within(path, EXTRACTED):
         return None
     return path
+
+
+def refresh_upload_page_fingerprints(conn, upload_id):
+    rows = conn.execute(
+        """
+        select *
+        from assets
+        where upload_id = ?
+          and asset_type = 'control'
+        order by created_at, id
+        """,
+        (upload_id,),
+    ).fetchall()
+    updated = 0
+    candidates = 0
+    identities = {}
+    for row in rows:
+        identity = refresh_asset_fingerprint(
+            conn,
+            row["id"],
+            asset_library_path(row),
+            dedupe_status="legacy",
+        )
+        identities[row["id"]] = identity
+        updated += 1
+    for row in rows:
+        identity = identities[row["id"]]
+        has_candidate = bool(
+            identity.fingerprint
+            and conn.execute(
+                """
+                select 1
+                from assets candidate
+                where candidate.asset_type = 'control'
+                  and candidate.id <> ?
+                  and candidate.version_parent_id = ''
+                  and candidate.semantic_fingerprint = ?
+                  and candidate.semantic_fingerprint_version = ?
+                  and coalesce(nullif(candidate.version_group, ''), candidate.id)
+                      <> coalesce(nullif(?, ''), ?)
+                limit 1
+                """,
+                (
+                    row["id"],
+                    identity.fingerprint,
+                    PAGE_FINGERPRINT_VERSION,
+                    row["version_group"],
+                    row["id"],
+                ),
+            ).fetchone()
+        )
+        conn.execute(
+            "update assets set semantic_dedupe_status = ? where id = ?",
+            ("pending" if has_candidate else "no-match", row["id"]),
+        )
+        if has_candidate:
+            candidates += 1
+            with PAGE_DUPLICATE_RECONCILE_LOCK:
+                PAGE_DUPLICATE_RECONCILE_PENDING.add(row["id"])
+    return {"updated": updated, "candidates": candidates}
+
+
+def reconcile_page_duplicate(asset_id):
+    with db() as conn:
+        asset = conn.execute(
+            """
+            select *
+            from assets
+            where id = ?
+              and asset_type = 'control'
+              and version_parent_id = ''
+              and semantic_fingerprint <> ''
+              and semantic_fingerprint_version = ?
+              and semantic_dedupe_status = 'pending'
+            """,
+            (asset_id, PAGE_FINGERPRINT_VERSION),
+        ).fetchone()
+        if not asset:
+            return {"merged": False, "reason": "asset-not-eligible"}
+        asset_reference_count = conn.execute(
+            "select count(*) from report_page_slots where control_id = ?",
+            (asset["id"],),
+        ).fetchone()[0]
+        candidates = conn.execute(
+            """
+            select candidate.*,
+                   (
+                     select count(*)
+                     from report_page_slots slot
+                     where slot.control_id = candidate.id
+                   ) as reference_count
+            from assets candidate
+            where candidate.asset_type = 'control'
+              and candidate.id <> ?
+              and candidate.version_parent_id = ''
+              and candidate.semantic_fingerprint = ?
+              and candidate.semantic_fingerprint_version = ?
+              and coalesce(nullif(candidate.version_group, ''), candidate.id)
+                  <> coalesce(nullif(?, ''), ?)
+            order by reference_count desc, candidate.created_at, candidate.asset_code, candidate.id
+            """,
+            (
+                asset["id"],
+                asset["semantic_fingerprint"],
+                PAGE_FINGERPRINT_VERSION,
+                asset["version_group"],
+                asset["id"],
+            ),
+        ).fetchall()
+        current_thumbnail = thumbnail_path(asset["id"])
+        if not current_thumbnail.is_file():
+            return {"merged": False, "reason": "current-thumbnail-missing"}
+        matches = []
+        for candidate in candidates:
+            candidate_thumbnail = thumbnail_path(candidate["id"])
+            if not candidate_thumbnail.is_file():
+                continue
+            metrics = thumbnail_difference(
+                candidate_thumbnail,
+                current_thumbnail,
+                image_module=Image,
+            )
+            if not is_auto_reusable_visual(metrics):
+                continue
+            matches.append((candidate, metrics))
+        if not matches:
+            missing_candidate_thumbnail = any(
+                not thumbnail_path(candidate["id"]).is_file()
+                for candidate in candidates
+            )
+            if missing_candidate_thumbnail:
+                return {
+                    "merged": False,
+                    "reason": "candidate-thumbnail-missing",
+                    "candidateCount": len(candidates),
+                }
+            conn.execute(
+                """
+                update assets
+                set semantic_dedupe_status = ?
+                where id = ?
+                """,
+                ("reviewed" if candidates else "no-match", asset["id"]),
+            )
+            return {
+                "merged": False,
+                "reason": "no-visual-match",
+                "candidateCount": len(candidates),
+            }
+        eligible = [
+            {
+                "id": asset["id"],
+                "referenceCount": int(asset_reference_count or 0),
+                "createdAt": int(asset["created_at"] or 0),
+                "assetCode": asset["asset_code"] or "",
+            },
+            *[
+                {
+                    "id": candidate["id"],
+                    "referenceCount": int(candidate["reference_count"] or 0),
+                    "createdAt": int(candidate["created_at"] or 0),
+                    "assetCode": candidate["asset_code"] or "",
+                }
+                for candidate, _ in matches
+            ],
+        ]
+        eligible.sort(
+            key=lambda item: (
+                -item["referenceCount"],
+                item["createdAt"],
+                item["assetCode"],
+                item["id"],
+            )
+        )
+        primary_id = eligible[0]["id"]
+        metrics_by_id = {
+            candidate["id"]: metrics for candidate, metrics in matches
+        }
+        if primary_id == asset["id"]:
+            merge_targets = [candidate["id"] for candidate, _ in matches]
+        else:
+            merge_targets = [asset["id"]]
+            merge_targets.extend(
+                candidate["id"]
+                for candidate, _ in matches
+                if candidate["id"] != primary_id
+            )
+        merged_ids = []
+        for duplicate_id in merge_targets:
+            metrics = (
+                metrics_by_id.get(duplicate_id)
+                or metrics_by_id.get(primary_id)
+                or {}
+            )
+            merged = attach_duplicate_version(
+                conn,
+                asset_id=duplicate_id,
+                primary_id=primary_id,
+                similarity_score=metrics.get("score", 1.0),
+                timestamp=now_ms(),
+            )
+            if merged:
+                merged_ids.append(duplicate_id)
+        if merged_ids:
+            placeholders = ",".join("?" for _ in merged_ids)
+            conn.execute(
+                f"""
+                update assets
+                set semantic_dedupe_status = 'merged'
+                where id in ({placeholders})
+                """,
+                merged_ids,
+            )
+        conn.execute(
+            """
+            update assets
+            set semantic_dedupe_status = case
+              when id in (
+                select id from assets
+                where version_group = ? and version_parent_id = ''
+              ) then 'primary'
+              else semantic_dedupe_status
+            end
+            where id = ?
+            """,
+            (primary_id, primary_id),
+        )
+        if merged_ids:
+            invalidate_stats_cache()
+        return {
+            "merged": bool(merged_ids),
+            "assetId": asset["id"],
+            "primaryId": primary_id,
+            "mergedIds": merged_ids,
+            "candidateCount": len(candidates),
+        }
+
+
+def reconcile_pending_page_peers(asset_id):
+    with db() as conn:
+        row = conn.execute(
+            """
+            select semantic_fingerprint
+            from assets
+            where id = ?
+              and asset_type = 'control'
+              and semantic_fingerprint <> ''
+            """,
+            (asset_id,),
+        ).fetchone()
+        if not row:
+            return []
+        pending_ids = [
+            item["id"]
+            for item in conn.execute(
+                """
+                select id
+                from assets
+                where asset_type = 'control'
+                  and version_parent_id = ''
+                  and semantic_fingerprint = ?
+                  and semantic_fingerprint_version = ?
+                  and semantic_dedupe_status = 'pending'
+                order by created_at, asset_code, id
+                """,
+                (row["semantic_fingerprint"], PAGE_FINGERPRINT_VERSION),
+            ).fetchall()
+        ]
+    results = []
+    for pending_id in pending_ids:
+        result = reconcile_page_duplicate(pending_id)
+        results.append(result)
+        if result.get("reason") not in {
+            "current-thumbnail-missing",
+            "candidate-thumbnail-missing",
+        }:
+            with PAGE_DUPLICATE_RECONCILE_LOCK:
+                PAGE_DUPLICATE_RECONCILE_PENDING.discard(pending_id)
+    return results
 
 
 def reclassify_single_page_report_assets():
@@ -1695,22 +2236,60 @@ def generate_report_html_export(task_id, report, page_items, progress=None):
     return destination, filename
 
 
-def capture_report_export_page(wrapper_path, screenshot_path):
+def capture_report_export_page(page_url, screenshot_path):
     chrome = preview_chrome_path()
     if not chrome:
         raise RuntimeError("当前运行环境未安装 Chromium，无法生成 PDF")
-    command = [
-        chrome, "--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking",
-        "--disable-extensions", "--hide-scrollbars", "--no-first-run", "--no-sandbox",
-        "--allow-file-access-from-files",
-        "--run-all-compositor-stages-before-draw", "--virtual-time-budget=10000", "--window-size=1920,1080",
-        f"--screenshot={screenshot_path}", wrapper_path.resolve().as_uri(),
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, check=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError("PDF 页面渲染超时") from error
-    if result.returncode != 0 or not screenshot_path.exists() or screenshot_path.stat().st_size < 1024:
+    with tempfile.TemporaryDirectory(prefix="minem-report-export-chrome-") as profile_dir:
+        command = [
+            chrome, "--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking",
+            "--disable-default-apps", "--disable-extensions", "--disable-sync", "--hide-scrollbars",
+            "--metrics-recording-only", "--no-first-run", "--no-pings", "--no-sandbox",
+            "--allow-file-access-from-files", f"--user-data-dir={profile_dir}",
+            "--run-all-compositor-stages-before-draw", "--virtual-time-budget=10000", "--window-size=1920,1080",
+            f"--screenshot={screenshot_path}", page_url,
+        ]
+        process = None
+        screenshot_ready = False
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 35
+            stable_size = 0
+            stable_checks = 0
+            while time.monotonic() < deadline:
+                size = screenshot_path.stat().st_size if screenshot_path.exists() else 0
+                if size >= 1024 and size == stable_size:
+                    stable_checks += 1
+                    if stable_checks >= 2:
+                        screenshot_ready = True
+                        break
+                else:
+                    stable_size = size
+                    stable_checks = 0
+                if process.poll() is not None:
+                    screenshot_ready = size >= 1024
+                    break
+                time.sleep(0.1)
+        except OSError as error:
+            raise RuntimeError("PDF 页面渲染失败") from error
+        finally:
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+        if not screenshot_ready:
+            raise RuntimeError("PDF 页面渲染超时")
+    if not screenshot_path.exists() or screenshot_path.stat().st_size < 1024:
         raise RuntimeError("PDF 页面渲染失败")
 
 
@@ -1729,12 +2308,10 @@ def generate_report_pdf_export(task_id, report, page_items, progress):
                 raise ValueError(f"第 {index} 页原始 HTML 不存在")
             # Use an absolute file URL so the capture never depends on a
             # browser session or on the report's mutable public entry.
-            wrapper = root / f"page-{index:03d}.html"
             page_url = f"http://127.0.0.1:{os.environ.get('PORT', '8790')}{item['src']}"
             separator = "&" if "?" in page_url else "?"
-            wrapper.write_text(report_export_page_html(item.get("title") or f"Page {index:02d}", f"{page_url}{separator}embed=1"), encoding="utf-8")
             screenshot = root / f"page-{index:03d}.png"
-            capture_report_export_page(wrapper, screenshot)
+            capture_report_export_page(f"{page_url}{separator}embed=1", screenshot)
             images.append(Image.open(screenshot).convert("RGB"))
             progress(index, len(page_items), f"已完成第 {index}/{len(page_items)} 页渲染")
         filename = f"{safe_download_name(report['asset_code'] or report['title'])}.pdf"
@@ -1791,7 +2368,17 @@ def create_report_export_task(report_id, export_format):
         return {"ok": False, "error": result.get("error") or "该汇报没有可导出的可见页面"}
     task_id = f"export-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
     task = REPORT_EXPORT_TASK_STORE.create({"id": task_id, "reportId": report_id, "format": export_format, "pageCount": len(page_items)})
-    threading.Thread(target=run_report_export_task, args=(task_id,), name=f"report-export-{task_id}", daemon=True).start()
+    try:
+        JOB_RUNTIME.submit("exports", task_id, run_report_export_task, task_id)
+    except JobQueueFullError:
+        task = REPORT_EXPORT_TASK_STORE.update(
+            task_id,
+            status="failed",
+            progress=100,
+            message="导出队列繁忙",
+            error="当前导出任务较多，请稍后重试",
+        )
+        return {"ok": False, "error": "当前导出任务较多，请稍后重试", "task": task}
     return {"ok": True, "task": task}
 
 
@@ -2205,6 +2792,23 @@ def update_report_arrangement(report_id, payload):
     current = report_arrangement_payload(report_id)
     if not current.get("ok"):
         return current
+    expected_updated_at = payload.get("expectedUpdatedAt")
+    if expected_updated_at is None:
+        expected_updated_at = payload.get("expected_updated_at")
+    if expected_updated_at is not None:
+        try:
+            expected_updated_at = int(expected_updated_at)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "编排版本格式无效"}
+        current_updated_at = int(current.get("updatedAt") or 0)
+        if expected_updated_at != current_updated_at:
+            return {
+                "ok": False,
+                "conflict": True,
+                "error": "该汇报已在其他窗口更新，请重新加载后再编辑",
+                "expectedUpdatedAt": expected_updated_at,
+                "currentUpdatedAt": current_updated_at,
+            }
     known_ids = [page["id"] for page in current["pages"]]
     inserted = payload.get("insertedControlIds") or payload.get("inserted_control_ids") or []
     if not isinstance(inserted, list):
@@ -3282,23 +3886,55 @@ def retry_import_task(task_id):
         assetType="",
         previewUrl="",
     )
-    worker = threading.Thread(
-        target=run_import_task,
-        args=(task_id, str(stored_path), original, upload_id, "", file_hash(stored_path)),
-        name=f"minem-import-retry-{task_id}",
-        daemon=True,
-    )
-    worker.start()
+    try:
+        JOB_RUNTIME.submit(
+            "imports",
+            task_id,
+            run_import_task,
+            task_id,
+            str(stored_path),
+            original,
+            upload_id,
+            "",
+            file_hash(stored_path),
+        )
+    except JobQueueFullError:
+        failed = update_import_task(
+            task_id,
+            status="failed",
+            progress=100,
+            message="导入队列繁忙",
+            error="当前导入任务较多，请稍后重试",
+        )
+        return {"ok": False, "error": "当前导入任务较多，请稍后重试", "task": failed}, 503
     return {"ok": True, "task": updated}, 202
 
 
 def start_tag_analysis_task(task_id):
-    threading.Thread(
-        target=run_tag_analysis_task_record,
-        args=(DB_PATH, EXTRACTED, task_id),
-        name=f"minem-tag-analysis-{task_id}",
-        daemon=True,
-    ).start()
+    try:
+        JOB_RUNTIME.submit(
+            "tags",
+            task_id,
+            run_tag_analysis_task_record,
+            DB_PATH,
+            EXTRACTED,
+            task_id,
+        )
+        return True
+    except JobQueueFullError:
+        with db() as conn:
+            conn.execute(
+                """
+                update tag_analysis_tasks
+                set status = 'failed',
+                    message = '标签分析队列繁忙',
+                    error = '当前标签任务较多，请稍后重试',
+                    updated_at = ?
+                where id = ?
+                """,
+                (now_ms(), task_id),
+            )
+        return False
 
 
 def create_tag_analysis_task(asset_ids, trigger_type="manual", scope_type="assets", apply_mode="suggestions"):
@@ -3308,7 +3944,10 @@ def create_tag_analysis_task(asset_ids, trigger_type="manual", scope_type="asset
             task = conn.execute("select * from tag_analysis_tasks where id = ?", (result["taskId"],)).fetchone()
             result["task"] = public_tag_analysis_task(task)
     if result.get("ok"):
-        start_tag_analysis_task(result["taskId"])
+        if not start_tag_analysis_task(result["taskId"]):
+            result = get_tag_analysis_task(result["taskId"])
+            result["ok"] = False
+            result["error"] = "当前标签任务较多，请稍后重试"
     return result
 
 
@@ -3444,9 +4083,10 @@ def generate_html_thumbnail(asset_id, html_path, source_fingerprint="", allow_te
 def generate_upload_thumbnails(upload_id):
     created = 0
     with db() as conn:
-        rows = conn.execute(
+        refresh_upload_page_fingerprints(conn, upload_id)
+        representative_rows = conn.execute(
             """
-            select id, source_path, preview_url, source_hash, asset_type
+            select id, source_path, preview_url, source_hash, asset_type, upload_id, media_kind
             from assets
             where upload_id = ? and asset_type in ('report', 'control')
             order by case asset_type when 'report' then 0 else 1 end, created_at, id
@@ -3454,16 +4094,60 @@ def generate_upload_thumbnails(upload_id):
             """,
             (upload_id,),
         ).fetchall()
+        pending_rows = conn.execute(
+            """
+            select id, source_path, preview_url, source_hash, asset_type, upload_id, media_kind
+            from assets
+            where upload_id = ?
+              and asset_type = 'control'
+              and semantic_dedupe_status = 'pending'
+            order by created_at, id
+            """,
+            (upload_id,),
+        ).fetchall()
+        candidate_rows = []
+        for row in pending_rows:
+            candidate_rows.extend(
+                conn.execute(
+                    """
+                    select id, source_path, preview_url, source_hash, asset_type, upload_id, media_kind
+                    from assets
+                    where asset_type = 'control'
+                      and id <> ?
+                      and version_parent_id = ''
+                      and semantic_fingerprint = (
+                        select semantic_fingerprint from assets where id = ?
+                      )
+                      and semantic_fingerprint_version = ?
+                    order by created_at, asset_code, id
+                    limit 3
+                    """,
+                    (row["id"], row["id"], PAGE_FINGERPRINT_VERSION),
+                ).fetchall()
+            )
+        rows = []
+        seen_ids = set()
+        pending_ids = {row["id"] for row in pending_rows}
+        representative_only = [
+            row for row in representative_rows if row["id"] not in pending_ids
+        ]
+        for row in [*candidate_rows, *representative_only, *pending_rows]:
+            if row["id"] in seen_ids:
+                continue
+            seen_ids.add(row["id"])
+            rows.append(row)
     upload_root = (EXTRACTED / upload_id).resolve()
     for row in rows:
         fingerprint = thumbnail_source_fingerprint(row)
         if thumbnail_url(row["id"], fingerprint):
+            reconcile_pending_page_peers(row["id"])
             continue
-        html_path = (upload_root / row["source_path"]).resolve()
-        if not is_path_within(html_path, upload_root):
+        html_path = local_html_preview_path(row)
+        if not html_path:
             continue
         if generate_html_thumbnail(row["id"], html_path, fingerprint):
             created += 1
+            reconcile_pending_page_peers(row["id"])
     return created
 
 
@@ -3737,8 +4421,9 @@ def pipeline_summary(conn):
 
 def stats_payload(conn):
     now = time.time()
-    if STATS_CACHE["payload"] is not None and STATS_CACHE["expires_at"] > now:
-        return STATS_CACHE["payload"]
+    with STATS_CACHE_LOCK:
+        if STATS_CACHE["payload"] is not None and STATS_CACHE["expires_at"] > now:
+            return STATS_CACHE["payload"]
     # Dashboard totals follow the default library view: a version group counts
     # once, while detailed version records remain available on the asset.
     asset_count = conn.execute("select count(*) from assets where version_parent_id = ''").fetchone()[0]
@@ -3757,8 +4442,9 @@ def stats_payload(conn):
         "types": {row["asset_type"]: row["count"] for row in types},
         "pipeline": pipeline_summary(conn),
     }
-    STATS_CACHE["payload"] = payload
-    STATS_CACHE["expires_at"] = now + 30
+    with STATS_CACHE_LOCK:
+        STATS_CACHE["payload"] = payload
+        STATS_CACHE["expires_at"] = now + 30
     return payload
 
 
@@ -4187,8 +4873,8 @@ def report_viewer_html(title, page_items, release_url=""):
         })
     if not pages:
         pages = [{"id": "cover", "label": "Page 01", "title": "首页", "code": "", "src": "", "role": "cover"}]
-    pages_json = json.dumps(pages, ensure_ascii=False, indent=6)
-    release_url_json = json.dumps(release_url or "", ensure_ascii=False)
+    pages_json = json_for_html_script(pages, indent=6)
+    release_url_json = json_for_html_script(release_url or "")
     safe_title = html.escape(title or "汇报素材", quote=True)
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -4221,13 +4907,20 @@ def report_viewer_html(title, page_items, release_url=""):
     .copy-source[hidden] {{ display: none; }}
     .copy-tip {{ position: fixed; top: 78px; right: 24px; z-index: 4; padding: 8px 12px; border: 1px solid rgba(114,213,255,.55); border-radius: 8px; background: rgba(12,38,65,.96); color: #b8ebff; font-size: 13px; font-weight: 800; opacity: 0; transform: translateY(-6px); pointer-events: none; transition: opacity .16s ease,transform .16s ease; }}
     .copy-tip.is-visible {{ opacity: 1; transform: translateY(0); }}
+	    .page-state {{ position: absolute; z-index: 3; inset: 0; display: grid; place-items: center; align-content: center; gap: 12px; padding: 32px; color: #b8c8d8; background: radial-gradient(circle at 50% 34%, rgba(57,112,165,.18), transparent 48%), #030712; text-align: center; }}
+	    .page-state[hidden] {{ display: none; }}
+	    .page-state strong {{ color: #fff; font-size: 18px; }}
+	    .page-state span {{ max-width: 480px; font-size: 13px; line-height: 1.6; }}
+	    .page-state button {{ min-height: 36px; border: 1px solid rgba(153,180,209,.38); border-radius: 8px; padding: 0 14px; color: #fff; background: rgba(255,255,255,.08); cursor: pointer; }}
+	    .page-state.is-loading::before {{ width: 24px; height: 24px; border: 2px solid rgba(184,207,229,.28); border-top-color: #8cecff; border-radius: 50%; content: ""; animation: page-spin .8s linear infinite; }}
+	    @keyframes page-spin {{ to {{ transform: rotate(360deg); }} }}
     html[data-embed="1"] .page-tools {{ display: none; }}
     @media (max-width: 720px) {{ .page-tools {{ top: 12px; right: 12px; }} .page-pill {{ bottom: 12px; }} }}
   </style>
 </head>
 <body>
   <main class="viewer" aria-label="{safe_title}">
-    <div class="slide-viewport"><section class="slide-shell"><iframe class="deck-frame" title="Page 01" src=""></iframe></section></div>
+	    <div class="slide-viewport"><section class="slide-shell"><iframe class="deck-frame" title="Page 01" src="" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads"></iframe><div class="page-state is-loading" role="status"><strong>正在加载页面</strong><span>页面素材正在准备，请稍候。</span><button class="retry-page" type="button" hidden>重新加载</button></div></section></div>
     <div class="page-tools" aria-label="页面工具"><button class="tool-btn toc-page" type="button" title="返回目录" aria-label="返回目录" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"></path></svg></button><button class="tool-btn copy-page" type="button" title="复制当前页链接" aria-label="复制当前页链接"></button><button class="tool-btn copy-source" type="button" title="复制原始飞书文档链接" aria-label="复制原始飞书文档链接" hidden></button><button class="tool-btn refresh-page" type="button" title="刷新当前页" aria-label="刷新当前页">↻</button><button class="tool-btn fullscreen-page" type="button" title="全屏" aria-label="全屏">⛶</button></div>
     <div class="copy-tip" role="status">复制成功</div>
     <div class="page-pill"><button class="nav-btn prev" type="button" aria-label="上一页">‹</button><span class="page-count">1 / 1</span><span>·</span><span class="page-title">Page 01</span><button class="nav-btn next" type="button" aria-label="下一页">›</button></div>
@@ -4250,6 +4943,12 @@ def report_viewer_html(title, page_items, release_url=""):
     const copyButton = document.querySelector(".copy-page");
     const copySourceButton = document.querySelector(".copy-source");
     const copyTip = document.querySelector(".copy-tip");
+	    const pageState = document.querySelector(".page-state");
+	    const pageStateTitle = pageState.querySelector("strong");
+	    const pageStateMessage = pageState.querySelector("span");
+	    const retryPageButton = document.querySelector(".retry-page");
+	    let pageLoadTimer = 0;
+	    let pageLoadSequence = 0;
     let copyTipTimer = 0;
     function flashCopyTip() {{
       copyTip.classList.add("is-visible");
@@ -4282,10 +4981,30 @@ def report_viewer_html(title, page_items, release_url=""):
       url.hash = `page=${{encodeURIComponent(page.code || page.id)}}`;
       window.history.replaceState(null, "", url);
     }}
+	    function setPageState(state, title = "", message = "") {{
+	      pageState.classList.toggle("is-loading", state === "loading");
+	      pageState.hidden = state === "ready";
+	      pageStateTitle.textContent = title;
+	      pageStateMessage.textContent = message;
+	      retryPageButton.hidden = state !== "error";
+	    }}
     function showPage(index, options = {{}}) {{
       currentIndex = Math.max(0, Math.min(index, pages.length - 1));
       const page = pages[currentIndex] || pages[0];
-      frame.src = page.src ? `${{page.src}}${{page.src.includes("?") ? "&" : "?"}}embed=1&v=${{Date.now()}}` : "";
+	      pageLoadSequence += 1;
+	      const currentSequence = pageLoadSequence;
+	      if (pageLoadTimer) window.clearTimeout(pageLoadTimer);
+	      setPageState("loading", "正在加载页面", `${{page.label}} · ${{page.title}}`);
+	      if (page.src) {{
+	        frame.src = `${{page.src}}${{page.src.includes("?") ? "&" : "?"}}embed=1&v=${{Date.now()}}`;
+	        pageLoadTimer = window.setTimeout(() => {{
+	          if (currentSequence !== pageLoadSequence) return;
+	          setPageState("error", "页面加载时间过长", "可以重新加载当前页，或检查素材来源文件是否仍然可用。");
+	        }}, 20000);
+	      }} else {{
+	        frame.removeAttribute("src");
+	        setPageState("error", "页面素材不可用", "当前页面没有可访问的来源文件。");
+	      }}
       frame.title = `${{page.label}} - ${{page.title}}`;
       pageCount.textContent = `${{currentIndex + 1}} / ${{pages.length}}`;
       pageTitle.textContent = page.label;
@@ -4295,6 +5014,29 @@ def report_viewer_html(title, page_items, release_url=""):
       tocButton.hidden = !directoryPage || page === directoryPage;
       if (options.syncUrl !== false) syncPageUrl(page);
     }}
+	    frame.addEventListener("load", () => {{
+	      if (pageLoadTimer) window.clearTimeout(pageLoadTimer);
+	      try {{
+	        const documentTitle = frame.contentDocument?.title || "";
+	        if (
+	          frame.contentDocument?.querySelector("[data-minem-preview-error]")
+	          || documentTitle === "Error response"
+	          || /^(?:404(?:\\s+Not Found)?|410(?:\\s+Gone)?)$/i.test(documentTitle.trim())
+	        ) {{
+	          setPageState("error", "页面来源文件不可用", "页面记录仍然保留，但当前来源文件无法访问。请检查原数据链路或重新导入。");
+	          return;
+	        }}
+	      }} catch (_) {{
+	        // Cross-origin pages cannot be inspected; the successful load event
+	        // remains the best available signal for those sources.
+	      }}
+	      setPageState("ready");
+	    }});
+	    frame.addEventListener("error", () => {{
+	      if (pageLoadTimer) window.clearTimeout(pageLoadTimer);
+	      setPageState("error", "页面预览加载失败", "素材仍然保留，可以重新加载当前页。");
+	    }});
+	    retryPageButton.addEventListener("click", () => showPage(currentIndex));
     updateDeckScale();
     showPage(resolvePageIndex(locationPageTarget()));
     window.addEventListener("resize", updateDeckScale);
@@ -4304,7 +5046,7 @@ def report_viewer_html(title, page_items, release_url=""):
 	      if (directoryPage) showPage(pages.indexOf(directoryPage));
 	    }});
 	    window.addEventListener("message", event => {{
-	      if (event.origin !== window.location.origin) return;
+	      if (event.source !== frame.contentWindow) return;
 	      if (event.data?.type !== "report:navigate") return;
 	      showPage(resolvePageIndex(event.data.target));
 	    }});
@@ -4379,6 +5121,21 @@ def report_viewer_html(title, page_items, release_url=""):
 </body>
 	</html>
 	"""
+
+
+def preview_error_html(title, message):
+    safe_title = html.escape(str(title or "预览不可用"), quote=True)
+    safe_message = html.escape(str(message or "当前素材暂时无法预览"), quote=True)
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{safe_title}</title><style>
+:root{{color-scheme:dark;font-family:Inter,"PingFang SC","Microsoft YaHei",Arial,sans-serif}}
+*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:#d6e3ef;background:radial-gradient(circle at 50% 24%,rgba(57,112,165,.2),transparent 42%),#030712}}
+main{{width:min(520px,100%);display:grid;justify-items:center;gap:12px;text-align:center}}
+i{{width:44px;height:44px;display:grid;place-items:center;border:1px solid rgba(151,191,225,.3);border-radius:50%;color:#8cecff;background:rgba(140,236,255,.08);font-size:22px;font-style:normal}}
+h1{{margin:0;color:white;font-size:20px}}p{{margin:0;color:#9fb3c6;font-size:13px;line-height:1.7}}
+button{{min-height:36px;margin-top:4px;border:1px solid rgba(151,191,225,.34);border-radius:8px;padding:0 14px;color:white;background:rgba(255,255,255,.08);cursor:pointer}}
+</style></head><body><main data-minem-preview-error="true"><i>!</i><h1>{safe_title}</h1><p>{safe_message}</p><button type="button" onclick="location.reload()">重新加载</button></main></body></html>"""
 
 
 def cleanup_temp_report_sessions():
@@ -4901,7 +5658,7 @@ def js_const_json_value(text, const_name, opener, closer, default):
 
 def replace_js_const_json(text, const_name, value, opener, closer):
     span = js_value_span(text, const_name, opener, closer)
-    dumped = json.dumps(value, ensure_ascii=False, indent=6)
+    dumped = json_for_html_script(value, indent=6)
     if span:
         return f"{text[:span[0]]}{dumped}{text[span[1]:]}"
     insert_at = text.find("let currentIndex")
@@ -5667,9 +6424,54 @@ def save_report_presenter_script(report_id, payload):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"MineM/{PRODUCT_VERSION['version']}"
+    _response_started = False
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+        message = fmt % args
+        message = re.sub(
+            rf"([?&]{SOURCE_PREVIEW_CAPABILITY_QUERY}=)[^&\s\"]+",
+            r"\1[redacted]",
+            message,
+        )
+        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), message))
+
+    def send_response(self, code, message=None):
+        # Track that the status line was emitted so the request guard never
+        # tries to send a second response on top of a partial one.
+        self._response_started = True
+        super().send_response(code, message)
+
+    def _guarded_dispatch(self, handler):
+        self._response_started = False
+        try:
+            if not self.authorize_host():
+                return
+            handler()
+        except (BrokenPipeError, ConnectionResetError):
+            # Client went away mid-response; nothing useful to send back.
+            pass
+        except json.JSONDecodeError:
+            if not self._response_started:
+                try:
+                    self.send_json({"ok": False, "error": "请求参数格式无效，请检查 JSON"}, 400)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+        except Exception:
+            sys.stderr.write(traceback.format_exc())
+            if not self._response_started:
+                try:
+                    self.send_json({"ok": False, "error": "服务器内部错误，请重试"}, 500)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+
+    def do_GET(self):
+        self._guarded_dispatch(self._dispatch_get)
+
+    def do_POST(self):
+        self._guarded_dispatch(self._dispatch_post)
+
+    def do_DELETE(self):
+        self._guarded_dispatch(self._dispatch_delete)
 
     def send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -5715,26 +6517,108 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.stream_response_file(path)
 
-    def send_html(self, html_text, status=200, cache_control=""):
+    def send_html(self, html_text, status=200, cache_control="", content_security_policy=""):
         body = html_text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         if cache_control:
             self.send_header("Cache-Control", cache_control)
+        if content_security_policy:
+            self.send_header("Content-Security-Policy", content_security_policy)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.write_response_body(body)
 
-    def serve_file(self, path, embedded_preview=False):
+    def authorize_host(self):
+        host = str(self.headers.get("Host") or "").strip()
+        try:
+            parsed = urlparse(f"//{host}")
+        except ValueError:
+            parsed = None
+        if parsed and str(parsed.hostname or "").lower() in self.allowed_request_hosts():
+            return True
+        if self.path.startswith("/api/"):
+            self.send_json({"ok": False, "error": "请求主机不受信任"}, 421)
+        else:
+            self.send_error(421, "Misdirected Request")
+        return False
+
+    def allowed_request_hosts(self):
+        allowed = {"127.0.0.1", "localhost", "::1"}
+        allowed.update(
+            item.strip().lower()
+            for item in os.environ.get("MINEM_ALLOWED_HOSTS", "").split(",")
+            if item.strip()
+        )
+        return allowed
+
+    def request_origin(self):
+        host = str(self.headers.get("Host") or "").strip()
+        if not host:
+            return ""
+        try:
+            parsed = urlparse(f"//{host}")
+        except ValueError:
+            return ""
+        if str(parsed.hostname or "").lower() not in self.allowed_request_hosts():
+            return ""
+        return f"http://{host}"
+
+    def client_is_loopback(self):
+        address = str(self.client_address[0] if self.client_address else "")
+        return address in {"127.0.0.1", "::1"} or address.startswith("127.")
+
+    def browser_session_token(self):
+        if self.client_is_loopback() and self.request_origin():
+            return SESSION_TOKEN
+        if truthy_env("MINEM_ALLOW_REMOTE_SESSION") and self.request_origin():
+            return SESSION_TOKEN
+        return ""
+
+    def requires_session_token(self, path):
+        if path.startswith("/api/internal/agent/"):
+            return False
+        if path.startswith("/api/temp-reports/") and path.endswith(("/heartbeat", "/release")):
+            return False
+        return path.startswith("/api/")
+
+    def authorize_session_write(self, path):
+        if not self.requires_session_token(path):
+            return True
+        provided = request_token(self.headers)
+        if not token_matches(provided, SESSION_TOKEN):
+            self.send_json({"ok": False, "error": "MineM 会话已失效，请刷新页面或重新连接 CLI"}, 401)
+            return False
+        browser_context = bool(
+            str(self.headers.get("Origin") or "").strip()
+            or str(self.headers.get("Sec-Fetch-Site") or "").strip()
+        )
+        if browser_context:
+            origin = self.request_origin()
+            if not origin or not browser_write_origin_allowed(self.headers, origin):
+                self.send_json({"ok": False, "error": "请求来源不受信任"}, 403)
+                return False
+        return True
+
+    def serve_file(self, path, embedded_preview=False, source_preview_capability=""):
         if not path.exists() or not path.is_file():
             self.send_error(404)
             return
         ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        allow_opaque_source = (
+            str(self.headers.get("Origin") or "").strip() == "null"
+            and source_preview_capability_allows(source_preview_capability, path)
+        )
         if embedded_preview and path.suffix.lower() in {".html", ".htm"}:
             try:
                 html_text = path.read_text(encoding="utf-8")
                 if embedded_preview:
-                    html_text = inject_embedded_preview_style(html_text)
+                    html_text = inject_embedded_preview_style(
+                        html_text,
+                        create_source_preview_capability(path),
+                    )
                 body = html_text.encode("utf-8")
             except (OSError, UnicodeDecodeError):
                 body = None
@@ -5743,6 +6627,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads",
+                )
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Referrer-Policy", "no-referrer")
+                if allow_opaque_source:
+                    self.send_header("Access-Control-Allow-Origin", "null")
+                    self.send_header("Vary", "Origin")
                 self.end_headers()
                 self.write_response_body(body)
                 return
@@ -5750,6 +6643,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(path.stat().st_size))
         self.send_header("X-Content-Type-Options", "nosniff")
+        if allow_opaque_source:
+            self.send_header("Access-Control-Allow-Origin", "null")
+            self.send_header("Cache-Control", "private, no-store, max-age=0")
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.stream_response_file(path)
 
@@ -5786,10 +6683,15 @@ class Handler(BaseHTTPRequestHandler):
                     return fallback
         return path
 
-    def do_GET(self):
+    def _dispatch_get(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/version":
-            self.send_json({"ok": True, "release": PRODUCT_VERSION})
+            self.send_json({
+                "ok": True,
+                "release": PRODUCT_VERSION,
+                "database": DATABASE_MIGRATION_STATE,
+                "jobs": JOB_RUNTIME.snapshot(),
+            })
             return
         if parsed.path.startswith("/api/report-exports/") and parsed.path.endswith("/download"):
             task_id = unquote(parsed.path.removeprefix("/api/report-exports/").removesuffix("/download").strip("/"))
@@ -5822,7 +6724,11 @@ class Handler(BaseHTTPRequestHandler):
             case_code = unquote(case_preview_match.group(1))
             group = next((item for item in available_case_groups() if item["code"] == case_code), None)
             if not group:
-                self.send_error(404)
+                self.send_html(
+                    preview_error_html("案例预览不可用", "案例组不存在或来源页面尚未完成入库"),
+                    404,
+                    cache_control="no-store, max-age=0",
+                )
                 return
             page_items = [
                 {
@@ -5841,7 +6747,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/pages/") and parsed.path.endswith("/index.html"):
             control_id = unquote(parsed.path.removeprefix("/pages/").removesuffix("/index.html").strip("/"))
             if not control_id or "/" in control_id:
-                self.send_error(404)
+                self.send_html(preview_error_html("页面预览不可用", "页面素材地址无效"), 404, cache_control="no-store, max-age=0")
                 return
             with db() as conn:
                 control = conn.execute(
@@ -5849,7 +6755,7 @@ class Handler(BaseHTTPRequestHandler):
                     (control_id,),
                 ).fetchone()
             if not control:
-                self.send_error(404)
+                self.send_html(preview_error_html("页面预览不可用", "页面素材不存在或已被移出"), 404, cache_control="no-store, max-age=0")
                 return
             source_url = canonical_preview_url(control)
             self.send_html(
@@ -5866,11 +6772,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/reports/") and parsed.path.endswith("/index.html"):
             report_id = unquote(parsed.path.removeprefix("/reports/").removesuffix("/index.html").strip("/"))
             if not report_id or "/" in report_id:
-                self.send_error(404)
+                self.send_html(preview_error_html("汇报预览不可用", "汇报素材地址无效"), 404, cache_control="no-store, max-age=0")
                 return
             result, page_items = report_public_page_items(report_id)
             if not result.get("ok"):
-                self.send_html(f"<!doctype html><meta charset='utf-8'><body>{html.escape(result.get('error') or '无法加载汇报')}</body>", 404)
+                self.send_html(
+                    preview_error_html("汇报预览不可用", result.get("error") or "无法加载汇报"),
+                    404,
+                    cache_control="no-store, max-age=0",
+                )
                 return
             with db() as conn:
                 report = conn.execute("select title from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone()
@@ -5882,7 +6792,11 @@ class Handler(BaseHTTPRequestHandler):
             report_id = parsed.path.removeprefix("/api/reports/").removesuffix("/arrangement/viewer").strip("/")
             result, page_items = report_public_page_items(unquote(report_id))
             if not result.get("ok"):
-                self.send_html(f"<!doctype html><meta charset='utf-8'><body>{html.escape(result.get('error') or '无法加载汇报编排')}</body>", 404)
+                self.send_html(
+                    preview_error_html("汇报编排预览不可用", result.get("error") or "无法加载汇报编排"),
+                    404,
+                    cache_control="no-store, max-age=0",
+                )
                 return
             self.send_html(report_viewer_html(f"汇报编排 · {result['reportId']}", page_items), cache_control="no-store, max-age=0")
             return
@@ -5941,6 +6855,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/trusted-entry"):
+            if not self.authorize_session_write(parsed.path):
+                return
             report_id = parsed.path.removeprefix("/api/reports/").removesuffix("/trusted-entry").strip("/")
             result = validate_report_trusted_entry_by_id(unquote(report_id))
             self.send_json(result, 200 if result.get("ok") else 404)
@@ -5973,8 +6889,7 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     asset = add_version_counts(conn, [row])[0]
                     if asset.get("asset_type") == "report":
-                        needs_refresh = not (row["trusted_checked_at"] if "trusted_checked_at" in row.keys() else 0)
-                        asset["trustedEntry"] = validate_report_trusted_entry(conn, asset["id"], refresh=needs_refresh)
+                        asset["trustedEntry"] = validate_report_trusted_entry(conn, asset["id"])
                 self.send_json({"ok": True, "asset": asset})
                 return
 
@@ -6110,11 +7025,33 @@ class Handler(BaseHTTPRequestHandler):
                     return
             path = self.resolve_extracted_file(rel)
             if is_path_within(path, EXTRACTED):
+                embedded = parse_qs(parsed.query).get("embed", [""])[0] == "1"
+                if (
+                    not embedded
+                    and path.exists()
+                    and path.suffix.lower() in {".html", ".htm"}
+                ):
+                    self.send_html(
+                        report_viewer_html(
+                            path.stem or "HTML 素材",
+                            [{
+                                "title": path.stem or "HTML 素材",
+                                "code": "",
+                                "src": f"/extracted/{quote(decoded_rel, safe='/._-')}",
+                            }],
+                        ),
+                        cache_control="no-store, max-age=0",
+                    )
+                    return
                 # Platform Preview Shell owns copy/refresh/fullscreen controls.
                 # Never inject a second toolbar into source HTML.
                 self.serve_file(
                     path,
-                    embedded_preview=parse_qs(parsed.query).get("embed", [""])[0] == "1",
+                    embedded_preview=embedded,
+                    source_preview_capability=parse_qs(parsed.query).get(
+                        SOURCE_PREVIEW_CAPABILITY_QUERY,
+                        [""],
+                    )[0],
                 )
                 return
             self.send_error(403)
@@ -6132,12 +7069,34 @@ class Handler(BaseHTTPRequestHandler):
         rel = parsed.path.lstrip("/") or "index.html"
         path = (PUBLIC / rel).resolve()
         if is_path_within(path, PUBLIC):
+            if rel == "index.html" and path.is_file():
+                self.send_html(
+                    management_index_html(path, self.browser_session_token()),
+                    cache_control="no-store, max-age=0",
+                    content_security_policy=(
+                        "default-src 'self'; "
+                        "script-src 'self'; "
+                        "style-src 'self' 'unsafe-inline'; "
+                        "img-src 'self' data: blob:; "
+                        "media-src 'self' blob:; "
+                        "font-src 'self' data:; "
+                        "connect-src 'self'; "
+                        "frame-src 'self' blob:; "
+                        "object-src 'none'; "
+                        "base-uri 'none'; "
+                        "form-action 'self'; "
+                        "frame-ancestors 'self'"
+                    ),
+                )
+                return
             self.serve_file(path)
             return
         self.send_error(403)
 
-    def do_POST(self):
+    def _dispatch_post(self):
         parsed = urlparse(self.path)
+        if not self.authorize_session_write(parsed.path):
+            return
         if parsed.path == "/api/desktop/creator-assistant":
             executable = Path(os.environ.get(
                 "MINEM_DESKTOP_EXECUTABLE",
@@ -6174,7 +7133,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "导出参数格式无效"}, 400)
                 return
             result = create_report_export_task(report_id, payload.get("format"))
-            self.send_json(result, 202 if result.get("ok") else 400)
+            self.send_json(
+                result,
+                202 if result.get("ok") else 503 if result.get("task", {}).get("message") == "导出队列繁忙" else 400,
+            )
             return
         if parsed.path == "/api/temp-reports":
             length = int(self.headers.get("Content-Length", "0"))
@@ -6272,7 +7234,10 @@ class Handler(BaseHTTPRequestHandler):
                 scope_type=scope_type,
                 apply_mode=apply_mode,
             )
-            self.send_json(result, 202 if result.get("ok") else 400)
+            self.send_json(
+                result,
+                202 if result.get("ok") else 503 if result.get("error") == "当前标签任务较多，请稍后重试" else 400,
+            )
             return
         if parsed.path == "/api/tag-analysis/scheduled-run":
             self.send_json(run_scheduled_tag_analysis())
@@ -6415,12 +7380,35 @@ class Handler(BaseHTTPRequestHandler):
                 "storedPath": runtime_record_path(stored, RUNTIME_ROOT),
             }
             created_task = create_import_task(task)
-            worker = threading.Thread(
-                target=run_import_task,
-                args=(task_id, str(stored), original, upload_id, description, content_hash),
-                daemon=True,
-            )
-            worker.start()
+            try:
+                JOB_RUNTIME.submit(
+                    "imports",
+                    task_id,
+                    run_import_task,
+                    task_id,
+                    str(stored),
+                    original,
+                    upload_id,
+                    description,
+                    content_hash,
+                )
+            except JobQueueFullError:
+                failed_task = update_import_task(
+                    task_id,
+                    status="failed",
+                    progress=100,
+                    message="导入队列繁忙",
+                    error="当前导入任务较多，请稍后重试",
+                )
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": "当前导入任务较多，请稍后重试",
+                        "task": failed_task,
+                    },
+                    503,
+                )
+                return
             self.send_json({"ok": True, "task": created_task}, 202)
             return
 
@@ -6440,7 +7428,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             result = update_report_arrangement(unquote(report_id), payload)
-            self.send_json(result, 200 if result.get("ok") else 400)
+            self.send_json(result, 200 if result.get("ok") else 409 if result.get("conflict") else 400)
             return
 
         if parsed.path.startswith("/api/assets/") and parsed.path.endswith("/tags"):
@@ -6542,8 +7530,10 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_error(404)
 
-    def do_DELETE(self):
+    def _dispatch_delete(self):
         parsed = urlparse(self.path)
+        if not self.authorize_session_write(parsed.path):
+            return
         if parsed.path.startswith("/api/temp-reports/"):
             token = unquote(parsed.path.removeprefix("/api/temp-reports/").strip("/"))
             self.send_json(release_temp_report(token))
@@ -6676,6 +7666,7 @@ def main():
     except RuntimeError as error:
         print(f"MineM 启动失败：{error}", file=sys.stderr)
         raise SystemExit(2) from error
+    initialize_session_security(host, port)
     init_db()
     start_tag_scheduler()
     if os.environ.get("AUTO_IMPORT_ON_START", "0") != "0":
@@ -6691,6 +7682,7 @@ def main():
         pass
     finally:
         server.server_close()
+        clear_session_manifest()
 
 
 def is_cli_invocation():

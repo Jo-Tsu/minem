@@ -21,6 +21,8 @@ PACKAGE_LOCK = ROOT / "package-lock.json"
 DOCKER_COMPOSE = ROOT / "docker-compose.yml"
 PYPROJECT = ROOT / "pyproject.toml"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
+PRERELEASE = re.compile(r"^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$")
+PRERELEASE_ORDER = {"alpha": 0, "beta": 1, "rc": 2}
 
 
 def load_manifest() -> dict:
@@ -44,6 +46,13 @@ def python_version(version: str) -> str:
     return re.sub(r"-(alpha|beta|rc)\.(\d+)$", lambda match: {"alpha": "a", "beta": "b", "rc": "rc"}[match.group(1)] + match.group(2), version)
 
 
+def release_channel(version: str) -> str:
+    match = PRERELEASE.match(version)
+    if not match:
+        return "stable"
+    return "internal" if match.group(2) == "alpha" else "beta"
+
+
 def pyproject_version() -> str:
     if not PYPROJECT.exists():
         return ""
@@ -55,6 +64,9 @@ def pyproject_version() -> str:
 def check(manifest: dict) -> list[str]:
     version = manifest["version"]
     issues = []
+    expected_channel = release_channel(version)
+    if manifest.get("channel") != expected_channel:
+        issues.append(f"product-version.json channel: {manifest.get('channel')!r} != {expected_channel!r}")
     for path in JSON_TARGETS:
         value = json.loads(path.read_text(encoding="utf-8")).get("version")
         if value != version:
@@ -82,11 +94,22 @@ def check(manifest: dict) -> list[str]:
 
 def next_version(version: str, level: str) -> str:
     if level == "prerelease":
-        match = re.match(r"^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$", version)
+        match = PRERELEASE.match(version)
         if not match:
             raise ValueError("prerelease 仅适用于 alpha、beta 或 rc 版本")
         base, stage, number = match.groups()
         return f"{base}-{stage}.{int(number) + 1}"
+    if level in PRERELEASE_ORDER:
+        match = PRERELEASE.match(version)
+        base = version.split("-", 1)[0]
+        if not match:
+            return f"{base}-{level}.1"
+        _, current_stage, number = match.groups()
+        if current_stage == level:
+            return f"{base}-{level}.{int(number) + 1}"
+        if PRERELEASE_ORDER[level] < PRERELEASE_ORDER[current_stage]:
+            raise ValueError(f"不能从 {current_stage} 回退到 {level}")
+        return f"{base}-{level}.1"
     major, minor, patch = (int(value) for value in version.split("-", 1)[0].split("."))
     if level == "major":
         return f"{major + 1}.0.0"
@@ -153,7 +176,7 @@ def main() -> int:
     commands.add_parser("show", help="show current product version")
     commands.add_parser("check", help="verify all version entry points")
     bump = commands.add_parser("bump", help="bump and synchronize version metadata")
-    bump.add_argument("level", choices=("major", "minor", "patch", "prerelease"))
+    bump.add_argument("level", choices=("major", "minor", "patch", "alpha", "beta", "rc", "prerelease"))
     bump.add_argument("--headline", required=True, help="release headline for CHANGELOG draft")
     args = parser.parse_args()
 
@@ -172,6 +195,7 @@ def main() -> int:
 
     version = next_version(manifest["version"], args.level)
     manifest["version"] = version
+    manifest["channel"] = release_channel(version)
     manifest["releasedAt"] = date.today().isoformat()
     manifest["headline"] = args.headline.strip()
     write_json(MANIFEST, manifest)

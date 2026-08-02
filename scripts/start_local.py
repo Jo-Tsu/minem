@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -142,6 +144,20 @@ def open_when_ready(url: str) -> None:
             time.sleep(0.25)
 
 
+def running_minem_release(url: str) -> dict | None:
+    try:
+        with urllib.request.urlopen(f"{url}/api/version", timeout=1) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    release = payload.get("release")
+    if payload.get("ok") is not True or not isinstance(release, dict) or release.get("product") != "MineM":
+        return None
+    return release
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
@@ -154,6 +170,16 @@ def main() -> int:
 
     if sys.version_info < (3, 10):
         fail("Python 3.10 or newer is required; Python 3.12 is recommended")
+    browser_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
+    url = f"http://{browser_host}:{args.port}"
+    running_release = running_minem_release(url) if not args.data_dir else None
+    if running_release:
+        version = running_release.get("version") or "unknown"
+        print(f"[MineM] already running at {url} (version {version}); reusing it")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return 0
+
     python = prepare_python(args.skip_install)
     prepare_frontend(args.skip_install, args.no_build)
 
@@ -165,8 +191,6 @@ def main() -> int:
     if args.data_dir:
         environment["MINEM_DATA_DIR"] = str(args.data_dir.expanduser().resolve())
 
-    browser_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
-    url = f"http://{browser_host}:{args.port}"
     if not args.no_browser:
         threading.Thread(target=open_when_ready, args=(url,), daemon=True).start()
     print(f"[MineM] starting {url}")

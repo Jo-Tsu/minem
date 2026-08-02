@@ -71,6 +71,10 @@ def main(argv=None) -> int:
         error = CliError("CANCELLED", "Operation cancelled")
         render(failure(command, request_id, base_url, started_at, error), output, quiet)
         return 130
+    except Exception as exc:  # noqa: BLE001 - the CLI contract guarantees a JSON envelope on every exit
+        error = CliError("INTERNAL_ERROR", f"Unexpected CLI error: {exc}")
+        render(failure(command, request_id, base_url, started_at, error), output, quiet)
+        return error.exit_code
 
 
 if __name__ == "__main__":

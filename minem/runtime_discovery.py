@@ -11,8 +11,29 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from minem.security import is_loopback_url, read_session_token
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8790"
+
+
+def loopback_endpoint(value: str):
+    try:
+        parsed = urlparse(str(value or "").rstrip("/"))
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return parsed.scheme, port
+
+
+def same_loopback_endpoint(left: str, right: str) -> bool:
+    left_endpoint = loopback_endpoint(left)
+    return bool(left_endpoint and left_endpoint == loopback_endpoint(right))
 
 
 def candidate_data_roots():
@@ -24,6 +45,36 @@ def candidate_data_roots():
     yield home / "Library" / "Application Support" / "MineM"
     # Compatibility with early Tauri builds that used the bundle identifier.
     yield home / "Library" / "Application Support" / "com.minem.materialos"
+
+
+def process_is_running(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def read_session_manifest(data_root: Path):
+    path = data_root / "runtime" / "session.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    base_url = str(payload.get("baseUrl") or "").rstrip("/")
+    if payload.get("status") != "running" or not loopback_endpoint(base_url):
+        return None
+    if not process_is_running(payload.get("pid")):
+        return None
+    return {**payload, "baseUrl": base_url, "manifestPath": str(path)}
 
 
 def read_service_manifest(data_root: Path):
@@ -56,6 +107,27 @@ def discover_service_manifest():
         if manifest:
             return manifest
     return None
+
+
+def resolve_session_token(base_url: str) -> str:
+    environment = os.environ.get("MINEM_SESSION_TOKEN", "").strip()
+    if environment:
+        return environment
+    if not is_loopback_url(base_url):
+        return ""
+
+    for root in candidate_data_roots():
+        manifest = read_session_manifest(root)
+        if manifest and same_loopback_endpoint(manifest["baseUrl"], base_url):
+            token = read_session_token(root / "runtime" / "session-token")
+            if token:
+                return token
+
+    source_root = Path(__file__).resolve().parents[1]
+    manifest = read_session_manifest(source_root)
+    if manifest and same_loopback_endpoint(manifest["baseUrl"], base_url):
+        return read_session_token(source_root / "runtime" / "session-token")
+    return ""
 
 
 def resolve_base_url(explicit=None, configured=None):

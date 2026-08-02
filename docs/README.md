@@ -13,6 +13,7 @@ their filenames remain stable and all repository links are relative.
 
 ## 产品与设计 / Product and design
 
+- [产品逻辑总览 / Product logic overview](PRODUCT_LOGIC.md)
 - [产品需求文档 / Product requirements](MineM_PRD.md)
 - [本地 AI 客户端需求 / Local AI client requirements](MineM_LOCAL_AI_CLIENT_PRD.md)
 - [设计系统 / Design system](DESIGN_SYSTEM.md)

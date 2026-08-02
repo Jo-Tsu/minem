@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+from minem.migrations import Migration, migration_status, run_migrations
+
 
 VALID_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
@@ -124,6 +126,64 @@ create table if not exists report_storyline_collections (
   updated_at integer not null
 );
 """
+
+
+def _migration_001_legacy_schema_baseline(conn):
+    required_tables = {
+        "assets",
+        "uploads",
+        "report_page_slots",
+        "report_page_arrangements",
+        "report_page_normalizations",
+        "report_page_candidates",
+        "asset_history",
+        "report_storyline_collections",
+    }
+    existing = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[0]
+        for row in conn.execute(
+            "select name from sqlite_master where type = 'table'"
+        ).fetchall()
+    }
+    missing = sorted(required_tables - existing)
+    if missing:
+        raise RuntimeError(f"legacy schema baseline is incomplete: {', '.join(missing)}")
+
+
+def _migration_002_page_semantic_fingerprints(conn):
+    columns = table_columns(conn, "assets")
+    for name, declaration in (
+        ("semantic_key", "text not null default ''"),
+        ("semantic_text_hash", "text not null default ''"),
+        ("semantic_fingerprint", "text not null default ''"),
+        ("semantic_fingerprint_version", "integer not null default 0"),
+        ("semantic_dedupe_status", "text not null default 'legacy'"),
+    ):
+        if name not in columns:
+            conn.execute(f"alter table assets add column {name} {declaration}")
+    conn.execute(
+        """
+        create index if not exists idx_assets_semantic_fingerprint
+        on assets(asset_type, semantic_fingerprint, version_parent_id)
+        where semantic_fingerprint <> ''
+        """
+    )
+
+
+SCHEMA_MIGRATIONS = (
+    Migration(
+        1,
+        "legacy-schema-baseline",
+        _migration_001_legacy_schema_baseline,
+        checksum_source="required-tables:assets,uploads,report_page_slots,report_page_arrangements,report_page_normalizations,report_page_candidates,asset_history,report_storyline_collections",
+    ),
+    Migration(
+        2,
+        "page-semantic-fingerprints",
+        _migration_002_page_semantic_fingerprints,
+        checksum_source="assets:add-semantic-key,text-hash,fingerprint,version,dedupe-status:index-semantic-fingerprint",
+    ),
+)
 
 
 def connect_database(db_path, *, timeout=5):
@@ -279,17 +339,49 @@ def initialize_database(
     backfill_resource_kinds=None,
     journal_mode="wal",
     on_warning=None,
+    migration_backup_dir=None,
+    migration_backup_retain=3,
 ):
     ensure_storage_dirs(data_dir, uploads_dir, extracted_dir, history_dir, thumbnails_dir)
     with connect() as conn:
         configure_connection(conn, journal_mode=journal_mode, on_warning=on_warning)
+        registered = migration_status(conn, SCHEMA_MIGRATIONS)
+        if registered["currentVersion"] > 0:
+            migration_state = run_migrations(
+                conn,
+                SCHEMA_MIGRATIONS,
+                backup_dir=migration_backup_dir,
+                backup_from_version=2,
+                backup_retain=migration_backup_retain,
+            )
+        else:
+            migration_state = None
         create_core_schema(conn)
         if import_task_store:
             import_task_store.ensure_schema(conn)
         ensure_upload_schema(conn)
         ensure_asset_schema(conn)
-        run_compat_migrations(conn)
+        if registered["currentVersion"] == 0:
+            run_compat_migrations(conn)
         if backfill_asset_codes:
             backfill_asset_codes(conn)
         if backfill_resource_kinds:
             backfill_resource_kinds(conn)
+        if migration_state is None:
+            baseline = tuple(
+                migration for migration in SCHEMA_MIGRATIONS if migration.version <= 1
+            )
+            run_migrations(conn, baseline)
+            # Compatibility setup and baseline registration share this
+            # connection. Commit them before SQLite Online Backup; backing up
+            # from a connection that still owns the write transaction can
+            # wait on itself indefinitely.
+            conn.commit()
+            migration_state = run_migrations(
+                conn,
+                SCHEMA_MIGRATIONS,
+                backup_dir=migration_backup_dir,
+                backup_from_version=2,
+                backup_retain=migration_backup_retain,
+            )
+        return migration_state

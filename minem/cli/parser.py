@@ -50,13 +50,23 @@ def normalize_argv(argv: list[str]) -> tuple[list[str], list[str]]:
         report = command[2]
         if "--add" in command:
             position = command.index("--add")
-            new_page, after = command[position + 1].split(":", 1)
-            command = ["report", "page", "add", report, "--page", new_page, "--after", after] + [item for item in command[3:] if item not in {"--add", command[position + 1]}]
+            if position + 1 >= len(command):
+                raise CliError("INVALID_ARGUMENT", "report page --add requires NEW:AFTER", exit_code=EXIT_ARGUMENT)
+            spec = command[position + 1]
+            if ":" not in spec:
+                raise CliError("INVALID_ARGUMENT", "report page --add expects NEW:AFTER", exit_code=EXIT_ARGUMENT)
+            new_page, after = spec.split(":", 1)
+            command = ["report", "page", "add", report, "--page", new_page, "--after", after] + [item for item in command[3:] if item not in {"--add", spec}]
             warnings.append("report page --add is deprecated; use report page add")
         elif "--replace" in command:
             position = command.index("--replace")
-            old_page, new_page = command[position + 1].split(":", 1)
-            command = ["report", "page", "replace", report, "--page", old_page, "--with", new_page] + [item for item in command[3:] if item not in {"--replace", command[position + 1]}]
+            if position + 1 >= len(command):
+                raise CliError("INVALID_ARGUMENT", "report page --replace requires OLD:NEW", exit_code=EXIT_ARGUMENT)
+            spec = command[position + 1]
+            if ":" not in spec:
+                raise CliError("INVALID_ARGUMENT", "report page --replace expects OLD:NEW", exit_code=EXIT_ARGUMENT)
+            old_page, new_page = spec.split(":", 1)
+            command = ["report", "page", "replace", report, "--page", old_page, "--with", new_page] + [item for item in command[3:] if item not in {"--replace", spec}]
             warnings.append("report page --replace is deprecated; use report page replace")
     return [*globals_before, *command], warnings
 

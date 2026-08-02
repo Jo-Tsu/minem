@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -60,12 +61,24 @@ def path_matches(relative: str, patterns: list[str]) -> bool:
 
 def public_markdown_files(root: Path, includes: list[str], excludes: list[str]) -> list[Path]:
     files: list[Path] = []
-    for path in root.rglob("*.md"):
-        relative = path.relative_to(root).as_posix()
-        if relative.startswith(".git/") or path_matches(relative, excludes):
-            continue
-        if path_matches(relative, includes):
-            files.append(path)
+    for current_root, dirnames, filenames in os.walk(root, topdown=True):
+        current_path = Path(current_root)
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if (current_path / dirname).relative_to(root).as_posix() != ".git"
+            and not path_matches(
+                (current_path / dirname).relative_to(root).as_posix(),
+                excludes,
+            )
+        ]
+        for filename in filenames:
+            if not filename.endswith(".md"):
+                continue
+            path = current_path / filename
+            relative = path.relative_to(root).as_posix()
+            if not path_matches(relative, excludes) and path_matches(relative, includes):
+                files.append(path)
     return sorted(files)
 
 

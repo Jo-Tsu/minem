@@ -178,24 +178,31 @@ button {
 
 .mode-switch {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 2px;
-  margin: 8px 10px 4px;
-  padding: 2px;
+  grid-template-columns: repeat(3, 34px);
+  align-self: center;
+  gap: 4px;
+  margin: 8px 10px 5px;
+  padding: 3px;
   border-radius: var(--radius-control);
   background: #f1f5f8;
 }
 
 .mode-button {
-  min-width: 0;
-  height: 30px;
+  display: grid;
+  width: 34px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
   color: #647184;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
+}
+
+.mode-button .icon {
+  width: 17px;
+  height: 17px;
 }
 
 .mode-button:hover {
@@ -213,14 +220,14 @@ button {
   flex: 1;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 4px 10px 0;
+  padding: 3px 8px 0;
   scrollbar-width: thin;
 }
 
 .scenario {
   display: grid;
-  min-height: 66px;
-  grid-template-columns: 34px minmax(0, 1fr) 36px;
+  min-height: 62px;
+  grid-template-columns: 32px minmax(0, 1fr) 34px;
   align-items: center;
   border-bottom: 1px solid var(--line-soft);
 }
@@ -248,8 +255,8 @@ button {
 
 .scenario-icon {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   border-radius: var(--radius-control);
   background: var(--brand-soft);
@@ -266,8 +273,8 @@ button {
   min-width: 0;
   align-self: stretch;
   align-content: center;
-  gap: 4px;
-  padding: 8px 6px;
+  gap: 3px;
+  padding: 7px 6px;
   border: 0;
   background: transparent;
   text-align: left;
