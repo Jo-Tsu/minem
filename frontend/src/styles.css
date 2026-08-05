@@ -485,6 +485,8 @@ code { font-family: var(--font-mono); }
   border-color: oklch(0.78 0.08 240);
   background: var(--brand-soft);
 }
+.case-row-actions .danger-item { color: var(--destructive); }
+.case-row-actions .danger-item:hover { color: var(--destructive); border-color: oklch(0.85 0.06 28); background: oklch(0.97 0.02 28); }
 .case-manager-view.is-detail .case-group-card {
   border-color: rgb(89 123 154 / .34);
   background:
@@ -526,6 +528,8 @@ code { font-family: var(--font-mono); }
   color: white;
   background: rgb(33 211 255 / .12);
 }
+.case-manager-view.is-detail .case-row-actions .danger-item { color: rgb(255 120 100); }
+.case-manager-view.is-detail .case-row-actions .danger-item:hover { border-color: rgb(255 120 100 / .5); color: rgb(255 150 130); background: rgb(255 80 60 / .12); }
 .case-detail-layout {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
@@ -764,6 +768,8 @@ code { font-family: var(--font-mono); }
   background: var(--destructive-soft);
 }
 .icon-btn { width: 32px; padding: 0; }
+.icon-btn.danger-icon { color: var(--destructive); }
+.icon-btn.danger-icon:hover:not(:disabled) { color: var(--destructive); border-color: oklch(0.85 0.06 28); background: var(--destructive-soft); }
 
 .workbench-overview {
   min-height: 96px;
@@ -1551,7 +1557,8 @@ code { font-family: var(--font-mono); }
 .back-icon { transform: rotate(180deg); }
 .arrangement-workspace-grid { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); align-content: start; padding: 24px 28px 48px; }
 .arrangement-grid { min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 18px; background: var(--surface-2); }
-.arrangement-page { display: grid; grid-template-columns: 1fr auto; gap: 9px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: grab; }
+.arrangement-page { display: grid; grid-template-columns: 1fr auto; gap: 9px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: grab; min-width: 0; overflow: hidden; }
+.arrangement-page > div:not(.arrangement-thumb):not(.arrangement-actions) { min-width: 0; }
 .arrangement-page:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; box-shadow: 0 0 0 4px var(--brand-soft); }
 .arrangement-page.is-hidden { opacity: .48; }
 .arrangement-thumb { grid-column: 1 / -1; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 5px; background: #0b1020; }

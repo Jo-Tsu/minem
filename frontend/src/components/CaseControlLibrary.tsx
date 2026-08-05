@@ -7,6 +7,7 @@ import {
   Layers3,
   Loader2,
   Sparkles,
+  Trash2,
   X
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -124,6 +125,9 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
   const [aiInfo, setAiInfo] = useState<CaseAiInfo | null>(null);
   const [selectedGroupCode, setSelectedGroupCode] = useState<string | null>(null);
   const [failedPreviewIds, setFailedPreviewIds] = useState<Set<string>>(() => new Set());
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; code: string; title: string; kind: "group" | "page" } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -145,6 +149,40 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
     });
     return () => { cancelled = true; };
   }, [reloadToken]);
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError("");
+    try {
+      if (pendingDelete.kind === "group") {
+        const data = await api.deleteCaseGroup(pendingDelete.code);
+        if (data.ok === false) {
+          setDeleteError(data.error || "删除失败");
+          return;
+        }
+        setPendingDelete(null);
+        setGroups((current) => current.filter((item) => item.code !== pendingDelete.code));
+        setSelectedGroupCode(null);
+      } else {
+        const data = await api.deleteAsset(pendingDelete.id);
+        if (data.ok === false) {
+          setDeleteError(data.error || "删除失败");
+          return;
+        }
+        setPendingDelete(null);
+        setGroups((current) => current.map((item) => {
+          if (item.code !== selectedGroupCode) return item;
+          const controls = item.controls.filter((control) => control.code !== pendingDelete.code);
+          return { ...item, controls, controlCount: controls.length, caseCount: controls.length };
+        }));
+      }
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "删除失败，请稍后重试");
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
 
   const selectedGroup = groups.find((item) => item.code === selectedGroupCode) || null;
   const group = selectedGroup || groups[0] || null;
@@ -201,6 +239,7 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
                   <code>{caseGroup.code}</code>
                   <button className="icon-btn" title="复制案例编号" aria-label="复制案例编号" type="button" onClick={() => void copyText(caseGroup.code, "已复制案例素材编号")}><Clipboard size={14} /></button>
                   {caseGroup.sourceDoc ? <button className="icon-btn" title="复制原始文档链接" aria-label="复制原始文档链接" type="button" onClick={() => void copyText(caseGroup.sourceDoc, "已复制飞书文档链接")}><Copy size={14} /></button> : null}
+                  <button className="icon-btn danger-icon" title="删除案例组" aria-label="删除案例组" type="button" onClick={() => setPendingDelete({ id: caseGroup.code, code: caseGroup.code, title: caseGroup.title, kind: "group" })}><Trash2 size={14} /></button>
                 </footer>
               </article>
             ))}
@@ -222,6 +261,7 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
               <div className="case-group-side">
                 {group.sourceDoc ? <button className="secondary" type="button" onClick={() => void copyText(group.sourceDoc, "已复制飞书文档链接")}><Copy size={15} />复制文档链接</button> : null}
                 <a className="secondary" href={group.reportUrl} target="_blank" rel="noreferrer"><FileText size={15} />多页预览</a>
+                <button className="danger" type="button" onClick={() => setPendingDelete({ id: group.code, code: group.code, title: group.title, kind: "group" })}><Trash2 size={15} />删除案例组</button>
               </div>
             </section>
             <section className="case-detail-layout" aria-label="案例详情">
@@ -262,6 +302,7 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
                             <a href={item.controlUrl} target="_blank" rel="noreferrer"><Layers3 size={14} />页面素材</a>
                             <a href={item.reportPageUrl} target="_blank" rel="noreferrer"><FileText size={14} />预览页</a>
                             {item.ai ? <button type="button" onClick={() => setAiInfo(item.ai || null)}><Sparkles size={14} />AI 信息</button> : null}
+                            <button className="danger-item" type="button" onClick={() => setPendingDelete({ id: item.code, code: item.code, title: item.title, kind: "page" })}><Trash2 size={14} />删除页面</button>
                           </div>
                         </div>
                       </div>
@@ -274,6 +315,24 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
         )}
       </section>
       {aiInfo ? <CaseAiInfoDialog info={aiInfo} close={() => setAiInfo(null)} copyText={copyText} /> : null}
+      {pendingDelete ? (
+        <div className="modal" role="dialog" aria-modal="true">
+          <button className="modal-mask" type="button" onClick={() => { if (!deleteBusy) { setPendingDelete(null); setDeleteError(""); } }} aria-label="取消" />
+          <section className="modal-panel confirm-panel">
+            <h2>删除{pendingDelete.kind === "group" ? "案例组" : "页面素材"}？</h2>
+            <p><code>{pendingDelete.code}</code> · {pendingDelete.title}</p>
+            {pendingDelete.kind === "page" ? <p>仍被汇报引用的页面会被保护，请先在对应汇报中移出。</p> : <p>删除案例组会移除对应的汇报素材及其关联数据。</p>}
+            {deleteError ? <p className="error-text">{deleteError}</p> : null}
+            <footer>
+              <button className="secondary" type="button" disabled={deleteBusy} onClick={() => { setPendingDelete(null); setDeleteError(""); }}>取消</button>
+              <button className="danger" type="button" disabled={deleteBusy} onClick={() => void confirmDelete()}>
+                {deleteBusy ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                {deleteBusy ? "正在删除" : "确认删除"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </>
   );
 }

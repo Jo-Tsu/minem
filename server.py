@@ -7539,6 +7539,45 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(release_temp_report(token))
             return
 
+        if parsed.path.startswith("/api/case-groups/"):
+            case_code = unquote(parsed.path.removeprefix("/api/case-groups/").strip("/"))
+            if not case_code:
+                self.send_json({"ok": False, "error": "缺少案例组编号"}, 400)
+                return
+            groups = available_case_groups()
+            group = next((item for item in groups if item["code"] == case_code), None)
+            if not group:
+                self.send_json({"ok": False, "error": "案例组不存在"}, 404)
+                return
+            deleted_count = 0
+            skipped = []
+            timestamp = now_ms()
+            control_codes = [control["code"] for control in group["controls"]]
+            with db() as conn:
+                for code in control_codes:
+                    row = conn.execute(
+                        "select id from assets where asset_code = ? and asset_type = 'control' and version_parent_id = ''",
+                        (code,),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    try:
+                        plan = build_asset_deletion_plan(conn, row["id"])
+                        result = apply_asset_deletion_plan(conn, plan, timestamp=timestamp)
+                        cleanup_deleted_asset_files(result)
+                        deleted_count += result["deleted_count"]
+                    except AssetDeletionError:
+                        skipped.append(code)
+            if deleted_count:
+                invalidate_stats_cache()
+            self.send_json({
+                "ok": True,
+                "code": case_code,
+                "deletedCount": deleted_count,
+                "skipped": skipped,
+            })
+            return
+
         if parsed.path.startswith("/api/assets/"):
             asset_id = unquote(parsed.path.removeprefix("/api/assets/").strip("/"))
             if not asset_id:
@@ -7546,7 +7585,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 with db() as conn:
-                    plan = build_asset_deletion_plan(conn, asset_id)
+                    row = conn.execute("select id from assets where id = ?", (asset_id,)).fetchone()
+                    if not row:
+                        row = conn.execute(
+                            "select id from assets where asset_code = ? and version_parent_id = '' limit 1",
+                            (asset_id,),
+                        ).fetchone()
+                    resolved_id = row["id"] if row else asset_id
+                    plan = build_asset_deletion_plan(conn, resolved_id)
                     result = apply_asset_deletion_plan(conn, plan, timestamp=now_ms())
             except AssetDeletionError as error:
                 self.send_json(

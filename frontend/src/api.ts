@@ -205,6 +205,7 @@ export const api = {
   saveAssetTags: (assetId: string, tags: string[]) => postJson<ApiOk<{ asset: Asset }>>(`/api/assets/${encodeURIComponent(assetId)}/tags`, { tags }),
   renameAsset: (assetId: string, title: string) => postJson<ApiOk<{ asset: Asset }>>(`/api/assets/${encodeURIComponent(assetId)}/title`, { title }),
   deleteAsset: (assetId: string) => deleteJson<ApiOk<{ assetCode: string }>>(`/api/assets/${encodeURIComponent(assetId)}`),
+  deleteCaseGroup: (code: string) => deleteJson<ApiOk<{ deletedCount: number; skipped: string[] }>>(`/api/case-groups/${encodeURIComponent(code)}`),
   adoptCandidate: (candidateId: string) => postJson<ApiOk>(`/api/report-page-candidates/${encodeURIComponent(candidateId)}/adopt`, {})
 };
 
