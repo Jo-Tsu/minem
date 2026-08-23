@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.start_local import running_minem_release
+from scripts.start_local import default_local_data_dir, running_minem_release
 from minem.jobs import ChannelConfig, JobQueueFullError, JobRuntime
 from minem.migrations import Migration, migration_status, run_migrations
 from minem.db import (
@@ -310,11 +310,21 @@ def startup_reuse_checks() -> None:
         thread.join(timeout=1)
 
 
+def local_runtime_path_checks() -> None:
+    with tempfile.TemporaryDirectory(prefix="minem-local-runtime-") as temp_dir:
+        home = Path(temp_dir)
+        expected = home / "Library" / "Application Support" / "MineM"
+        assert default_local_data_dir(platform="darwin", home=home) == expected.resolve()
+        explicit = home / "custom-runtime"
+        assert default_local_data_dir(explicit, platform="darwin", home=home) == explicit.resolve()
+
+
 def main() -> None:
     migration_checks()
     job_runtime_checks()
     interrupted_task_checks()
     startup_reuse_checks()
+    local_runtime_path_checks()
     print("runtime foundation checks passed")
 
 

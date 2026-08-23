@@ -15,39 +15,42 @@ import { api } from "../api";
 import { useModalBehavior } from "../modal";
 import { previewSandbox } from "../previewSecurity";
 import type { CaseAiInfo, CaseControlGroup } from "../types";
+import { safeAbsoluteUrl } from "../urlSafety";
 
 type CopyText = (text: string, message: string) => Promise<void>;
 
 // Mount the (heavy) iframe only when it nears the viewport so a large case
 // library / long detail page does not spin up many live iframes at once.
 function LazyFrame({ src, title }: { src: string; title: string }) {
+  const safeSrc = safeAbsoluteUrl(src);
   const holderRef = useRef<HTMLDivElement | null>(null);
-  const [near, setNear] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     const node = holderRef.current;
-    if (!node) return;
+    if (!node || loaded) return;
     if (typeof IntersectionObserver === "undefined") {
-      setNear(true);
+      setLoaded(true);
       return;
     }
     const observer = new IntersectionObserver(
-      (entries) => { for (const entry of entries) setNear(entry.isIntersecting); },
+      (entries) => { for (const entry of entries) if (entry.isIntersecting) { setLoaded(true); observer.disconnect(); } },
       { rootMargin: "600px 0px" }
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [loaded]);
   return (
     <div ref={holderRef} className="lazy-frame-holder">
-      {near && !failed ? <iframe loading="lazy" title={title} src={src} sandbox={previewSandbox(src)} referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <div className="lazy-frame-pending" aria-hidden="true" />}
-      {failed ? <div className="lazy-frame-error"><AlertCircle size={16} /><span>预览不可用</span></div> : null}
+      {loaded && !failed && safeSrc ? <iframe loading="lazy" title={title} src={safeSrc} sandbox={previewSandbox(safeSrc)} referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <div className="lazy-frame-pending" aria-hidden="true" />}
+      {failed || !safeSrc ? <div className="lazy-frame-error"><AlertCircle size={16} /><span>预览不可用</span></div> : null}
     </div>
   );
 }
 
 function CaseAiInfoDialog({ info, close, copyText }: { info: CaseAiInfo; close: () => void; copyText: CopyText }) {
   useModalBehavior(close);
+  const award = info.award === "案例页面" ? "" : info.award;
   const assetStructure = [
     info.pageStructure.keyAsset ? `  - 主视觉/重点素材: ${info.pageStructure.keyAsset}` : "",
     info.pageStructure.modalAssets ? `  - 可弹窗查看素材: ${info.pageStructure.modalAssets}` : ""
@@ -59,8 +62,7 @@ function CaseAiInfoDialog({ info, close, copyText }: { info: CaseAiInfo; close: 
     info.pageStructure.modalAssets ? `弹窗：${info.pageStructure.modalAssets}` : ""
   ].filter(Boolean);
   const raw = `案例名称: ${info.caseName}
-奖项: ${info.award}
-适合标题: ${info.pageTitle}
+${award ? `奖项: ${award}\n` : ""}适合标题: ${info.pageTitle}
 业务背景:
   - 内容: ${info.background.content}
   - 附件材料: ${info.background.attachments.join("；")}
@@ -91,7 +93,7 @@ function CaseAiInfoDialog({ info, close, copyText }: { info: CaseAiInfo; close: 
       <section className="case-ai-panel">
         <header>
           <div>
-            <span>{info.award}</span>
+            {award ? <span>{award}</span> : null}
             <h2>{info.caseName}</h2>
             <p>{info.pageTitle}</p>
           </div>
@@ -158,7 +160,8 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
       if (pendingDelete.kind === "group") {
         const data = await api.deleteCaseGroup(pendingDelete.code);
         if (data.ok === false) {
-          setDeleteError(data.error || "删除失败");
+          const references = data.referenceCodes?.length ? `（引用汇报：${data.referenceCodes.join("、")}）` : "";
+          setDeleteError(`${data.error || "删除失败"}${references}`);
           return;
         }
         setPendingDelete(null);
@@ -171,11 +174,14 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
           return;
         }
         setPendingDelete(null);
-        setGroups((current) => current.map((item) => {
+        setGroups((current) => current.flatMap((item) => {
           if (item.code !== selectedGroupCode) return item;
           const controls = item.controls.filter((control) => control.code !== pendingDelete.code);
-          return { ...item, controls, controlCount: controls.length, caseCount: controls.length };
+          return controls.length > 0
+            ? [{ ...item, controls, controlCount: controls.length, caseCount: controls.length }]
+            : [];
         }));
+        if (group?.controls.length === 1) setSelectedGroupCode(null);
       }
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : "删除失败，请稍后重试");
@@ -238,8 +244,8 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
                 <footer>
                   <code>{caseGroup.code}</code>
                   <button className="icon-btn" title="复制案例编号" aria-label="复制案例编号" type="button" onClick={() => void copyText(caseGroup.code, "已复制案例素材编号")}><Clipboard size={14} /></button>
-                  {caseGroup.sourceDoc ? <button className="icon-btn" title="复制原始文档链接" aria-label="复制原始文档链接" type="button" onClick={() => void copyText(caseGroup.sourceDoc, "已复制飞书文档链接")}><Copy size={14} /></button> : null}
-                  <button className="icon-btn danger-icon" title="删除案例组" aria-label="删除案例组" type="button" onClick={() => setPendingDelete({ id: caseGroup.code, code: caseGroup.code, title: caseGroup.title, kind: "group" })}><Trash2 size={14} /></button>
+                  {safeAbsoluteUrl(caseGroup.sourceDoc) ? <button className="icon-btn" title="复制原始文档链接" aria-label="复制原始文档链接" type="button" onClick={() => void copyText(safeAbsoluteUrl(caseGroup.sourceDoc), "已复制飞书文档链接")}><Copy size={14} /></button> : null}
+                  <button className="case-delete-btn" title="删除案例组" aria-label="删除案例组" type="button" onClick={() => setPendingDelete({ id: caseGroup.code, code: caseGroup.code, title: caseGroup.title, kind: "group" })}><Trash2 size={14} />删除</button>
                 </footer>
               </article>
             ))}
@@ -259,8 +265,8 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
                 </div>
               </div>
               <div className="case-group-side">
-                {group.sourceDoc ? <button className="secondary" type="button" onClick={() => void copyText(group.sourceDoc, "已复制飞书文档链接")}><Copy size={15} />复制文档链接</button> : null}
-                <a className="secondary" href={group.reportUrl} target="_blank" rel="noreferrer"><FileText size={15} />多页预览</a>
+                {safeAbsoluteUrl(group.sourceDoc) ? <button className="secondary" type="button" onClick={() => void copyText(safeAbsoluteUrl(group.sourceDoc), "已复制飞书文档链接")}><Copy size={15} />复制文档链接</button> : null}
+                {safeAbsoluteUrl(group.reportUrl) ? <a className="secondary" href={safeAbsoluteUrl(group.reportUrl)} target="_blank" rel="noreferrer"><FileText size={15} />多页预览</a> : null}
                 <button className="danger" type="button" onClick={() => setPendingDelete({ id: group.code, code: group.code, title: group.title, kind: "group" })}><Trash2 size={15} />删除案例组</button>
               </div>
             </section>
@@ -283,26 +289,26 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
                     <article className="case-detail-card" id={item.id} key={item.id}>
                       <header>
                         <div>
-                          <div className="case-list-badges"><span>{item.award}</span><span>{item.scenario}</span><span>{item.code}</span></div>
+                          <div className="case-list-badges">{item.award && item.award !== "案例页面" ? <span>{item.award}</span> : null}<span>{item.scenario}</span><span>{item.code}</span></div>
                           <h3>{item.title}</h3>
                         </div>
                         <code>{item.id}</code>
                       </header>
                       <div className="case-detail-body">
                         <div className="case-detail-preview">
-                          {!failedPreviewIds.has(item.id)
-                            ? <iframe loading="lazy" title={`${item.title} 页面素材预览`} src={item.controlUrl} sandbox={previewSandbox(item.controlUrl)} referrerPolicy="no-referrer" onError={() => setFailedPreviewIds((current) => new Set(current).add(item.id))} />
+                          {!failedPreviewIds.has(item.id) && safeAbsoluteUrl(item.controlUrl)
+                            ? <iframe loading="lazy" title={`${item.title} 页面素材预览`} src={safeAbsoluteUrl(item.controlUrl)} sandbox={previewSandbox(item.controlUrl)} referrerPolicy="no-referrer" onError={() => setFailedPreviewIds((current) => new Set(current).add(item.id))} />
                             : <div className="case-preview-error"><AlertCircle size={18} /><strong>页面预览不可用</strong><span>可尝试打开页面素材链接查看详情。</span></div>}
                         </div>
                         <div className="case-detail-info">
                           <section><strong>案例总结</strong><p>{item.summary}</p></section>
                           {attachments.length > 0 ? <section><strong>页面素材组成</strong><p>{attachments.join(" / ")}</p></section> : null}
                           <div className="case-row-actions">
-                            {item.sourceUrl ? <button type="button" onClick={() => void copyText(item.sourceUrl, "已复制原始飞书链接")}><Copy size={14} />原始链接</button> : null}
-                            <a href={item.controlUrl} target="_blank" rel="noreferrer"><Layers3 size={14} />页面素材</a>
-                            <a href={item.reportPageUrl} target="_blank" rel="noreferrer"><FileText size={14} />预览页</a>
+                            {safeAbsoluteUrl(item.sourceUrl) ? <button type="button" onClick={() => void copyText(safeAbsoluteUrl(item.sourceUrl), "已复制原始飞书链接")}><Copy size={14} />原始链接</button> : null}
+                            {safeAbsoluteUrl(item.controlUrl) ? <a href={safeAbsoluteUrl(item.controlUrl)} target="_blank" rel="noreferrer"><Layers3 size={14} />页面素材</a> : null}
+                            {safeAbsoluteUrl(item.reportPageUrl) ? <a href={safeAbsoluteUrl(item.reportPageUrl)} target="_blank" rel="noreferrer"><FileText size={14} />预览页</a> : null}
                             {item.ai ? <button type="button" onClick={() => setAiInfo(item.ai || null)}><Sparkles size={14} />AI 信息</button> : null}
-                            <button className="danger-item" type="button" onClick={() => setPendingDelete({ id: item.code, code: item.code, title: item.title, kind: "page" })}><Trash2 size={14} />删除页面</button>
+                            <button className="danger-item" type="button" onClick={() => setPendingDelete({ id: item.id, code: item.code, title: item.title, kind: "page" })}><Trash2 size={14} />删除页面</button>
                           </div>
                         </div>
                       </div>
@@ -321,7 +327,9 @@ export function CaseControlLibrary({ copyText, reloadToken = 0 }: { copyText: Co
           <section className="modal-panel confirm-panel">
             <h2>删除{pendingDelete.kind === "group" ? "案例组" : "页面素材"}？</h2>
             <p><code>{pendingDelete.code}</code> · {pendingDelete.title}</p>
-            {pendingDelete.kind === "page" ? <p>仍被汇报引用的页面会被保护，请先在对应汇报中移出。</p> : <p>删除案例组会移除对应的汇报素材及其关联数据。</p>}
+            {pendingDelete.kind === "page"
+              ? <p>仍被汇报引用的页面会被保护，请先在对应汇报中移出。</p>
+              : <p>将删除案例组及组内全部页面素材和历史版本。原始文档及资源素材保留；任一页面仍被汇报引用时，本次删除不会执行。</p>}
             {deleteError ? <p className="error-text">{deleteError}</p> : null}
             <footer>
               <button className="secondary" type="button" disabled={deleteBusy} onClick={() => { setPendingDelete(null); setDeleteError(""); }}>取消</button>

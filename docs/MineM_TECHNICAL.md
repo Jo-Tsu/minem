@@ -1,6 +1,6 @@
 # MineM 技术文档
 
-版本：0.5.0-alpha.31 · 2026-08-02
+版本：0.5.0-beta.9 · 2026-08-21
 
 ## 1. 技术栈
 
@@ -48,11 +48,12 @@ flowchart TB
 
 ### 2.1 数据库迁移与任务运行时
 
+- macOS 的 `scripts/start_local.py` 与 Tauri 客户端默认把 `MINEM_DATA_DIR` 解析为 `~/Library/Application Support/MineM/`，因此浏览器和客户端共享 SQLite、导入文件、派生页面、缩略图与导出产物。只有显式 `--data-dir` 才创建隔离运行库；若目标端口已有 MineM，启动器还需校验该端口对应目标运行目录的 `runtime/session.json`，不匹配时拒绝复用。
 - SQLite Schema 使用 `schema_migrations` 记录已应用版本、名称、实现校验和与应用时间。`product-version.json` 的 `databaseSchemaVersion` 必须与代码迁移目标一致，否则服务拒绝启动。
 - 现有无迁移记录的数据库先完成一次兼容整理，再登记 `legacy-schema-baseline`。后续已登记数据库不再重复执行旧兼容迁移。
-- 从数据库版本 `v2` 开始，存在待执行迁移时先通过 SQLite Online Backup 写入 `state/backups/`，迁移成功后最多保留最近三份。无待执行迁移时不生成重复备份。
+- Schema 迁移使用数据库事务和迁移校验和，不在运行目录自动创建 SQLite 备份。需要迁移前快照时由用户在运行目录外显式执行，平台和数据治理脚本不得静默保留副本。
 - 迁移使用 `BEGIN IMMEDIATE`；嵌套在测试或外部事务中时使用 Savepoint。任一迁移失败会回滚本轮所有 Schema 变更，已应用迁移的名称或校验和发生漂移时拒绝继续启动。
-- 导入、导出、标签分析和缩略图统一进入进程内 `JobRuntime`。四类任务使用独立有界通道，当前均单 Worker 串行执行，避免多个 Chromium、文件复制或 SQLite 写任务无上限并发。
+- 导入、导出、标签分析和缩略图统一进入进程内 `JobRuntime`。四类任务使用独立有界通道；导入、导出和标签各 1 个 Worker，缩略图 2 个 Worker，既限制 Chromium 并发，又避免列表缩略图长期排队。
 - 相同通道与任务键重复提交时复用同一个 Future；队列达到容量后接口返回可重试的 `503`，并把已创建的持久化任务标记为失败，禁止永久停留在 `queued`。
 - 服务重启后，遗留的导入、导出和标签 `queued/running` 任务统一转为带可操作原因的 `failed`；缩略图是可再生缓存，重新进入列表时按内容指纹再次排队。
 - `/api/version` 在原有发布信息之外返回数据库迁移版本与各任务通道的 workers、容量、排队数、完成数和失败数；诊断信息不返回数据库备份绝对路径。
@@ -71,7 +72,15 @@ flowchart TB
 
 ### 2.3 页面语义去重
 
-- `databaseSchemaVersion=2` 为 `assets` 增加 `semantic_key`、`semantic_text_hash`、`semantic_fingerprint`、`semantic_fingerprint_version` 和 `semantic_dedupe_status`。迁移前使用 SQLite Online Backup 写入 `state/backups/`，原始页面、页槽和资源不在迁移中改写。
+- `databaseSchemaVersion=2` 为 `assets` 增加 `semantic_key`、`semantic_text_hash`、`semantic_fingerprint`、`semantic_fingerprint_version` 和 `semantic_dedupe_status`。迁移事务不改写原始页面、页槽和资源文件，也不在运行目录生成数据库副本。
+
+### 2.4 编排与恢复一致性
+
+- 编排确认在单个 SQLite 事务内重建页槽、保存顺序和隐藏状态、更新汇报公开入口并创建或复用 `1920×1080` 尺寸适配版本。尺寸包装文件通过文件变更日志参与失败回滚；事务提交后才进入缩略图队列。
+- `extracted/` 按需恢复在发布前运行 `audit_dependency_closure()`，写入依赖审计结果；存在阻塞资源或汇报派生页同步异常时删除本次不完整恢复目录并返回失败。
+- HTML 缩略图生成前检查当前入口的阻塞依赖。依赖缺失时不允许降级为文字图；内容指纹过期且源文件更新时删除旧图和元数据，等待真实浏览器重渲染。
+- 列表业务活动时间通过三个聚合 CTE 计算版本、页槽和候选页最近活动，避免针对每条素材执行相关子查询。页数检测按文件路径、大小和纳秒修改时间缓存，文件更新会自动失效。
+- 汇报公开页、编排查看器和编排接口共用已确认编排缓存。页面版本在同一个 SQLite 连接中批量解析；同一汇报的并发冷读取合并为一次构建。缓存键同时校验汇报、编排和页槽修订签名，素材写入沿用统一失效入口，因此接口写入和后台直接更新页槽都不会继续返回旧顺序。
 - 页面语义指纹只取单页根节点中的唯一 `data-slide-key/data-page-key` 与去除脚本、样式、模板后的可见正文；标题、导入批次、HTML 外壳和资源绝对路径不能单独触发自动归并。正文不足 12 字或存在多个稳定 key 时不生成自动归并指纹。
 - 新导入页面在发布事务提交后计算指纹。若命中其他主页面，仅定向生成候选和当前页面的最终缩略图；同时满足语义指纹一致、平均像素差不高于 `1.5` 且变化像素不超过 `3%` 时，才使用 `semantic-visual-v1` 收进同一版本链。
 - 主版本按“汇报页槽引用数倒序、创建时间正序、编号正序”选择。归并只更新版本元数据，不迁移 `report_page_slots/report_page_candidates`，不删除页面记录、缩略图、来源文件或资源，因此不同汇报仍可追溯到各自导入的页面记录。
@@ -208,6 +217,9 @@ macOS 剪贴板写入直接使用 AppKit `NSPasteboard.generalPasteboard` 和 `N
 规则：
 - 页面拖拽、隐藏、恢复仅更新前端会话内的编排状态；关闭弹窗即丢弃，服务端不保存草稿。
 - 用户点击“确认编排”后，前端调用更新接口一次性提交 `page_order`、`hidden_page_ids` 和 `removed_page_ids`；服务端在单个事务内重建当前汇报的页面槽位、更新编排元数据和汇报活动时间。
+- `GET` 编排接口和公开汇报入口保持只读，不执行尺寸转换、槽位重建或版本创建。尺寸适配只在启动迁移、导入发布或确认编排等显式写流程执行。
+- 编排并发版本取 `report_page_arrangements.updated_at` 与当前汇报全部 `report_page_slots.updated_at` 的最大值；任何协作者或后台任务改变槽位后，旧会话提交必须返回冲突。
+- 已存在编排记录时，`page_order` 中仍有效的页面构成正式顺序；额外槽位以 `pendingPageIds` 返回编排工作区，但不进入 `/reports/{id}/index.html`，直至下次确认。
 - 前端以当前会话编排与服务端已确认编排的序列和隐藏集合比较，计算 `dirty` 状态；`dirty` 时关闭操作弹出保存确认，不调用接口前不得关闭主弹窗。
 - 关闭确认提供保存、放弃、继续编辑三个结果：保存复用确认编排提交；放弃清空本地会话状态并关闭；继续编辑不改变任何状态。
 - 编排主界面为独立前端路由，至少携带 `reportId`；详情预览的“编排”入口只负责导航，不再承载编排会话。
@@ -217,6 +229,7 @@ macOS 剪贴板写入直接使用 AppKit `NSPasteboard.generalPasteboard` 和 `N
 - 移出操作只允许移除当前汇报已有的槽位引用；确认后不删除 `assets`、资源文件或其他汇报槽位，页面素材仍可被检索和重新插入。服务端拒绝将汇报移为空页。
 - 页面槽位 `page_number` 在确认时按最终顺序重新编号；已有槽位的 `control_id` 和来源文件均不改写。
 - 汇报详情、独立预览、播放和导出读取编排元数据后组合页面；无编排记录时保持来源解析顺序。
+- `/reports/{id}/index.html` 内嵌 `minem-arrangement-state` JSON，记录 `reportId`、`updatedAt`、`pageOrder` 和 `hiddenPageIds`。前端确认后必须解析并逐项比对该状态，不能仅检查响应状态码或编排查看器。
 - 完整汇报导出使用已确认的 `report_page_slots` 与 `report_page_arrangements` 作为唯一输入，过滤 `hidden_page_ids` 和已移出槽位；导出服务不得读取前端未确认会话状态，也不得回写 `assets`、槽位、编排或来源 HTML。
 - 编排表只引用既有 `report_page_slots.control_id`，不插入新的 `assets`、资源或来源 HTML 文件。
 - 页面素材被重新同步后，读取时按现有页面槽位补齐新增页，并丢弃已不存在的引用。
@@ -292,6 +305,8 @@ macOS 剪贴板写入直接使用 AppKit `NSPasteboard.generalPasteboard` 和 `N
 
 删除接口采用“引用校验 -> 记录保留页面 -> 关联数据清理 -> 主记录删除 -> 事务提交 -> 文件清理”的固定顺序。删除汇报时清理其页槽、编排、尺寸适配、候选页、导出任务、标签和故事线关联，但不删除被引用的页面或资源；保留页面原子更新为 `source_type=retained-report-page`，来源说明不得残留已删除汇报编号。删除页面时若仍被页槽、候选页或尺寸适配关系引用，返回 `409` 和引用汇报清单，不允许把引用改为空字符串。文件只在数据库事务成功后删除，事务失败不得出现记录仍在但预览文件已经丢失的状态。
 
+案例删除由 `minem/case_deletion.py` 编排。服务先为 manifest 中全部主版本 `CTRL-*` 建立删除计划，并聚合页槽、候选页和尺寸适配引用；存在任一冲突时返回 `409`、`blockedPages` 和 `referenceCodes`，数据库保持不变。全部通过后，在一个 `BEGIN IMMEDIATE` 事务中删除案例页面及版本记录，提交后再清理页面文件和运行目录 manifest。资源素材与外部源 manifest 不参与删除。
+
 无显式 Manifest 的 HTML Deck 使用 `extract_page_node_spans` 计算真实页面根。优先以 `.slide-frame` 顶层节点为页，不以同一页内层的 `data-slide` / `data-page` 组件或业务 iframe 数量推断页数；仅当来源本身是明确的 iframe 页面查看器时才允许 iframe 表示页面。真实页面根少于两个时进入单页页面素材扫描，不创建 `RPT`。
 
 启动历史治理采用保守门禁：仅当 `source_type=report-material-sync`、存在且仅存在一个有效页面槽、入口检测结果严格等于一页时，才删除误生成的 `RPT` 外壳并保留其 `CTRL` 页面。零页槽、孤儿页槽、多页槽及非同步来源全部跳过，由数据审计报告处理；禁止根据一个 viewer 入口的 DOM 结构直接重分类正常汇报。
@@ -319,6 +334,7 @@ macOS 剪贴板写入直接使用 AppKit `NSPasteboard.generalPasteboard` 和 `N
 | POST | `/api/merge-similar` | 合并相似图片 |
 | GET | `/api/storylines` | 获取故事线模板与汇报收藏产生的故事线；收藏故事线按最新版本返回并包含版本历史 |
 | GET | `/api/case-groups` | 从已导入案例 manifest 与真实 `CTRL-*` 主版本生成案例组；过滤未入库或无预览页面 |
+| DELETE | `/api/case-groups/{code}` | 原子删除案例组及组内页面版本；被汇报引用时整体返回 `409`，资源和外部源文件保留 |
 | GET | `/api/reports/{id}/pages` | 获取汇报页槽 |
 | POST | `/api/reports/{id}/pages` | 创建或更新汇报页槽 |
 | POST | `/api/reports/{id}/controls` | 将汇报页面导入为控件 |
@@ -420,7 +436,8 @@ sequenceDiagram
 ### 8.1 Preview Shell
 
 - 新增前端统一预览壳组件，输入为页面 URL 列表、当前索引、页面标题和是否允许翻页；汇报、临时汇报、案例、编排后预览与独立预览均复用该组件。
-- 预览壳使用 iframe 懒加载当前页及相邻页，其他页面不创建 iframe；不维护用户缩放状态，不写入资产或来源 HTML。
+- 完整汇报查看器初始化时只创建当前页 iframe；当前页完成后再预热前后邻页，最多保留三个 live iframe。切页时销毁距离当前页超过一页的 iframe，并清理对应计时器与过期加载回调。
+- 导航不等待其他页面完成；单页超时或失败只影响该页并提供重新加载。来源页 iframe 默认只授予 `allow-scripts`，不得让隐藏或预热页面拥有 popup、modal、form 或 download 能力。列表卡片仍只加载缩略图。
 - 汇报和页面平台查看器的外层预览容器固定为 `1920×1080` 逻辑画布，使用 `contain` 计算 iframe 显示区域；来源素材的 `preview_meta.width/height` 只用于裸来源 HTML、资源预览和尺寸版本生成，不能再次缩放统一查看器。`ResizeObserver` 驱动尺寸重算，避免轮询和重复加载。
 - 对固定尺寸来源 HTML，Preview Shell 必须以检测到的来源逻辑画布宽高创建内层 viewport，并对该 viewport 应用单一 `transform: scale()`；不得只放大 iframe 外框，否则会产生左上角内容和大面积空白。来源比例为 16:9 时缩放后应填满标准容器。
 - 无法可靠检测逻辑画布时，预览壳以 iframe 文档根节点的 `scrollWidth/scrollHeight` 与 `getBoundingClientRect()` 进行一次性握手测量；测量失败回退 16:9，并记录预览诊断结果供数据走查。
@@ -610,9 +627,10 @@ Docker 镜像使用 Node 构建阶段从 `frontend/` 生成生产前端，最终
 - 阶段 8：质量体系，补充导入/链路一致性测试，接入 Docker healthcheck 或发布前检查。
 
 剩余风险：
-- 前端已经建立独立组件目录，但资产列表、详情、故事线和编排仍集中在 `App.tsx`，后续继续按业务边界迁移。
-- 后端仍有治理、HTTP 路由和部分兼容旧函数集中在 `server.py`，需要继续拆分。
-- API 契约脚本已覆盖核心读接口，但还没有纳入 CI 或 Docker healthcheck。
+- `server.py` 约 8,959 行，HTTP 路由、导入编排、汇报读取缓存和兼容包装仍然集中；需继续拆为请求处理、汇报查询、导入编排和运行数据治理模块。
+- `App.tsx` 约 2,919 行，素材列表、详情、故事线和编排状态仍较集中；已有 `AssetPreview`、案例、导入和工作台组件，但还需继续拆分列表与详情域。
+- `styles.css` 约 3,160 行，后续按 token、布局、素材、弹窗和编排拆分，并保持单一入口导入。
+- CI 已覆盖文档、版本、公开边界、Python、前端、桌面交互、空库 API 与 CLI；真实素材全量预览仍需在本机发布门禁执行，不能上传客户数据到公开 CI。
 
 建议拆分：
 - 后端：继续拆为 `governance.py`、`http_handlers.py`，并逐步清理 `server.py` 中的兼容包装函数。
@@ -624,7 +642,19 @@ Docker 镜像使用 Node 构建阶段从 `frontend/` 生成生产前端，最终
 - P1：原数据链路与详情预览的数据一致性测试；把契约脚本纳入发布检查。
 - P2：继续拆 `governance.py` 和 `http_handlers.py`；统一弹窗/抽屉组件；URL 安全白名单。
 
-## 13. 验证清单
+## 13. 汇报模式
+
+- `minem/presenter_mode.py` 独立渲染电脑控制台与投影页面，避免继续把大段页面模板写入 `server.py`。
+- `/reports/{report_id}/presenter.html` 提供电脑端控制台；`/reports/{report_id}/audience.html` 提供投影端纯净页面。
+- 两个入口都读取 `report_public_page_items()`，因此页序、隐藏页、页面版本和公开汇报入口保持同源；不另存汇报副本，也不改编排数据。
+- `BroadcastChannel(minem-presenter:{report_id})` 负责同源窗口实时同步，`localStorage` 作为新开窗口和短暂断连的状态恢复通道。
+- 页面内容继续通过 `/pages/{control_id}/index.html?embed=1` 的统一查看壳加载；投影端加载当前页真实 HTML，控制台当前页与底部页带使用已有缩略图缓存，不预加载下一页交互页面。
+- 演讲稿沿用现有 `ai-presenter.html` 中 `defaultSpeakerNotes` 数据；映射顺序为页面 ID/编号、标题/来源、等长页序兜底。没有讲稿时返回空提示，不跨汇报复用。
+- `POST /api/reports/{report_id}/presenter-notes` 按已确认编排中的稳定页面 ID 更新单页提示词，受本机会话令牌和同源写保护；单页上限 20000 字符。接口只替换 `defaultSpeakerNotes` 对应键，保留其他页提示词和演讲稿元数据。
+- 控制台右栏只提供可滚动提示词编辑器，不展示下一页预览；草稿按页面保存在当前窗口内，显式保存成功后才更新页面数据，存在未保存草稿时拦截窗口关闭。
+- `GET /api/reports/{report_id}/presenter-script` 返回 `presenterModeUrl`；详情页“汇报模式”和 AI 演讲台“进入演讲台”均进入平台统一控制台。
+
+## 14. 验证清单
 
 每次发布前执行：
 

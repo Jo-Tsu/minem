@@ -47,7 +47,7 @@ minem import report|page <source>
 minem page build|import
 minem report create|get|pages|open|export
 minem report page add|replace|move|hide|show|remove
-minem case import
+minem case brief|import
 minem task list|get|wait
 minem agent capabilities|schema
 ```
@@ -110,6 +110,10 @@ minem report page remove RPT-20260719-001 --page CTRL-PAGE-003 --confirm
 ```bash
 minem agent capabilities --output json
 minem agent schema report.page.add --output json
+
+# 获取稳定的案例选择、图片归属、页面结构和输出 Schema；默认最多 3 个案例
+minem case brief "https://example.com/source-document" \
+  --audience 管理层 --max-cases 3 --output json --no-input
 
 # 模型先生成页面 JSON 规范，再由 MineM 构建并正式导入
 minem page build --spec ./customer-value.json \

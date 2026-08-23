@@ -93,6 +93,7 @@ DEFAULT_TASK = {
 
 INTERRUPTED_TASK_MESSAGE = "导入已中断"
 INTERRUPTED_TASK_ERROR = "MineM 服务已重新启动，原导入进程无法继续；请点击重试"
+CANCELLABLE_STATUSES = {"queued", "running"}
 
 
 def now_ms():
@@ -182,6 +183,25 @@ class ImportTaskStore:
             return None
         task = self._row_to_task(row)
         return task if include_private else public_import_task(task)
+
+    def mark_cancelling(self, task_id):
+        with self.lock:
+            current = self.get(task_id, include_private=True)
+            if not current or current["status"] not in CANCELLABLE_STATUSES:
+                return None
+            current["message"] = "正在取消导入"
+            current["updatedAt"] = now_ms()
+            self._save(current)
+            return public_import_task(current)
+
+    def mark_cancelled(self, task_id):
+        return self.update(
+            task_id,
+            status="cancelled",
+            progress=100,
+            message="导入已取消",
+            error="",
+        )
 
     def _save(self, task):
         if not task.get("id"):

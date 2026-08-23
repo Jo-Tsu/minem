@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 from pathlib import Path
 import json
 import re
@@ -11,8 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from minem.paths import is_path_within
 
-DB_PATH = ROOT / "data" / "materials.db"
-EXTRACTED = ROOT / "extracted"
+_RUNTIME_ROOT = Path(os.environ["MINEM_DATA_DIR"]) if os.environ.get("MINEM_DATA_DIR") else ROOT
+DB_PATH = _RUNTIME_ROOT / "data" / "materials.db"
+EXTRACTED = _RUNTIME_ROOT / "extracted"
 SECOND_TS_LIMIT = 100_000_000_000
 LEGACY_MOCK_TAG = "界面 " + "Mock"
 LEGACY_MOCK_CODE_PREFIX = "CTRL-" + "MOCK"
@@ -56,6 +58,7 @@ def now_ms():
 def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("pragma journal_mode = wal")
     conn.execute("pragma busy_timeout = 5000")
     return conn
 

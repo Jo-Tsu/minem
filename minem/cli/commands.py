@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from minem.case_brief import build_case_brief
 from minem.html_page_builder import HtmlPageBuildError, build_page_file
 
 from . import SCHEMA_VERSION
@@ -284,6 +285,26 @@ def page_build(ctx: CommandContext, args) -> dict:
     return imported
 
 
+def case_brief(ctx: CommandContext, args) -> dict:
+    try:
+        brief = build_case_brief(
+            args.source,
+            audience=args.audience,
+            focus=args.focus,
+            max_cases=args.max_cases,
+        )
+    except ValueError as error:
+        raise CliError("INVALID_ARGUMENT", str(error), exit_code=2) from error
+    if args.prompt_only:
+        return {
+            "script": brief["prompt"],
+            "schemaVersion": brief["schemaVersion"],
+            "profile": brief["profile"],
+            "requestedMaxCases": brief["requestedMaxCases"],
+        }
+    return brief
+
+
 def case_import(ctx: CommandContext, args) -> dict:
     source = _source(args)
     if source.suffix.lower() not in {".md", ".markdown", ".txt"}:
@@ -450,6 +471,7 @@ CAPABILITIES = [
     {"name": "import.page", "input": "HTML or ZIP", "async": True},
     {"name": "page.build", "input": "MineM page JSON specification", "produces": "Self-contained 1920x1080 HTML", "mutates": False, "publishOptional": True},
     {"name": "page.import", "input": "HTML or ZIP", "async": True},
+    {"name": "case.brief", "input": "Document URL or local path", "readOnly": True, "modelRequired": False, "produces": "Stable AI case-generation prompt and schema"},
     {"name": "case.import", "input": "Markdown or TXT", "aiGenerated": False},
     {"name": "task.list", "readOnly": True},
     {"name": "task.get", "readOnly": True},
@@ -483,6 +505,16 @@ SCHEMAS = {
             "publish": {"type": "boolean", "description": "Import the generated page into MineM"},
             "name": {"type": "string"},
             "wait": {"type": "boolean"},
+        },
+    },
+    "case.brief": {
+        "required": ["source"],
+        "properties": {
+            "source": {"type": "string", "description": "Document URL or local path"},
+            "audience": {"type": "string", "default": "管理层"},
+            "focus": {"type": "string"},
+            "maxCases": {"type": "integer", "minimum": 1, "maximum": 12, "default": 3},
+            "promptOnly": {"type": "boolean", "default": False},
         },
     },
     "case.import": {"required": ["source"], "properties": {"source": {"type": "string"}, "name": {"type": "string"}, "industry": {"type": "string"}, "wait": {"type": "boolean"}}},

@@ -68,8 +68,12 @@ test("imports keep page and report classifications distinct", () => {
 test("case instructions create case groups instead of report records", () => {
   const text = buildScenarioInstruction("extract_case");
   assert.match(text, /调用 Skill：`minem-case-material`/);
-  assert.match(text, /不登记为汇报素材/);
-  assert.match(text, /不编造/);
+  assert.match(text, /默认 3 个/);
+  assert.match(text, /minem case brief/);
+  assert.match(text, /不按章节全量生成/);
+  assert.match(text, /1–4 页/);
+  assert.match(text, /视频点击播放/);
+  assert.match(text, /优质客户素材完整纳入/);
 });
 
 test("desktop instructions assume the installed client and avoid machine-specific paths", () => {

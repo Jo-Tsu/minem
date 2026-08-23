@@ -34,6 +34,8 @@ local-tts/*.pid
 desktop/.build/
 desktop/.npm-cache/
 desktop/node_modules/
+desktop/ui/assets/
+desktop/ui/favicon.svg
 desktop/src-tauri/binaries/minem-server-*
 desktop/src-tauri/binaries/sidecar/*
 desktop/src-tauri/gen/

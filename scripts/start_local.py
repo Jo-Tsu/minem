@@ -17,13 +17,40 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from minem.runtime_discovery import read_session_manifest, same_loopback_endpoint  # noqa: E402
+
+
 VENV = ROOT / ".venv"
 PUBLIC_INDEX = ROOT / "public" / "index.html"
 FRONTEND_STAMP = ROOT / "public" / ".minem-build-sha256"
 PACKAGE_STAMP = ROOT / "node_modules" / ".minem-package-lock-sha256"
 REQUIREMENTS_STAMP = VENV / ".minem-requirements-sha256"
+
+
+def default_local_data_dir(
+    explicit: Path | None = None,
+    *,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Use the same macOS runtime as the desktop client by default."""
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+    configured = os.environ.get("MINEM_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    current_platform = platform or sys.platform
+    if current_platform == "darwin":
+        return ((home or Path.home()) / "Library" / "Application Support" / "MineM").resolve()
+    return ROOT
+
+
+def runtime_owns_endpoint(data_dir: Path, url: str) -> bool:
+    manifest = read_session_manifest(data_dir)
+    return bool(manifest and same_loopback_endpoint(manifest.get("baseUrl", ""), url))
 
 
 def fail(message: str) -> None:
@@ -172,8 +199,14 @@ def main() -> int:
         fail("Python 3.10 or newer is required; Python 3.12 is recommended")
     browser_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     url = f"http://{browser_host}:{args.port}"
-    running_release = running_minem_release(url) if not args.data_dir else None
+    data_dir = default_local_data_dir(args.data_dir)
+    running_release = running_minem_release(url)
     if running_release:
+        if not runtime_owns_endpoint(data_dir, url):
+            fail(
+                f"{url} is already served by another MineM runtime; "
+                "stop it before starting this data library"
+            )
         version = running_release.get("version") or "unknown"
         print(f"[MineM] already running at {url} (version {version}); reusing it")
         if not args.no_browser:
@@ -188,8 +221,7 @@ def main() -> int:
     environment["PORT"] = str(args.port)
     environment.setdefault("AUTO_IMPORT_ON_START", "0")
     environment.setdefault("MINEM_AGENT_INTERNAL_API", "0")
-    if args.data_dir:
-        environment["MINEM_DATA_DIR"] = str(args.data_dir.expanduser().resolve())
+    environment["MINEM_DATA_DIR"] = str(data_dir)
 
     if not args.no_browser:
         threading.Thread(target=open_when_ready, args=(url,), daemon=True).start()

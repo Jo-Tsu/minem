@@ -12,6 +12,9 @@ from urllib.parse import unquote, urlparse
 
 HTML_SUFFIXES = {".html", ".htm"}
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^)'\"]+)\1\s*\)", re.IGNORECASE)
+CSS_CLASS_RE = re.compile(r"\.([_a-zA-Z][\w-]*)")
+CSS_ID_RE = re.compile(r"#([_a-zA-Z][\w-]*)")
+CSS_ATTR_VALUE_RE = re.compile(r"\[([\w-]+)\s*=\s*(['\"]?)([^\]'\"]+)\2\]")
 MAX_REFERENCES = 20_000
 EPHEMERAL_RUNTIME_REFERENCE_RE = re.compile(
     r"^/decks/[^/?#]+/\.runtime/[^/?#]+/assets/(?P<asset>[^?#]+)(?:[?#].*)?$",
@@ -102,6 +105,17 @@ def is_external(value: str) -> bool:
     return bool(parsed.scheme or parsed.netloc)
 
 
+def _runtime_root_for_package(root: Path) -> Path | None:
+    for candidate in (root, *root.parents):
+        if candidate.name == "extracted":
+            return candidate.parent
+    return None
+
+
+def _display_path(root: Path, path: Path) -> str:
+    return Path(os.path.relpath(path, root)).as_posix()
+
+
 def local_path(root: Path, source: Path, base_href: str, value: str) -> Path | None:
     if is_external(value):
         return None
@@ -117,14 +131,21 @@ def local_path(root: Path, source: Path, base_href: str, value: str) -> Path | N
     if ref.startswith(f"/extracted/{root.name}/"):
         target = root / ref.removeprefix(f"/extracted/{root.name}/")
     elif ref.startswith("/extracted/"):
-        # A generated platform viewer may point at another managed package;
-        # it is validated by that package's own audit rather than this import.
-        return None
+        runtime_root = _runtime_root_for_package(root)
+        if runtime_root is None:
+            return None
+        target = runtime_root / ref.lstrip("/")
     else:
         target = (root / ref.lstrip("/")) if ref.startswith("/") else (base / ref)
     try:
         target = target.resolve()
-        target.relative_to(root.resolve())
+        runtime_root = _runtime_root_for_package(root)
+        allowed_root = (
+            (runtime_root / "extracted").resolve()
+            if ref.startswith("/extracted/") and runtime_root
+            else root.resolve()
+        )
+        target.relative_to(allowed_root)
     except ValueError:
         return None
     return target
@@ -148,6 +169,40 @@ def _refs_for(path: Path):
     return parser.base_href, list(parser.references)
 
 
+def _css_reference_may_be_used(css_text: str, reference: str, html_text: str) -> bool:
+    """Conservatively detect whether a url() rule can match the source HTML."""
+    for match in CSS_URL_RE.finditer(css_text or ""):
+        if match.group(2).strip() != reference:
+            continue
+        block_start = css_text.rfind("{", 0, match.start())
+        if block_start < 0:
+            return True
+        selector_start = css_text.rfind("}", 0, block_start) + 1
+        selector_group = css_text[selector_start:block_start].strip()
+        if not selector_group or selector_group.startswith("@"):
+            return True
+        for selector in selector_group.split(","):
+            classes = CSS_CLASS_RE.findall(selector)
+            ids = CSS_ID_RE.findall(selector)
+            attributes = CSS_ATTR_VALUE_RE.findall(selector)
+            if not classes and not ids and not attributes:
+                return True
+            if any(not re.search(rf'class\s*=\s*["\'][^"\']*\b{re.escape(name)}\b', html_text) for name in classes):
+                continue
+            if any(not re.search(rf'id\s*=\s*["\']{re.escape(name)}["\']', html_text) for name in ids):
+                continue
+            if any(
+                not re.search(
+                    rf'{re.escape(name)}\s*=\s*["\']{re.escape(value)}["\']',
+                    html_text,
+                )
+                for name, _quote, value in attributes
+            ):
+                continue
+            return True
+    return False
+
+
 def audit_dependency_closure(root: Path) -> dict:
     """Return missing local resources reachable from every source HTML page."""
     root = Path(root).resolve()
@@ -155,7 +210,10 @@ def audit_dependency_closure(root: Path) -> dict:
         path for path in root.rglob("*")
         if path.is_file()
         and path.suffix.lower() in HTML_SUFFIXES
-        and not any(part.startswith("_minem_") for part in path.relative_to(root).parts)
+        and not any(
+            part.startswith(("_minem_", ".", "__MACOSX"))
+            for part in path.relative_to(root).parts
+        )
     ]
     queue = [(path, path) for path in entries]
     visited: set[Path] = set()
@@ -176,12 +234,24 @@ def audit_dependency_closure(root: Path) -> dict:
                 continue
             checked += 1
             if not target.exists():
+                # Exported HTML bundles commonly retain generated CSS rules for
+                # components that are not present in the final document. A
+                # missing url() from such a stylesheet is useful audit data, but
+                # it must not reject an otherwise complete package. Structural
+                # HTML dependencies and inline-style resources remain blocking.
+                optional_css_resource = (
+                    current.suffix.lower() == ".css"
+                    and kind == "css-url"
+                    and not _css_reference_may_be_used(_read(current), value, _read(entry))
+                )
                 missing.append({
                     "entry": entry.relative_to(root).as_posix(),
-                    "source": current.relative_to(root).as_posix(),
+                    "source": _display_path(root, current),
                     "kind": kind,
                     "reference": value,
-                    "resolved": target.relative_to(root).as_posix(),
+                    "resolved": _display_path(root, target),
+                    "severity": "warning" if optional_css_resource else "error",
+                    "reason": "stylesheet-optional-resource" if optional_css_resource else "required-local-resource",
                 })
                 continue
             if target.suffix.lower() in HTML_SUFFIXES | {".css"}:
@@ -193,7 +263,25 @@ def audit_dependency_closure(root: Path) -> dict:
         if key not in seen:
             seen.add(key)
             deduped.append(item)
-    return {"entryCount": len(entries), "checkedReferences": checked, "missing": deduped, "truncated": checked >= MAX_REFERENCES}
+    blocking_missing = [item for item in deduped if item["severity"] == "error"]
+    warning_missing = [item for item in deduped if item["severity"] == "warning"]
+    unique_missing = []
+    unique_seen = set()
+    for item in deduped:
+        key = (item["severity"], item["resolved"])
+        if key in unique_seen:
+            continue
+        unique_seen.add(key)
+        unique_missing.append(item)
+    return {
+        "entryCount": len(entries),
+        "checkedReferences": checked,
+        "missing": deduped,
+        "blockingMissing": blocking_missing,
+        "warningMissing": warning_missing,
+        "uniqueMissing": unique_missing,
+        "truncated": checked >= MAX_REFERENCES,
+    }
 
 
 def write_dependency_audit(root: Path, audit: dict) -> Path:

@@ -18,6 +18,7 @@ JSON_TARGETS = (ROOT / "package.json", ROOT / "desktop/package.json", ROOT / "de
 CARGO = ROOT / "desktop/src-tauri/Cargo.toml"
 CARGO_LOCK = ROOT / "desktop/src-tauri/Cargo.lock"
 PACKAGE_LOCK = ROOT / "package-lock.json"
+DESKTOP_PACKAGE_LOCK = ROOT / "desktop/package-lock.json"
 DOCKER_COMPOSE = ROOT / "docker-compose.yml"
 PYPROJECT = ROOT / "pyproject.toml"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
@@ -84,6 +85,9 @@ def check(manifest: dict) -> list[str]:
     lock = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
     if lock.get("version") != version or (lock.get("packages", {}).get("", {}) or {}).get("version") != version:
         issues.append(f"package-lock.json: version entries != {version!r}")
+    desktop_lock = json.loads(DESKTOP_PACKAGE_LOCK.read_text(encoding="utf-8"))
+    if desktop_lock.get("version") != version or (desktop_lock.get("packages", {}).get("", {}) or {}).get("version") != version:
+        issues.append(f"desktop/package-lock.json: version entries != {version!r}")
     compose_versions = re.findall(r"MINEM_VERSION:-([^}]+)", DOCKER_COMPOSE.read_text(encoding="utf-8"))
     if not compose_versions or any(item != version for item in compose_versions):
         issues.append(f"docker-compose.yml: {compose_versions!r} != {version!r}")
@@ -153,6 +157,10 @@ def synchronize(version: str) -> None:
     lock["version"] = version
     lock.setdefault("packages", {}).setdefault("", {})["version"] = version
     write_json(PACKAGE_LOCK, lock)
+    desktop_lock = json.loads(DESKTOP_PACKAGE_LOCK.read_text(encoding="utf-8"))
+    desktop_lock["version"] = version
+    desktop_lock.setdefault("packages", {}).setdefault("", {})["version"] = version
+    write_json(DESKTOP_PACKAGE_LOCK, desktop_lock)
     compose = DOCKER_COMPOSE.read_text(encoding="utf-8")
     compose, count = re.subn(r"MINEM_VERSION:-[^}]+", f"MINEM_VERSION:-{version}", compose)
     if count < 2:
@@ -175,6 +183,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("show", help="show current product version")
     commands.add_parser("check", help="verify all version entry points")
+    commands.add_parser("sync", help="synchronize all entry points to product-version.json")
     bump = commands.add_parser("bump", help="bump and synchronize version metadata")
     bump.add_argument("level", choices=("major", "minor", "patch", "alpha", "beta", "rc", "prerelease"))
     bump.add_argument("--headline", required=True, help="release headline for CHANGELOG draft")
@@ -191,6 +200,10 @@ def main() -> int:
             print("\n".join(f"- {item}" for item in issues), file=sys.stderr)
             return 1
         print(f"MineM v{manifest['version']} 版本入口一致")
+        return 0
+    if args.command == "sync":
+        synchronize(manifest["version"])
+        print(f"已同步 MineM v{manifest['version']} 的全部版本入口")
         return 0
 
     version = next_version(manifest["version"], args.level)

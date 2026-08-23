@@ -2,6 +2,8 @@
 """Isolated regression checks for MineM import classification and rollback."""
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -37,9 +39,15 @@ def main():
             "src": "/pages/test-page/index.html",
         }])
         assert 'class="page-state is-loading"' in viewer_html, viewer_html[:1000]
-        assert "页面加载时间过长" in viewer_html
+        assert "正在加载当前页面" in viewer_html
         assert 'class="retry-page"' in viewer_html
         assert 'querySelector("[data-minem-preview-error]")' in viewer_html
+        assert 'frame.setAttribute("sandbox", "allow-scripts")' in viewer_html
+        assert "function trimFramesAround(index)" in viewer_html
+        assert "function warmAdjacentFrames(index)" in viewer_html
+        assert "function preloadAllPages()" not in viewer_html
+        assert 'frame.classList.toggle("is-active"' in viewer_html
+        assert 'frame.src = `${page.src}' not in viewer_html
         assert "body?.textContent" not in viewer_html
         assert "素材不存在/i.test(bodyText)" not in viewer_html
         malicious_title = "</script><script>window.minemPwned=true</script>&\u2028"
@@ -77,7 +85,7 @@ def main():
         assert "body?.textContent" not in preview_component
         assert "素材不存在/i.test(bodyText)" not in preview_component
         assert 'target.origin !== window.location.origin' in preview_security
-        assert 'const SOURCE_PREVIEW_SANDBOX = "allow-scripts allow-forms allow-modals allow-popups allow-downloads"' in preview_security
+        assert 'const SOURCE_PREVIEW_SANDBOX = "allow-scripts"' in preview_security
         assert "sandbox={previewSandbox(item.controlUrl)}" in case_library
         assert 'sandbox="allow-scripts allow-same-origin' not in case_library
 
@@ -164,6 +172,58 @@ def main():
             )
             assert first_update["ok"] is True, first_update
             assert stale_update["ok"] is False and stale_update["conflict"] is True, stale_update
+
+            # A page attached after confirmation must stay pending. It cannot
+            # silently alter the stable public report until a user confirms a
+            # new arrangement, and it must invalidate a stale editor revision.
+            concurrent_timestamp = first_update["updatedAt"] + 1
+            with server.db() as arrangement_conn:
+                arrangement_conn.execute(
+                    "insert into assets (id,title,category,asset_type,asset_code,media_kind,source_type,source_path,preview_url,upload_id,source_hash,version_group,created_at,updated_at) values ('arrangement-control-3','Page 3','page','control','CTRL-ARRANGEMENT-3','html','test','page-3.html','/extracted/arrangement-upload/page-3.html','arrangement-upload','arrangement-control-3','arrangement-control-3',?,?)",
+                    (concurrent_timestamp, concurrent_timestamp),
+                )
+                arrangement_conn.execute(
+                    "insert into report_page_slots values ('arrangement-report',3,'Page 3','attached','arrangement-control-3','','',?,?)",
+                    (concurrent_timestamp, concurrent_timestamp),
+                )
+            (arrangement_extracted / "arrangement-upload" / "page-3.html").write_text(
+                "<html><body>Page 3</body></html>",
+                encoding="utf-8",
+            )
+            pending_arrangement = server.report_arrangement_payload("arrangement-report")
+            public_result, public_pages = server.report_public_page_items("arrangement-report")
+            assert pending_arrangement["confirmedPageIds"] == ["arrangement-control-2", "arrangement-control-1"]
+            assert pending_arrangement["pendingPageIds"] == ["arrangement-control-3"]
+            assert [page["code"] for page in public_pages] == ["CTRL-ARRANGEMENT-2", "CTRL-ARRANGEMENT-1"]
+            assert pending_arrangement["updatedAt"] == concurrent_timestamp
+            concurrent_update = server.update_report_arrangement(
+                "arrangement-report",
+                {
+                    "pageOrder": ["arrangement-control-2", "arrangement-control-1"],
+                    "hiddenPageIds": [],
+                    "expectedUpdatedAt": first_update["updatedAt"],
+                },
+            )
+            assert concurrent_update["ok"] is False and concurrent_update["conflict"] is True, concurrent_update
+
+            public_html = server.report_viewer_html(
+                "Report",
+                public_pages,
+                arrangement_state={
+                    "reportId": "arrangement-report",
+                    "updatedAt": public_result["updatedAt"],
+                    "pageOrder": public_result["confirmedPageIds"],
+                    "hiddenPageIds": public_result["hiddenPageIds"],
+                },
+            )
+            state_match = re.search(
+                r'<script id="minem-arrangement-state" type="application/json">(.*?)</script>',
+                public_html,
+                re.DOTALL,
+            )
+            assert state_match
+            public_state = json.loads(state_match.group(1))
+            assert public_state["pageOrder"] == ["arrangement-control-2", "arrangement-control-1"]
         finally:
             (
                 server.DB_PATH,

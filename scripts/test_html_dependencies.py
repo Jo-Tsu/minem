@@ -83,6 +83,22 @@ def main() -> None:
         assert f'{signed_base}/images/required.png' in normalized, normalized
         missing = audit_dependency_closure(runtime_case)["missing"]
         assert len(missing) == 1 and missing[0]["resolved"].endswith("images/required.png"), missing
+
+        runtime_root = root / "managed-runtime"
+        package = runtime_root / "extracted" / "generated-page"
+        package.mkdir(parents=True)
+        (package / "index.html").write_text(
+            '<img src="/extracted/source-package/assets/missing.png">',
+            encoding="utf-8",
+        )
+        cross_package = audit_dependency_closure(package)
+        assert cross_package["blockingMissing"], cross_package
+        missing_item = cross_package["blockingMissing"][0]
+        assert missing_item["resolved"] == "../source-package/assets/missing.png", missing_item
+        target = runtime_root / "extracted" / "source-package" / "assets" / "missing.png"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"png")
+        assert not audit_dependency_closure(package)["blockingMissing"]
     print("html dependency checks passed")
 
 

@@ -1,6 +1,6 @@
 # MineM 开源说明 / Open-Source Guide
 
-当前版本 / Current version：`0.5.0-alpha.28`
+当前版本 / Current version：`0.5.0-beta.9`
 
 许可证 / License：[Apache License 2.0](../LICENSE)
 

@@ -1,0 +1,111 @@
+{
+  "categories": {
+    "report": "完整汇报",
+    "page": "页面素材",
+    "storytelling": "汇报结构",
+    "proof": "证据与指标",
+    "workflow": "流程与路径",
+    "mock": "页面素材",
+    "story": "叙事表达",
+    "visual": "视觉素材",
+    "code": "代码片段"
+  },
+  "tag_rules": [
+    {"label": "证据与指标", "keywords": ["kpi", "metric", "指标", "数据", "roi", "percent", "%", "占比", "证明", "quote", "原话", "证据"]},
+    {"label": "流程与路径", "keywords": ["flow", "pipeline", "timeline", "step", "流程", "路径", "步骤", "节点", "演进", "journey"]},
+    {"label": "界面参考", "keywords": ["screen", "console", "phone", "chat", "iframe", "demo", "界面", "控制台", "手机", "对话", "弹窗"]},
+    {"label": "叙事表达", "keywords": ["story", "persona", "经验", "故事", "专家", "判断", "推理", "叙事", "角色", "场景"]},
+    {"label": "视觉素材", "keywords": ["image", "logo", "icon", "background", "visual", "图片", "图标", "背景", "截图", "svg", "png", "jpg", "gif"]},
+    {"label": "代码片段", "keywords": ["css", "javascript", "function", "const ", "class=", "style", "json", "markdown", "代码", "片段"]},
+    {"label": "汇报页面", "keywords": ["deck", "slide", "report", "汇报", "材料", "封面", "页面"]},
+    {"label": "可拼接页面", "keywords": ["card", "panel", "component", "widget", "卡片", "面板", "页面", "组件"]},
+    {"label": "资源依赖", "keywords": ["assets/", "src=", "url(", "logo", "icon", "资源", "素材"]},
+    {"label": "制造业", "keywords": ["制造", "工厂", "车间", "设备", "生产", "质检", "巡检", "供应商", "qms", "andon", "plc"]},
+    {"label": "客户案例", "keywords": ["客户", "案例", "顺达", "蔚来", "继峰", "海亮", "宝龙达", "customer", "case"]},
+    {"label": "生产巡检", "keywords": ["生产", "巡检", "点检", "plc", "气体", "摄像头", "inspection"]},
+    {"label": "质量管理", "keywords": ["质量", "质检", "qms", "mqc", "异常", "quality"]},
+    {"label": "安全巡检", "keywords": ["安全", "风险", "预警", "安防", "safety", "warning"]},
+    {"label": "供应商管理", "keywords": ["供应商", "采购", "supplier", "vendor"]}
+  ],
+  "asset_types": {
+    "report": "汇报素材",
+    "control": "页面素材",
+    "resource": "资源素材"
+  },
+  "pipeline_stages": [
+    {"key": "report", "label": "汇报素材", "codePrefix": "RPT", "description": "一次完整汇报的原始成果，可继续导出 HTML、PDF 或 PPT。"},
+    {"key": "control", "label": "页面素材", "codePrefix": "CTRL", "description": "从完整汇报拆出的单页素材，可按需拼接成新的 HTML 汇报。"},
+    {"key": "resource", "label": "资源素材", "codePrefix": "RES", "description": "页面依赖的图片、Logo、图标、GIF 与视频等基础资源。"}
+  ],
+  "media_kinds": {
+    "image": "图片",
+    "video": "视频",
+    "gif": "GIF",
+    "svg": "SVG",
+    "code": "代码",
+    "html": "HTML",
+    "none": "无"
+  },
+  "resource_kinds": {
+    "image": "图片",
+    "logo": "Logo",
+    "icon": "图标",
+    "gif": "GIF",
+    "video": "视频",
+    "svg": "SVG",
+    "other": "其他"
+  },
+  "page_roles": {
+    "cover": "封面",
+    "title": "标题页",
+    "content": "内容",
+    "toc": "目录"
+  },
+  "source_types": {
+    "auto": "自动扫描导入",
+    "upload": "文件扫描导入",
+    "template": "模板包导入",
+    "slide-control-import": "汇报单页导入",
+    "control-resource-import": "资源素材抽取",
+    "manual-version-import": "手动版本导入",
+    "report-material-sync": "汇报材料同步",
+    "report-material-candidate": "汇报候选页",
+    "storyline-collection": "故事线收藏"
+  },
+  "material_tag_taxonomy": {
+    "汇报素材": ["完整汇报", "HTML汇报", "可导出", "汇报母版"],
+    "页面素材": ["单页素材", "可拼接页面", "页面片段", "页面模板"],
+    "基础资源": ["图片素材", "视频素材", "GIF素材", "SVG素材", "资源依赖"],
+    "图片素材": ["产品截图", "页面截图", "实景照片", "装饰插画"],
+    "企业logo": ["客户logo", "飞书logo", "合作伙伴logo", "品牌标识"],
+    "方案素材": ["AI方案", "效率工程", "组织管理", "业务提效", "办公协同"],
+    "产品icon": ["飞书产品", "协作工具", "管理工具", "AI产品", "第三方产品"],
+    "页面背景": ["封面背景", "内容页背景", "深色科技风"],
+    "人物/头像": ["客户人物", "员工头像", "数字人"],
+    "数据图表": ["地图", "柱状图", "时间轴", "矩阵图"],
+    "页面用途": ["封面", "内容页", "案例页", "数据页", "过渡页", "结尾页"],
+    "视觉风格": ["浅色简洁", "深色科技风", "品牌色", "透明底", "横版", "竖版", "方形", "高清大图", "小尺寸图"],
+    "业务场景": ["制造业", "客户案例", "生产巡检", "质量管理", "安全巡检", "供应商管理"],
+    "参考截图": ["产品截图", "页面截图", "设计参考", "不可直接使用"],
+    "复用状态": ["可直接使用", "需二次编辑", "仅作参考"],
+    "来源过程": ["完整汇报导入", "单页拆分", "页面抽取", "手动导入", "自动扫描"]
+  },
+  "company_name_rules": [
+    {"aliases": ["feishu", "lark", "飞书"], "display_name": "飞书", "logo_tag": "飞书logo"},
+    {"aliases": ["nio", "蔚来"], "display_name": "蔚来", "logo_tag": "客户logo"},
+    {"aliases": ["jifeng", "继峰"], "display_name": "继峰座椅", "logo_tag": "客户logo"},
+    {"aliases": ["hailiang", "海亮"], "display_name": "海亮股份", "logo_tag": "客户logo"},
+    {"aliases": ["pengfei", "鹏飞"], "display_name": "鹏飞集团", "logo_tag": "客户logo"},
+    {"aliases": ["bge"], "display_name": "BGE", "logo_tag": "客户logo"},
+    {"aliases": ["efficiency", "效率工程"], "display_name": "效率工程标识", "logo_tag": "品牌标识"},
+    {"aliases": ["cxmt", "长鑫", "长鑫存储"], "display_name": "长鑫存储（CXMT）", "logo_tag": "客户logo"},
+    {"aliases": ["mooreelite", "摩尔精英"], "display_name": "摩尔精英", "logo_tag": "客户logo"},
+    {"aliases": ["navinfo", "四维图新"], "display_name": "四维图新", "logo_tag": "客户logo"},
+    {"aliases": ["horizon", "地平线", "horizon robotics"], "display_name": "地平线", "logo_tag": "客户logo"},
+    {"aliases": ["huami", "华米"], "display_name": "华米", "logo_tag": "客户logo"},
+    {"aliases": ["cr micro", "crmicro", "华润微"], "display_name": "华润微电子", "logo_tag": "客户logo"},
+    {"aliases": ["faith long", "惠伦晶体"], "display_name": "惠伦晶体", "logo_tag": "客户logo"},
+    {"aliases": ["yunstilicon", "云脉芯联"], "display_name": "云脉芯联", "logo_tag": "客户logo"},
+    {"aliases": ["huafon", "华峰"], "display_name": "华峰", "logo_tag": "客户logo"}
+  ]
+}

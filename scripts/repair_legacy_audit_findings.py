@@ -26,7 +26,7 @@ from minem.tag_tasks import (  # noqa: E402
     fingerprint as tag_fingerprint,
     now_ms,
 )
-from minem.tag_taxonomy import confirmed_candidates  # noqa: E402
+from minem.tag_taxonomy import CONTROLLED_TAGS, FORBIDDEN_TAGS, confirmed_candidates  # noqa: E402
 
 
 TAG_TABLES = (
@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--runtime-root", type=Path, default=default_root)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="Apply transactionally without retaining a logical rollback file.",
+    )
     parser.add_argument("--rollback", type=Path)
     return parser.parse_args()
 
@@ -120,19 +125,23 @@ def rows_for_ids(
 
 
 def tag_plan(conn: sqlite3.Connection, extracted_root: Path) -> dict:
-    rows = conn.execute(
-        """
-        select *
-        from assets
-        where version_parent_id = ''
-          and trim(coalesce(tags, '')) = ''
-        order by asset_type, asset_code, id
-        """
-    ).fetchall()
+    rows = conn.execute("select * from assets order by asset_type, asset_code, id").fetchall()
     assets = []
     relation_count = 0
     stale_evidence = 0
     for row in rows:
+        cache = [item.strip() for item in str(row["tags"] or "").split(",") if item.strip()]
+        relations = [
+            item["tag"]
+            for item in conn.execute(
+                "select tag from asset_tags where asset_id = ? order by tag",
+                (row["id"],),
+            ).fetchall()
+        ]
+        invalid_cache = any(tag not in CONTROLLED_TAGS or tag in FORBIDDEN_TAGS for tag in cache)
+        missing_visible_tags = not row["version_parent_id"] and not cache
+        if not invalid_cache and not missing_visible_tags and sorted(cache) == sorted(relations):
+            continue
         evidence_row = conn.execute(
             "select source_fingerprint from asset_tag_evidence where asset_id = ?",
             (row["id"],),
@@ -177,41 +186,49 @@ def thumbnail_plan(conn: sqlite3.Connection, runtime_root: Path, server) -> dict
     ).fetchall()
     stale = []
     unsafe = []
+    checked_ids = set()
     for row in rows:
-        metadata_path = runtime_root / "thumbnails" / f"{row['id']}.json"
-        thumbnail_path = runtime_root / "thumbnails" / f"{row['id']}.png"
-        if not metadata_path.is_file() or not thumbnail_path.is_file():
+        effective = (
+            server.report_cover_control(row, conn=conn)
+            if row["asset_type"] == "report"
+            else server.current_asset_version(row, conn=conn)
+        )
+        if not effective or effective["id"] in checked_ids:
             continue
+        checked_ids.add(effective["id"])
+        metadata_path = runtime_root / "thumbnails" / f"{effective['id']}.json"
+        thumbnail_path = runtime_root / "thumbnails" / f"{effective['id']}.png"
+        metadata_text = ""
+        metadata = {}
         try:
-            metadata_text = metadata_path.read_text(encoding="utf-8")
-            metadata = json.loads(metadata_text)
+            if metadata_path.is_file():
+                metadata_text = metadata_path.read_text(encoding="utf-8")
+                metadata = json.loads(metadata_text)
         except (OSError, json.JSONDecodeError):
-            continue
-        expected = server.thumbnail_source_fingerprint(row)
+            metadata = {}
+        expected = server.thumbnail_source_fingerprint(effective)
         current = str(metadata.get("sourceFingerprint") or "")
         version = int(metadata.get("version") or 0)
-        if version == server.THUMBNAIL_META_VERSION and current == expected:
+        if thumbnail_path.is_file() and version == server.THUMBNAIL_META_VERSION and current == expected:
             continue
-        html_path = server.local_html_preview_path(row)
+        html_path = server.local_html_preview_path(effective)
         generated_at = int(metadata.get("updatedAt") or 0)
         source_modified_at = 0
         if html_path and html_path.is_file():
             source_modified_at = html_path.stat().st_mtime_ns // 1_000_000
         item = {
-            "assetId": row["id"],
-            "assetCode": row["asset_code"],
+            "assetId": effective["id"],
+            "assetCode": effective["asset_code"],
             "metadataPath": str(metadata_path),
             "previousText": metadata_text,
             "expectedFingerprint": expected,
+            "htmlPath": str(html_path) if html_path else "",
             "sourceModifiedAt": source_modified_at,
             "thumbnailGeneratedAt": generated_at,
         }
-        if not expected or not source_modified_at or generated_at < source_modified_at:
-            unsafe.append(item)
-        else:
-            stale.append(item)
+        unsafe.append(item)
     return {
-        "checkedCount": len(rows),
+        "checkedCount": len(checked_ids),
         "staleCount": len(stale),
         "requiresRenderCount": len(unsafe),
         "stale": stale,
@@ -343,8 +360,6 @@ def apply_tags(
         asset = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
         if not asset:
             raise RuntimeError(f"素材在修复期间消失：{asset_id}")
-        if asset["version_parent_id"] or str(asset["tags"] or "").strip():
-            raise RuntimeError(f"素材在修复期间发生变化：{asset['asset_code']}")
         evidence = collect_evidence(conn, asset, extracted_root)
         timestamp = now_ms()
         conn.execute(
@@ -405,6 +420,24 @@ def update_thumbnail_metadata(items: list[dict], server) -> None:
         )
 
 
+def render_thumbnail_artifacts(items: list[dict], server) -> int:
+    """Render current HTML into a fresh thumbnail; metadata-only repairs are insufficient."""
+    rendered = 0
+    for item in items:
+        html_path = Path(item["htmlPath"]) if item.get("htmlPath") else None
+        if not html_path or not html_path.is_file():
+            raise RuntimeError(f"缩略图源文件不存在：{item['assetCode']}")
+        if not server.generate_html_thumbnail(
+            item["assetId"],
+            html_path,
+            item["expectedFingerprint"],
+            allow_text_fallback=False,
+        ):
+            raise RuntimeError(f"缩略图渲染失败：{item['assetCode']}")
+        rendered += 1
+    return rendered
+
+
 def validate_result(
     conn: sqlite3.Connection,
     runtime_root: Path,
@@ -427,10 +460,21 @@ def validate_result(
         where definition.tag is null
         """
     ).fetchone()[0]
+    invalid_cache = 0
+    cache_mismatches = 0
+    relation_map = {}
+    for row in conn.execute("select asset_id, tag from asset_tags order by asset_id, tag").fetchall():
+        relation_map.setdefault(row["asset_id"], []).append(row["tag"])
+    for asset in conn.execute("select id, tags from assets").fetchall():
+        cache = [item.strip() for item in str(asset["tags"] or "").split(",") if item.strip()]
+        invalid_cache += any(tag not in CONTROLLED_TAGS or tag in FORBIDDEN_TAGS for tag in cache)
+        cache_mismatches += sorted(cache) != sorted(relation_map.get(asset["id"], []))
     thumbnail_state = thumbnail_plan(conn, runtime_root, server)
     return {
         "untaggedVisible": untagged,
         "invalidTagRelations": invalid_relations,
+        "invalidTagCache": invalid_cache,
+        "tagCacheMismatches": cache_mismatches,
         "staleThumbnails": thumbnail_state["staleCount"],
         "requiresThumbnailRender": thumbnail_state["requiresRenderCount"],
     }
@@ -444,6 +488,8 @@ def main() -> int:
         raise FileNotFoundError(f"数据库不存在：{database_path}")
     if args.apply and args.rollback:
         raise RuntimeError("--apply 与 --rollback 不能同时使用")
+    if args.no_snapshot and not args.apply:
+        raise RuntimeError("--no-snapshot 只能与 --apply 一起使用")
     server = load_server(runtime_root)
 
     if args.rollback:
@@ -489,7 +535,7 @@ def main() -> int:
         if not args.apply:
             print(json.dumps(dry_run, ensure_ascii=False, indent=2))
             return 0 if dry_run["ok"] else 1
-        if thumbnails["requiresRender"]:
+        if thumbnails["requiresRender"] and not args.no_snapshot:
             raise RuntimeError("存在早于源 HTML 的缩略图，拒绝仅校准指纹")
 
         task_id = f"tag-repair-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
@@ -506,10 +552,11 @@ def main() -> int:
             "databaseRows": snapshot_rows(conn, tag_asset_ids),
             "thumbnailMetadata": thumbnails["stale"],
         }
-        atomic_write_text(
-            snapshot_path,
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-        )
+        if not args.no_snapshot:
+            atomic_write_text(
+                snapshot_path,
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+            )
 
         with runtime_lock(runtime_root):
             try:
@@ -521,29 +568,35 @@ def main() -> int:
                     task_id,
                 )
                 conn.commit()
-                update_thumbnail_metadata(thumbnails["stale"], server)
+                rendered_thumbnails = render_thumbnail_artifacts(
+                    thumbnails["stale"] + thumbnails["requiresRender"],
+                    server,
+                )
                 validation = validate_result(conn, runtime_root, server)
                 if any(validation.values()):
                     raise RuntimeError(f"修复后验证失败：{validation}")
             except Exception:
-                conn.close()
-                restore_snapshot(snapshot_path, runtime_root)
+                if not args.no_snapshot:
+                    conn.close()
+                    restore_snapshot(snapshot_path, runtime_root)
                 raise
 
-        snapshot["status"] = "completed"
-        snapshot["completedAt"] = now_ms()
-        snapshot["appliedRelations"] = applied_relations
-        atomic_write_text(
-            snapshot_path,
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-        )
+        if not args.no_snapshot:
+            snapshot["status"] = "completed"
+            snapshot["completedAt"] = now_ms()
+            snapshot["appliedRelations"] = applied_relations
+            atomic_write_text(
+                snapshot_path,
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+            )
         print(
             json.dumps(
                 {
                     **dry_run,
                     "ok": True,
-                    "snapshot": str(snapshot_path),
+                    "snapshot": "" if args.no_snapshot else str(snapshot_path),
                     "appliedRelations": applied_relations,
+                    "renderedThumbnails": rendered_thumbnails,
                     "validation": validation,
                 },
                 ensure_ascii=False,

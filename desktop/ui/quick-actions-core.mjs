@@ -133,7 +133,7 @@ export const SCENARIO_META = {
       "目标受众",
       "案例数量与重点（可选）",
     ],
-    constraint: "创建案例组和独立案例页，不登记为汇报素材，不编造事实。",
+    constraint: "通过 minem case brief 默认 3 个案例，每个案例 1–4 页；创建案例组和独立案例页，不登记为汇报素材，不按章节全量生成，不编造事实；视频点击播放，优质客户素材完整纳入。",
   },
   insert_case: {
     mode: "case",

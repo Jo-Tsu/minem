@@ -118,6 +118,7 @@ def get_report_page_slots(
     *,
     connect,
     row_to_asset,
+    resolve_controls=None,
     asset_library_path,
     detect_report_page_count,
     validate_report_trusted_entry,
@@ -145,7 +146,10 @@ def get_report_page_slots(
         if control_ids:
             placeholders = ",".join("?" for _ in control_ids)
             control_rows = conn.execute(f"select * from assets where id in ({placeholders})", control_ids).fetchall()
-            controls = {row["id"]: row_to_asset(row) for row in control_rows}
+            if resolve_controls is not None:
+                controls = resolve_controls(conn, control_rows)
+            else:
+                controls = {row["id"]: row_to_asset(row) for row in control_rows}
         candidates_by_page = {}
         for candidate in candidate_rows:
             item = dict(candidate)

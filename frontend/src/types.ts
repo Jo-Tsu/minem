@@ -57,11 +57,13 @@ export type Asset = {
   similarity_score: number;
   similarity_method: string;
   resource_kind: string;
+  page_role: string;
   tag_seeded: number;
   categoryLabel: string;
   typeLabel: string;
   mediaLabel: string;
   resourceKindLabel: string;
+  pageRoleLabel: string;
   thumbnail_url: string;
   preview_meta?: {
     width?: number;
@@ -73,6 +75,7 @@ export type Asset = {
   storylineCount: number;
   isPrimaryVersion: boolean;
   versionLabel: string;
+  sourceLabel?: string;
   sourceBatch?: SourceBatch;
   trustedEntry?: Record<string, unknown>;
 };
@@ -83,8 +86,26 @@ export type AssetsResponse = {
   categories: Record<string, string>;
   types: Record<string, string>;
   resourceKinds: Record<string, string>;
+  pageRoles: Record<string, string>;
   tagTaxonomy: Record<string, string[]>;
   pipeline: PipelineSummary | null;
+};
+
+export type TagTaxonomyDefinition = {
+  tag: string;
+  dimension: string;
+  aliases: string[];
+  active: boolean;
+  sortOrder: number;
+  updatedAt: number;
+};
+
+export type TagTaxonomy = {
+  version: string;
+  dimensions: string[];
+  definitions: TagTaxonomyDefinition[];
+  minimumConfirmConfidence: number;
+  maximumConfirmedTags: number;
 };
 
 export type PipelineStage = {
@@ -203,6 +224,10 @@ export type ReportArrangementPage = {
 export type ReportArrangement = {
   reportId: string;
   pages: ReportArrangementPage[];
+  pageOrder: string[];
+  confirmedPageIds: string[];
+  pendingPageIds: string[];
+  hiddenPageIds: string[];
   updatedAt: number;
   previewUrl: string;
 };
@@ -213,14 +238,18 @@ export type PresenterScriptStatus = {
   pageCount: number;
   missingPresenter: boolean;
   presenterUrl: string;
+  presenterModeUrl?: string;
   scriptText?: string;
   sourceType?: string;
   minutesUrl?: string;
+  updatedAt?: number;
+  canRestore?: boolean;
+  deletedAt?: number;
 };
 
 export type ImportTask = {
   id: string;
-  status: "queued" | "running" | "success" | "failed";
+  status: "queued" | "running" | "success" | "failed" | "cancelled";
   fileName: string;
   message: string;
   error: string;
@@ -236,6 +265,8 @@ export type ImportTask = {
   previewUrl?: string;
   createdAt?: number;
   updatedAt?: number;
+  versionMerged?: boolean;
+  matchedAssetTitle?: string;
 };
 
 export type Storyline = {

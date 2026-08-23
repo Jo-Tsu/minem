@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import argparse
 import hashlib
 import json
@@ -11,14 +12,19 @@ import sqlite3
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "data" / "materials.db"
-UPLOADS = ROOT / "uploads"
-EXTRACTED = ROOT / "extracted"
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_RUNTIME_ROOT = Path(os.environ["MINEM_DATA_DIR"]) if os.environ.get("MINEM_DATA_DIR") else _PROJECT_ROOT
+ROOT = _RUNTIME_ROOT
+DB_PATH = _RUNTIME_ROOT / "data" / "materials.db"
+UPLOADS = _RUNTIME_ROOT / "uploads"
+EXTRACTED = _RUNTIME_ROOT / "extracted"
 
 
 def relative_runtime_path(path: Path) -> str:
-    return path.resolve().relative_to(ROOT.resolve()).as_posix()
+    try:
+        return path.resolve().relative_to(_RUNTIME_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def upload_files(upload_id: str) -> list[Path]:
@@ -75,6 +81,8 @@ def main() -> int:
     args = parser.parse_args()
 
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("pragma journal_mode = wal")
+    conn.execute("pragma busy_timeout = 5000")
     conn.row_factory = sqlite3.Row
     upload_columns = {row[1] for row in conn.execute("pragma table_info(uploads)").fetchall()}
     has_content_hash = "content_hash" in upload_columns
@@ -89,7 +97,7 @@ def main() -> int:
             })
 
     zero_uploads = zero_asset_uploads(conn)
-    backup_files = sorted((ROOT / "data").glob("materials.db.before-*"))
+    backup_files = sorted((_RUNTIME_ROOT / "data").glob("materials-before-v*.db"))
     legacy_tag_counts = {
         "assets": conn.execute("select count(*) from assets where trim(coalesce(tags, '')) <> ''").fetchone()[0],
         "assetHistory": conn.execute("select count(*) from asset_history where trim(coalesce(tags, '')) <> ''").fetchone()[0],

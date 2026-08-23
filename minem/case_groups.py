@@ -100,7 +100,7 @@ def _normalize_control(
     return {
         "id": str(raw.get("id") or raw.get("case_id") or code),
         "code": code,
-        "award": str(raw.get("award") or raw.get("rank") or "案例页面"),
+        "award": str(raw.get("award") or raw.get("rank") or ""),
         "title": str(raw.get("title") or asset.get("title") or code),
         "scenario": str(raw.get("scenario") or "页面素材"),
         "sourceUrl": str(raw.get("sourceUrl") or raw.get("source_url") or ""),
@@ -208,3 +208,71 @@ def load_case_groups(
         group.pop("_public", None)
     groups.sort(key=lambda item: (int(item.get("updatedAtMs") or 0), item["code"]), reverse=True)
     return groups
+
+
+def case_group_asset_codes(
+    extracted_root: Path,
+    source_roots: Iterable[Path],
+) -> list[str]:
+    """Return material codes referenced by visible case manifests."""
+    codes = []
+    seen = set()
+    for manifest_path in _manifest_paths(extracted_root, source_roots):
+        payload = _read_json(manifest_path) or {}
+        report_material = payload.get("report_material")
+        if isinstance(report_material, dict):
+            report_code = str(report_material.get("asset_code") or "").strip()
+            if report_code and report_code not in seen:
+                seen.add(report_code)
+                codes.append(report_code)
+        controls = payload.get("controls") or payload.get("cases") or []
+        if not isinstance(controls, list):
+            continue
+        for control in controls:
+            if not isinstance(control, dict):
+                continue
+            code = str(control.get("code") or control.get("control_code") or "").strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            codes.append(code)
+    return codes
+
+
+def case_group_manifest_paths(
+    extracted_root: Path,
+    source_roots: Iterable[Path],
+    case_code: str,
+) -> list[Path]:
+    """Return manifests for a case code without exposing local paths in the API."""
+    code = str(case_code or "").strip()
+    result = []
+    for manifest_path in _manifest_paths(extracted_root, source_roots):
+        payload = _read_json(manifest_path)
+        if payload and str(payload.get("code") or payload.get("asset_code") or "").strip() == code:
+            result.append(manifest_path)
+    return result
+
+
+def case_group_control_codes(
+    extracted_root: Path,
+    source_roots: Iterable[Path],
+    case_code: str,
+) -> list[str]:
+    """Return every page code declared by all manifests for a case group."""
+    codes = []
+    seen = set()
+    for manifest_path in case_group_manifest_paths(extracted_root, source_roots, case_code):
+        payload = _read_json(manifest_path) or {}
+        controls = payload.get("controls") or payload.get("cases") or []
+        if not isinstance(controls, list):
+            continue
+        for control in controls:
+            if not isinstance(control, dict):
+                continue
+            code = str(control.get("code") or control.get("control_code") or "").strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            codes.append(code)
+    return codes

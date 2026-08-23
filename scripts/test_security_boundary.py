@@ -187,7 +187,9 @@ def live_http_checks() -> None:
             status, _, shell = request(base_url, "/extracted/manual-source/index.html")
             assert status == 200
             shell_text = shell.decode("utf-8")
-            assert "class=\"deck-frame\"" in shell_text
+            assert "class=\"frame-stack\"" in shell_text
+            assert 'frame.className = "deck-frame"' in shell_text
+            assert 'frame.setAttribute("sandbox"' in shell_text
             assert "allow-same-origin" not in shell_text
             assert token not in shell_text
             status, source_headers, embedded = request(

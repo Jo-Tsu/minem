@@ -76,14 +76,19 @@ def source_path_from_usage(usage: str) -> Path | None:
 
 
 def asset_path(row) -> Path | None:
-    path = server.asset_library_path(row)
-    if path and path.exists():
-        return path
+    # A page synchronized from a report can keep the report upload id and the
+    # generic ``index.html`` source path. In that case asset_library_path()
+    # resolves the report viewer rather than the page itself, making every
+    # page in the report look byte-identical. Always prefer the asset's direct
+    # extracted preview, which is the material users actually see.
     preview_url = str(row["preview_url"] or "").split("?", 1)[0]
     if preview_url.startswith("/extracted/"):
         candidate = (RUNTIME_ROOT / preview_url.lstrip("/")).resolve()
-        if server.is_path_within(candidate, EXTRACTED):
+        if server.is_path_within(candidate, EXTRACTED) and candidate.exists():
             return candidate
+    path = server.asset_library_path(row)
+    if path and path.exists():
+        return path
     return None
 
 
@@ -102,7 +107,7 @@ def base_dir_for_html(html_path: Path, parser: RefParser) -> Path:
     parsed = urlparse(href)
     path = unquote(parsed.path or href)
     if path.startswith("/"):
-        return (ROOT / path.lstrip("/")).resolve()
+        return (RUNTIME_ROOT / path.lstrip("/")).resolve()
     return (html_path.parent / path).resolve()
 
 
@@ -307,7 +312,6 @@ def merge_duplicate_versions(conn, asset_type: str, *, auto_controls_only: bool 
 
     groups = 0
     merged = 0
-    timestamp = server.now_ms()
     for digest, items in by_digest.items():
         if len(items) < 2:
             continue
@@ -316,14 +320,11 @@ def merge_duplicate_versions(conn, asset_type: str, *, auto_controls_only: bool 
         primary = sorted(items, key=source_priority)[0]
         version_group = primary["version_group"] or primary["id"]
         group_changed = False
-        primary_tags = ""
         primary_method = primary["similarity_method"] if str(primary["similarity_method"] or "").startswith("manual-") else "system-dedupe-primary"
-        primary_updated_at = max(int(item["updated_at"] or 0) for item in items)
         if (
             primary["version_group"] != version_group
             or int(primary["version_no"] or 0) != 1
             or primary["version_parent_id"] != ""
-            or primary["tags"] != primary_tags
             or primary["similarity_method"] != primary_method
         ):
             conn.execute(
@@ -333,23 +334,19 @@ def merge_duplicate_versions(conn, asset_type: str, *, auto_controls_only: bool 
                     version_no = 1,
                     version_parent_id = '',
                     similarity_score = 1.0,
-                    similarity_method = ?,
-                    tags = ?,
-                    updated_at = ?
+                    similarity_method = ?
                 where id = ?
                 """,
-                (version_group, primary_method, primary_tags, primary_updated_at, primary["id"]),
+                (version_group, primary_method, primary["id"]),
             )
             group_changed = True
         version_no = 2
         for item in sorted((item for item in items if item["id"] != primary["id"]), key=source_priority):
-            child_tags = ""
             child_method = item["similarity_method"] if str(item["similarity_method"] or "").startswith("manual-") else "system-dedupe-version"
             if (
                 item["version_group"] != version_group
                 or int(item["version_no"] or 0) != version_no
                 or item["version_parent_id"] != primary["id"]
-                or item["tags"] != child_tags
                 or item["similarity_method"] != child_method
             ):
                 conn.execute(
@@ -359,12 +356,10 @@ def merge_duplicate_versions(conn, asset_type: str, *, auto_controls_only: bool 
                         version_no = ?,
                         version_parent_id = ?,
                         similarity_score = 1.0,
-                        similarity_method = ?,
-                        tags = ?,
-                        updated_at = ?
+                        similarity_method = ?
                     where id = ?
                     """,
-                    (version_group, version_no, primary["id"], child_method, child_tags, timestamp, item["id"]),
+                    (version_group, version_no, primary["id"], child_method, item["id"]),
                 )
                 group_changed = True
                 merged += 1
@@ -372,6 +367,81 @@ def merge_duplicate_versions(conn, asset_type: str, *, auto_controls_only: bool 
         if group_changed:
             groups += 1
     return groups, merged
+
+
+def repair_system_dedupe_groups(conn, asset_type: str) -> tuple[int, int]:
+    """Rebuild automatic version groups from the real material files.
+
+    Only groups owned entirely by the system deduper are touched. Manual merge
+    decisions remain authoritative. Different file digests become independent
+    materials; truly identical files remain versions of one material.
+    """
+    rows = conn.execute(
+        """
+        select * from assets
+        where asset_type = ?
+          and similarity_method in ('system-dedupe-primary', 'system-dedupe-version')
+        order by version_group, created_at, id
+        """,
+        (asset_type,),
+    ).fetchall()
+    by_existing_group: dict[str, list] = {}
+    for row in rows:
+        by_existing_group.setdefault(row["version_group"] or row["id"], []).append(row)
+
+    repaired_groups = 0
+    restored_assets = 0
+    for existing_group, items in by_existing_group.items():
+        if len(items) < 2:
+            continue
+        all_members = conn.execute(
+            "select similarity_method from assets where version_group = ?",
+            (existing_group,),
+        ).fetchall()
+        if any(not str(member["similarity_method"] or "").startswith("system-dedupe-") for member in all_members):
+            continue
+
+        by_digest: dict[str, list] = {}
+        unresolved = []
+        for item in items:
+            path = asset_path(item)
+            if not path or not path.is_file():
+                unresolved.append(item)
+                continue
+            by_digest.setdefault(file_sha1(path), []).append(item)
+        partitions = list(by_digest.values()) + [[item] for item in unresolved]
+        if len(partitions) < 2:
+            continue
+
+        repaired_groups += 1
+        for partition in partitions:
+            primary = sorted(partition, key=source_priority)[0]
+            group_id = primary["id"]
+            ordered = [primary, *sorted((item for item in partition if item["id"] != primary["id"]), key=source_priority)]
+            for index, item in enumerate(ordered, start=1):
+                is_primary = index == 1
+                conn.execute(
+                    """
+                    update assets
+                    set version_group = ?,
+                        version_no = ?,
+                        version_parent_id = ?,
+                        similarity_score = 1.0,
+                        similarity_method = ?
+                    where id = ?
+                    """,
+                    (
+                        group_id,
+                        index,
+                        "" if is_primary else primary["id"],
+                        "system-dedupe-primary" if len(ordered) > 1 and is_primary else
+                        "system-dedupe-version" if len(ordered) > 1 else "",
+                        item["id"],
+                    ),
+                )
+                if len(partitions) > 1:
+                    restored_assets += 1
+    return repaired_groups, restored_assets
 
 
 def audit(conn) -> dict:
@@ -388,9 +458,17 @@ def audit(conn) -> dict:
         if code.startswith("RES-") and row["asset_type"] != "resource":
             prefix_bad.append([code, row["asset_type"]])
         path = asset_path(row)
-        if row["source_path"] and (not path or not path.exists()):
+        dynamic_report = bool(
+            row["asset_type"] == "report"
+            and str(row["preview_url"] or "").startswith("/reports/")
+            and conn.execute(
+                "select 1 from report_page_slots where report_id = ? and control_id <> '' limit 1",
+                (row["id"],),
+            ).fetchone()
+        )
+        if row["source_path"] and not dynamic_report and (not path or not path.exists()):
             missing_files.append([code, row["asset_type"], row["upload_id"], row["source_path"]])
-        if row["media_kind"] == "html":
+        if row["media_kind"] == "html" and not dynamic_report:
             missing = html_missing_refs(row)
             if missing:
                 html_ref_issues.append([code, row["asset_type"], row["source_path"], missing[:12], len(missing)])
@@ -441,6 +519,8 @@ def main() -> None:
             return
         bundle_count, bundle_touched = repair_auto_html_bundles(conn)
         report_count, report_touched = repair_superclub_report_entries(conn)
+        repaired_resource_groups, restored_resources = repair_system_dedupe_groups(conn, "resource")
+        repaired_control_groups, restored_controls = repair_system_dedupe_groups(conn, "control")
         resource_groups, resource_merged = merge_duplicate_versions(conn, "resource")
         control_groups, control_merged = merge_duplicate_versions(conn, "control")
         for row in conn.execute("select id from assets where asset_type = 'report'").fetchall():
@@ -463,6 +543,10 @@ def main() -> None:
         "repair": {
             "autoHtmlBundles": bundle_count,
             "superclubReports": report_count,
+            "repairedResourceVersionGroups": repaired_resource_groups,
+            "restoredIndependentResources": restored_resources,
+            "repairedControlVersionGroups": repaired_control_groups,
+            "restoredIndependentControls": restored_controls,
             "resourceDuplicateGroups": resource_groups,
             "resourceMergedVersions": resource_merged,
             "controlDuplicateGroups": control_groups,

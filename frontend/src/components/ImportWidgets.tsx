@@ -2,7 +2,9 @@ import { AlertCircle, Box, CheckCircle2, ChevronDown, Clock3, Copy, ExternalLink
 import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useModalBehavior } from "../modal";
+import { isActiveImportTask } from "../productLogic";
 import type { ImportTask } from "../types";
+import { safeAbsoluteUrl } from "../urlSafety";
 
 const IMPORT_ACCEPT = ".zip,.html,.htm,.svg,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.m4v,.webm";
 const IMPORT_SUFFIXES = new Set(IMPORT_ACCEPT.split(","));
@@ -17,13 +19,10 @@ function formatFileSize(value?: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function isActiveImportTask(task: ImportTask) {
-  return task.status === "queued" || task.status === "running";
-}
-
 function importStatusMeta(status: ImportTask["status"]) {
   if (status === "success") return { label: "成功", icon: CheckCircle2 };
   if (status === "failed") return { label: "失败", icon: AlertCircle };
+  if (status === "cancelled") return { label: "已取消", icon: X };
   if (status === "running") return { label: "处理中", icon: Loader2 };
   return { label: "排队中", icon: Clock3 };
 }
@@ -48,8 +47,9 @@ export function ImportDialog({ mode, close, startImport }: {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const externalMode = mode === "external-report";
   useModalBehavior(() => {
-    if (submitting) uploadController.current?.abort();
-    else close();
+    if (submitting) {
+      if (window.confirm("正在上传中，确定要取消吗？")) uploadController.current?.abort();
+    } else close();
   });
   const chooseFile = (nextFile: File | null) => {
     setError("");
@@ -60,6 +60,12 @@ export function ImportDialog({ mode, close, startImport }: {
     if (!acceptsImportFile(nextFile)) {
       setFile(null);
       setError("该文件类型暂不支持，请选择 HTML、ZIP、图片、SVG、GIF 或视频");
+      return;
+    }
+    const MAX_FILE_SIZE = 512 * 1024 * 1024;
+    if (nextFile.size > MAX_FILE_SIZE) {
+      setFile(null);
+      setError(`文件大小超过限制（最大 512 MB），当前 ${(nextFile.size / 1024 / 1024).toFixed(0)} MB`);
       return;
     }
     setFile(nextFile);
@@ -168,13 +174,15 @@ export function ImportDialog({ mode, close, startImport }: {
   );
 }
 
-export function ImportTaskDock({ tasks, dismissTask, retryTask, openAsset, copyError, retryingTaskIds, connectionLost = false }: {
+export function ImportTaskDock({ tasks, dismissTask, retryTask, cancelTask, openAsset, copyError, retryingTaskIds, cancellingTaskIds, connectionLost = false }: {
   tasks: ImportTask[];
   dismissTask: (taskId: string) => void;
   retryTask: (taskId: string) => void;
+  cancelTask: (taskId: string) => void;
   openAsset: (assetId: string) => void;
   copyError: (text: string) => void;
   retryingTaskIds: Set<string>;
+  cancellingTaskIds: Set<string>;
   connectionLost?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -201,10 +209,16 @@ export function ImportTaskDock({ tasks, dismissTask, retryTask, openAsset, copyE
             <strong>{task.fileName || "导入文件"}</strong>
             {(!isActiveImportTask(task) || connectionLost) ? <button className="task-dismiss" type="button" onClick={() => dismissTask(task.id)} title="关闭导入任务" aria-label="关闭导入任务"><X size={13} /></button> : null}
           </header>
-          <small>{connectionLost && isActiveImportTask(task) ? "正在重新连接本机服务" : task.message || task.error || "等待处理"}</small>
+          <small>{connectionLost && isActiveImportTask(task) ? "正在重新连接本机服务" : task.versionMerged ? task.matchedAssetTitle ? `已识别为 ${task.matchedAssetTitle} 的新版本` : "已合并为新版本" : task.message || task.error || "等待处理"}</small>
           <div><i style={{ width: `${Math.max(4, Math.min(100, Number(task.progress || 0)))}%` }} /></div>
           <footer>
-            <span>{connectionLost && isActiveImportTask(task) ? "等待恢复" : task.status === "success" ? `成功 ${task.assetCount || 0} 个` : task.status === "failed" ? task.error || "失败" : `${task.progress || 0}%`}</span>
+            <span>{connectionLost && isActiveImportTask(task) ? "等待恢复" : task.status === "success" ? `成功 ${task.assetCount || 0} 个` : task.status === "failed" ? task.error || "失败" : task.status === "cancelled" ? "已取消" : `${task.progress || 0}%`}</span>
+            {isActiveImportTask(task) && !connectionLost ? (
+              <button type="button" disabled={cancellingTaskIds.has(task.id)} onClick={() => cancelTask(task.id)}>
+                {cancellingTaskIds.has(task.id) ? <Loader2 className="spin" size={12} /> : <X size={12} />}
+                {cancellingTaskIds.has(task.id) ? "取消中" : "取消"}
+              </button>
+            ) : null}
             {task.status === "failed" && task.error ? <button type="button" onClick={() => copyError(task.error)}><Copy size={12} />错误</button> : null}
             {task.status === "failed" && !connectionLost ? (
               <button type="button" disabled={retryingTaskIds.has(task.id)} onClick={() => retryTask(task.id)}>
@@ -213,7 +227,7 @@ export function ImportTaskDock({ tasks, dismissTask, retryTask, openAsset, copyE
               </button>
             ) : null}
             {task.status === "success" && task.assetId ? <button type="button" onClick={() => openAsset(task.assetId!)}><ExternalLink size={12} />查看素材</button> : null}
-            {task.previewUrl ? <a href={task.previewUrl} target="_blank" rel="noreferrer"><ExternalLink size={12} />预览</a> : null}
+            {safeAbsoluteUrl(task.previewUrl) ? <a href={safeAbsoluteUrl(task.previewUrl)} target="_blank" rel="noreferrer"><ExternalLink size={12} />预览</a> : null}
           </footer>
         </article>
       )) : null}

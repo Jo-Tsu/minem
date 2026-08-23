@@ -3,8 +3,8 @@ services:
     build:
       context: .
       args:
-        MINEM_VERSION: ${MINEM_VERSION:-0.5.0-beta.1}
-    image: minem-platform:${MINEM_VERSION:-0.5.0-beta.1}
+        MINEM_VERSION: ${MINEM_VERSION:-0.5.0-beta.10}
+    image: minem-platform:${MINEM_VERSION:-0.5.0-beta.10}
     ports:
       - "127.0.0.1:8790:8790"
     environment:
@@ -12,7 +12,7 @@ services:
       PORT: 8790
       MINEM_DATA_DIR: /app
       AUTO_IMPORT_ON_START: 0
-      SQLITE_JOURNAL_MODE: delete
+      SQLITE_JOURNAL_MODE: wal
       MAX_UPLOAD_BYTES: 536870912
       MAX_ZIP_FILES: 5000
       MAX_ZIP_TOTAL_BYTES: 1073741824

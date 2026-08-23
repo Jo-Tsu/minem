@@ -11,8 +11,12 @@ import tempfile
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from PIL import Image  # noqa: E402
+
+from minem.page_duplicates import thumbnail_difference  # noqa: E402
 
 
 def available_port() -> int:
@@ -161,7 +165,8 @@ def main() -> None:
             controls = conn.execute(
                 """
                 select id,asset_code,version_group,version_no,version_parent_id,
-                       similarity_method,semantic_key,semantic_dedupe_status
+                       similarity_method,semantic_key,semantic_fingerprint,
+                       semantic_dedupe_status
                 from assets
                 where asset_type='control'
                 order by created_at,id
@@ -178,9 +183,21 @@ def main() -> None:
             ).fetchall()
             assert len(controls) == 3, [dict(row) for row in controls]
             assert len(shared_rows) == 2 and len(unique_rows) == 1
-            assert sum(not row["version_parent_id"] for row in shared_rows) == 1
+            shared_visual = (
+                thumbnail_difference(
+                    runtime_root / "thumbnails" / f"{shared_rows[0]['id']}.png",
+                    runtime_root / "thumbnails" / f"{shared_rows[1]['id']}.png",
+                    image_module=Image,
+                )
+                if len(shared_rows) == 2
+                else {}
+            )
+            assert sum(not row["version_parent_id"] for row in shared_rows) == 1, {
+                "rows": [dict(row) for row in shared_rows],
+                "visual": shared_visual,
+            }
             assert any(
-                row["similarity_method"] == "semantic-visual-v1"
+                row["similarity_method"] in {"semantic-visual-v1", "semantic-exact-v1"}
                 and row["semantic_dedupe_status"] == "merged"
                 for row in shared_rows
             )

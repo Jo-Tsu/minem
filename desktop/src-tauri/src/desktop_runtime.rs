@@ -250,12 +250,39 @@ fn existing_service_action(
     ExistingServiceAction::ClearStale
 }
 
-fn available_service_port(paths: &RuntimePaths, app_version: &str) -> Result<(u16, bool), String> {
+#[derive(Debug, PartialEq, Eq)]
+struct ServicePortSelection {
+    port: u16,
+    reuse_existing: bool,
+    managed_process_group_id: Option<u32>,
+}
+
+fn unmanaged_service_selection(
+    manifest: &ServiceManifest,
+    healthy: bool,
+) -> Option<ServicePortSelection> {
+    healthy.then_some(ServicePortSelection {
+        port: manifest.port,
+        reuse_existing: true,
+        managed_process_group_id: None,
+    })
+}
+
+fn available_service_port(
+    paths: &RuntimePaths,
+    app_version: &str,
+) -> Result<ServicePortSelection, String> {
     if let Some(manifest) = read_service_manifest(paths) {
         let healthy = healthcheck(manifest.port);
         let process_group_alive = manifest.pid.is_some_and(process_group_exists);
         match existing_service_action(&manifest, app_version, healthy, process_group_alive) {
-            ExistingServiceAction::Reuse(port) => return Ok((port, true)),
+            ExistingServiceAction::Reuse(port) => {
+                return Ok(ServicePortSelection {
+                    port,
+                    reuse_existing: true,
+                    managed_process_group_id: manifest.pid,
+                })
+            }
             ExistingServiceAction::Replace {
                 port,
                 process_group_id,
@@ -276,11 +303,30 @@ fn available_service_port(paths: &RuntimePaths, app_version: &str) -> Result<(u1
             }
             ExistingServiceAction::ClearStale => mark_service_stopped(paths),
             ExistingServiceAction::Block(error) => return Err(error),
+            ExistingServiceAction::Ignore if healthy => {
+                // A developer may already be running the same MineM service against
+                // this data directory. Reuse the verified API without taking process
+                // ownership; starting a second sidecar would fail the data lock and
+                // leave the desktop window on a misleading frontend error screen.
+                return Ok(unmanaged_service_selection(&manifest, healthy)
+                    .expect("healthy unmanaged MineM service must be reusable"));
+            }
             ExistingServiceAction::Ignore => {}
         }
     }
     if TcpListener::bind((SERVICE_HOST, DEFAULT_SERVICE_PORT)).is_ok() {
-        return Ok((DEFAULT_SERVICE_PORT, false));
+        return Ok(ServicePortSelection {
+            port: DEFAULT_SERVICE_PORT,
+            reuse_existing: false,
+            managed_process_group_id: None,
+        });
+    }
+    if healthcheck(DEFAULT_SERVICE_PORT) {
+        return Ok(ServicePortSelection {
+            port: DEFAULT_SERVICE_PORT,
+            reuse_existing: true,
+            managed_process_group_id: None,
+        });
     }
     let listener = TcpListener::bind((SERVICE_HOST, 0))
         .map_err(|error| format!("无法为 MineM 分配本机端口：{error}"))?;
@@ -288,7 +334,11 @@ fn available_service_port(paths: &RuntimePaths, app_version: &str) -> Result<(u1
         .local_addr()
         .map_err(|error| format!("无法读取 MineM 本机端口：{error}"))?
         .port();
-    Ok((port, false))
+    Ok(ServicePortSelection {
+        port,
+        reuse_existing: false,
+        managed_process_group_id: None,
+    })
 }
 
 fn server_candidates(executable: Option<&Path>, resources: Option<&Path>) -> Vec<PathBuf> {
@@ -398,7 +448,9 @@ pub fn initialize(app: &AppHandle, app_version: &str) -> Result<Url, String> {
         bootstrap.complete_step("verifying_bundle")?;
         bootstrap.mark_service_pending()?;
 
-        let (port, reuse_existing) = available_service_port(&paths, app_version)?;
+        let selection = available_service_port(&paths, app_version)?;
+        let port = selection.port;
+        let reuse_existing = selection.reuse_existing;
         ACTIVE_SERVICE_PORT.store(port, Ordering::Relaxed);
         let mut child = if reuse_existing {
             None
@@ -418,13 +470,18 @@ pub fn initialize(app: &AppHandle, app_version: &str) -> Result<Url, String> {
             return Err("MineM 本机服务健康检查未通过".to_string());
         }
 
-        let previous_pid = reuse_existing
-            .then(|| read_service_manifest(&paths).and_then(|manifest| manifest.pid))
-            .flatten();
-        let process_group_id = child.as_ref().map(Child::id).or(previous_pid);
+        let process_group_id = child
+            .as_ref()
+            .map(Child::id)
+            .or(selection.managed_process_group_id);
         write_service_manifest(
             &paths,
-            &ServiceManifest::running(app_version, port, process_group_id, true),
+            &ServiceManifest::running(
+                app_version,
+                port,
+                process_group_id,
+                process_group_id.is_some(),
+            ),
         )?;
         bootstrap.mark_ready()?;
 
@@ -535,6 +592,19 @@ mod tests {
             existing_service_action(&manifest, "0.5.0-alpha.14", false, false),
             ExistingServiceAction::ClearStale
         );
+    }
+
+    #[test]
+    fn healthy_unmanaged_service_is_reused_without_process_ownership() {
+        let mut manifest = managed_manifest("0.5.0-alpha.14", Some(101));
+        manifest.port = 8790;
+        manifest.managed_by_client = false;
+        manifest.status = "stopped".to_string();
+        let selection = unmanaged_service_selection(&manifest, true).unwrap();
+        assert_eq!(selection.port, 8790);
+        assert!(selection.reuse_existing);
+        assert_eq!(selection.managed_process_group_id, None);
+        assert_eq!(unmanaged_service_selection(&manifest, false), None);
     }
 
     #[test]

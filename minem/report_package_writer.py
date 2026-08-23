@@ -74,6 +74,7 @@ def sync_report_material_package(
         ).fetchone()
     report_asset_id = existing_report["id"] if existing_report else f"{upload_id}-report"
     report_code = existing_report["asset_code"] if existing_report else next_report_revision_code(conn, manifest_report_code)
+    same_package_report = bool(existing_report and existing_report["upload_id"] == upload_id)
     raw_report_title = manifest.get("title") or (existing_report["title"] if existing_report else upload_id)
     if manifest_report_code and str(raw_report_title).strip().startswith(manifest_report_code) and existing_report:
         raw_report_title = existing_report["title"]
@@ -82,6 +83,18 @@ def sync_report_material_package(
     if report_html and report_html.exists():
         if not report_code:
             report_code = next_asset_code(conn, "report", "page", "html")
+        report_source_path = report_rel
+        report_preview_url = f"/extracted/{upload_id}/{report_rel}"
+        report_upload_id = upload_id
+        report_source_hash = f"sync-report:{upload_id}:{report_content_hash}"
+        # Content dedupe can find a report imported by an earlier batch. Keep
+        # that report's lineage and stable source entry; a later equivalent
+        # package must never rewrite its upload ownership during recovery.
+        if existing_report and not same_package_report:
+            report_source_path = existing_report["source_path"]
+            report_preview_url = existing_report["preview_url"]
+            report_upload_id = existing_report["upload_id"]
+            report_source_hash = existing_report["source_hash"]
         conn.execute(
             """
             insert into assets
@@ -107,10 +120,10 @@ def sync_report_material_package(
                 ",".join(merge_tags(existing_report["tags"] if existing_report else "", ["汇报素材", "完整汇报", "HTML 汇报", "自动同步"])),
                 read_text_sample(report_html),
                 report_code,
-                report_rel,
-                f"/extracted/{upload_id}/{report_rel}",
-                upload_id,
-                f"sync-report:{upload_id}:{report_content_hash}",
+                report_source_path,
+                report_preview_url,
+                report_upload_id,
+                report_source_hash,
                 existing_report["version_group"] if existing_report else report_asset_id,
                 existing_report["created_at"] if existing_report else timestamp,
                 timestamp,
@@ -189,6 +202,31 @@ def sync_report_material_package(
             incoming_asset_id = same_hash_asset["id"]
             incoming_asset_code = same_hash_asset["asset_code"]
             incoming_path = asset_library_path(same_hash_asset)
+            # The retained upload package can outlive its generated page
+            # variants (for example after a runtime cleanup).  When the
+            # regenerated page has the same content fingerprint as the
+            # existing asset, repair that asset in place so its stable ID,
+            # version group, report slots, and user arrangements survive.
+            if (
+                same_hash_asset["upload_id"] == upload_id
+                and (not incoming_path or not incoming_path.exists())
+            ):
+                conn.execute(
+                    """
+                    update assets
+                    set source_path = ?, preview_url = ?, source_hash = ?,
+                        snippet = ?
+                    where id = ?
+                    """,
+                    (
+                        rel,
+                        f"/extracted/{upload_id}/{rel}",
+                        control_source_hash,
+                        read_text_sample(control_html),
+                        incoming_asset_id,
+                    ),
+                )
+                incoming_path = control_html
         elif can_update_existing:
             incoming_asset_id = existing["id"]
             incoming_asset_code = existing["asset_code"]

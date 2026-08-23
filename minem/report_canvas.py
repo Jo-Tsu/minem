@@ -10,6 +10,30 @@ from pathlib import Path
 from urllib.parse import quote
 
 
+def _write_text_with_journal(target: Path, content: str, journal: list | None):
+    previous = target.read_bytes() if target.is_file() else None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    if journal is not None:
+        journal.append((target, previous))
+
+
+def restore_report_canvas_files(journal):
+    """Undo derived files when the surrounding database transaction fails."""
+    for target, previous in reversed(journal or []):
+        try:
+            if previous is None:
+                target.unlink(missing_ok=True)
+                parent = target.parent
+                while parent.name.startswith("canvas-") or not any(parent.iterdir()):
+                    parent.rmdir()
+                    break
+            else:
+                target.write_bytes(previous)
+        except OSError:
+            continue
+
+
 def _declared_path(extracted_root: Path, asset) -> Path | None:
     upload_id = str(asset["upload_id"] or "").strip()
     rel = str(asset["source_path"] or "").strip().lstrip("/")
@@ -58,6 +82,7 @@ def normalize_report_page_canvases(
     next_asset_version_no,
     merge_tags,
     read_text_sample,
+    file_journal=None,
 ):
     """Create/reuse report-targeted control versions and repoint only this report's slots."""
     report = conn.execute("select * from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone()
@@ -150,7 +175,7 @@ def normalize_report_page_canvases(
         except OSError:
             wrapper_changed = True
         if wrapper_changed:
-            target.write_text(derived_html, encoding="utf-8")
+            _write_text_with_journal(target, derived_html, file_journal)
         if not normalized:
             code = next_candidate_asset_code(conn, source["asset_code"])
             version_group = source["version_group"] or source["id"]
@@ -236,7 +261,7 @@ def normalize_report_page_canvases(
         except OSError:
             wrapper_changed = True
         if wrapper_changed:
-            target.write_text(derived_html, encoding="utf-8")
+            _write_text_with_journal(target, derived_html, file_journal)
             refreshed.append({"id": normalized_id, "path": target, "fingerprint": mapping["source_fingerprint"]})
             refreshed_ids.add(normalized_id)
     if replacements:

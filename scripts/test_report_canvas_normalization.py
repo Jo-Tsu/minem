@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from minem.db import create_core_schema, ensure_asset_schema, run_compat_migrations
-from minem.report_canvas import normalize_report_page_canvases
+from minem.report_canvas import normalize_report_page_canvases, restore_report_canvas_files
 from minem.thumbnails import detect_html_dimensions
 
 
@@ -67,7 +67,8 @@ def main():
         conn.execute("insert into report_page_slots values ('report-1',1,'page','attached','control-1','','',?,?)", (now_ms(), now_ms()))
         conn.commit()
         args = dict(extracted_root=root, detect_dimensions=detect_html_dimensions, now_ms=now_ms, next_candidate_asset_code=next_code, next_asset_version_no=next_version, merge_tags=tags, read_text_sample=lambda path: Path(path).read_text(encoding="utf-8")[:500])
-        first = normalize_report_page_canvases(conn, "report-1", **args)
+        journal = []
+        first = normalize_report_page_canvases(conn, "report-1", file_journal=journal, **args)
         assert first["normalized"] == 1 and len(first["created"]) == 1, first
         assert first["target"] == [1920, 1080], first
         normalized_id = conn.execute("select control_id from report_page_slots where report_id = 'report-1'").fetchone()[0]
@@ -79,6 +80,7 @@ def main():
         assert "width:1920px;height:1080px" in wrapper_html, wrapper_html
         assert 'src="/extracted/' not in wrapper_html, wrapper_html
         assert "pages/page.html?embed=1" in wrapper_html, wrapper_html
+        assert any(target.resolve() == wrapper_path.resolve() for target, _previous in journal), journal
         assert conn.execute("select count(*) from assets where id = 'control-1'").fetchone()[0] == 1
         assert conn.execute("select count(*) from report_page_normalizations").fetchone()[0] == 1
         second = normalize_report_page_canvases(conn, "report-1", **args)
@@ -93,6 +95,14 @@ def main():
         repaired = normalize_report_page_canvases(conn, "report-1", **args)
         assert len(repaired["refreshed"]) == 1, repaired
         assert 'src="/extracted/' not in wrapper_path.read_text(encoding="utf-8")
+        rollback_target = upload / "rollback.html"
+        rollback_target.write_text("before", encoding="utf-8")
+        rollback_journal = [(rollback_target, b"before"), (upload / "new.html", None)]
+        (upload / "new.html").write_text("new", encoding="utf-8")
+        rollback_target.write_text("after", encoding="utf-8")
+        restore_report_canvas_files(rollback_journal)
+        assert rollback_target.read_text(encoding="utf-8") == "before"
+        assert not (upload / "new.html").exists()
     print("report canvas normalization: passed")
 
 

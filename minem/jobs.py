@@ -119,6 +119,21 @@ class JobRuntime:
                 raise JobQueueFullError(channel_name) from error
             return JobSubmission(channel_name, normalized_key, future)
 
+    def cancel(self, channel_name: str, key: str) -> bool:
+        channel = self.channels.get(channel_name)
+        if not channel:
+            raise JobRuntimeError(f"unknown job channel: {channel_name}")
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            return False
+        with channel.lock:
+            future = channel.pending.get(normalized_key)
+            if not future or not future.cancel():
+                return False
+            if channel.pending.get(normalized_key) is future:
+                channel.pending.pop(normalized_key, None)
+            return True
+
     def _worker_loop(self, channel: _Channel) -> None:
         while True:
             job = channel.queue.get()
@@ -138,7 +153,8 @@ class JobRuntime:
                     channel.failed += 1
             finally:
                 with channel.lock:
-                    channel.pending.pop(job.key, None)
+                    if channel.pending.get(job.key) is job.future:
+                        channel.pending.pop(job.key, None)
                 channel.queue.task_done()
 
     def snapshot(self) -> dict:

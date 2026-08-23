@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .paths import is_path_within
+from .html_dependencies import audit_dependency_closure
 
 
 def _preview_source_text(html_path):
@@ -201,7 +202,10 @@ def capture_html_with_chrome(html_path, output_path, *, image_module):
     if not chrome or not image_module:
         return False
     width, height = detect_html_viewport(html_path)
-    with tempfile.TemporaryDirectory(prefix="minem-html-thumb-") as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="minem-html-thumb-",
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
         screenshot = Path(temp_dir) / "screenshot.png"
         command = [
             chrome,
@@ -384,6 +388,13 @@ def generate_html_thumbnail(
 ):
     html_path = Path(html_path)
     if not html_path.exists() or html_path.suffix.lower() not in {".html", ".htm"}:
+        return False
+    dependency_audit = audit_dependency_closure(html_path.parent)
+    blocking_entries = {
+        str(item.get("entry") or "")
+        for item in dependency_audit.get("blockingMissing", [])
+    }
+    if html_path.name in blocking_entries:
         return False
     output_path = Path(thumbnails_dir) / f"{asset_id}.png"
 

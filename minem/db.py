@@ -252,6 +252,8 @@ def ensure_asset_schema(conn):
         conn.execute("alter table assets add column trusted_size integer not null default 0")
     if "trusted_checked_at" not in columns:
         conn.execute("alter table assets add column trusted_checked_at integer not null default 0")
+    if "page_role" not in columns:
+        conn.execute("alter table assets add column page_role text not null default ''")
     conn.execute("create unique index if not exists idx_assets_asset_code on assets(asset_code) where asset_code <> ''")
     conn.execute("create unique index if not exists idx_assets_source_hash on assets(source_hash) where source_hash <> ''")
     conn.execute("create index if not exists idx_assets_version_group on assets(version_group)")
@@ -259,10 +261,12 @@ def ensure_asset_schema(conn):
     conn.execute("create index if not exists idx_assets_list_primary on assets(asset_type, version_parent_id, updated_at desc, created_at desc)")
     conn.execute("create index if not exists idx_assets_version_activity on assets(version_group, updated_at desc)")
     conn.execute("create index if not exists idx_assets_resource_kind on assets(resource_kind)")
+    conn.execute("create index if not exists idx_assets_page_role on assets(page_role) where page_role <> ''")
     conn.execute("create index if not exists idx_asset_history_asset on asset_history(asset_id, version_no)")
     conn.execute("create unique index if not exists idx_report_page_candidates_unique on report_page_candidates(report_id, page_number, control_id)")
     conn.execute("create index if not exists idx_report_page_candidates_report on report_page_candidates(report_id, page_number, status)")
     conn.execute("create index if not exists idx_report_page_candidates_control on report_page_candidates(control_id)")
+    conn.execute("create index if not exists idx_report_page_slots_report_page on report_page_slots(report_id, page_number, control_id)")
     conn.execute("create index if not exists idx_report_storyline_source on report_storyline_collections(source_report_id)")
     conn.execute("create index if not exists idx_report_storyline_output on report_storyline_collections(output_report_id)")
     conn.execute("create index if not exists idx_report_storyline_target on report_storyline_collections(target_report_id)")

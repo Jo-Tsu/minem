@@ -1,5 +1,7 @@
+import { safePreviewUrl } from "./urlSafety";
+
 const TRUSTED_PREVIEW_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads";
-const SOURCE_PREVIEW_SANDBOX = "allow-scripts allow-forms allow-modals allow-popups allow-downloads";
+const SOURCE_PREVIEW_SANDBOX = "allow-scripts";
 
 function isTrustedPreviewPath(path: string) {
   return (
@@ -13,7 +15,9 @@ function isTrustedPreviewPath(path: string) {
 
 export function previewSandbox(src: string) {
   try {
-    const target = new URL(src, window.location.href);
+    const safeSrc = safePreviewUrl(src);
+    if (!safeSrc) return SOURCE_PREVIEW_SANDBOX;
+    const target = new URL(safeSrc, window.location.href);
     if (target.origin !== window.location.origin) return SOURCE_PREVIEW_SANDBOX;
     return isTrustedPreviewPath(target.pathname)
       ? TRUSTED_PREVIEW_SANDBOX

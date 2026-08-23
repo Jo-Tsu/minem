@@ -61,7 +61,7 @@ export default defineConfig({
   root: "frontend",
   base: "/",
   plugins: [react()],
-  publicDir: false,
+  publicDir: "public",
   build: {
     outDir: "../public",
     emptyOutDir: true

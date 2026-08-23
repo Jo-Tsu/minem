@@ -4,16 +4,53 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def available_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def stop_process(process) -> None:
+    if not process or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def wait_for_service(process, base_url: str) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate(timeout=1)
+            raise AssertionError(
+                f"isolated service exited early\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            )
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/version", timeout=1) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            time.sleep(0.1)
+    raise AssertionError("isolated service did not become ready")
 
 
 def invoke(base_url: str, config_file: Path, *args: str, expected: int = 0, json_output: bool = True):
@@ -68,12 +105,39 @@ def import_page(base_url: str, config: Path, source: Path, name: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://127.0.0.1:8790")
+    parser.add_argument(
+        "--base-url",
+        default="",
+        help="Use an existing service explicitly; by default an isolated temporary service is started.",
+    )
     args = parser.parse_args()
-    base_url = args.base_url.rstrip("/")
 
     with tempfile.TemporaryDirectory(prefix="minem-cli-workflow-") as temp_dir:
         root = Path(temp_dir)
+        process = None
+        if args.base_url:
+            base_url = args.base_url.rstrip("/")
+        else:
+            runtime_root = root / "runtime"
+            port = available_port()
+            base_url = f"http://127.0.0.1:{port}"
+            os.environ["MINEM_DATA_DIR"] = str(runtime_root)
+            environment = {
+                **os.environ,
+                "MINEM_SKIP_PORT_PRECHECK": "1",
+                "PORT": str(port),
+            }
+            environment.pop("MINEM_SESSION_TOKEN", None)
+            process = subprocess.Popen(
+                [sys.executable, str(ROOT / "server.py")],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            atexit.register(stop_process, process)
+            wait_for_service(process, base_url)
         config = root / "config.json"
         page_a = root / "page-a.html"
         page_b = root / "page-b.html"
@@ -270,6 +334,7 @@ def main() -> int:
             "pageCount": 3,
             "previewUrl": final["links"]["preview"],
         }, ensure_ascii=False))
+        stop_process(process)
     return 0
 
 

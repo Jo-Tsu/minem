@@ -11,6 +11,14 @@ export const RESOURCE_FILTERS = [
   ["video", "视频"]
 ] as const;
 
+export const PAGE_ROLE_FILTERS = [
+  ["all", "全部页面"],
+  ["cover", "封面"],
+  ["title", "标题页"],
+  ["content", "内容"],
+  ["toc", "目录"],
+] as const;
+
 export const CONTROL_ROLE_FILTERS = [
   "全部",
   "开场定位",
@@ -41,6 +49,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   "slide-control-import": "汇报单页导入",
   "control-resource-import": "资源素材抽取",
   "manual-version-import": "手动版本导入",
+  "version-upload": "手动上传新版本",
   "manual-generated-control": "人工生成页面",
   "single-page-reclassified": "单页纠正",
   "created-report-page": "汇报页面",
@@ -165,6 +174,7 @@ export function pageNoFromAsset(asset: Asset) {
 
 export function roleForControl(asset: Asset) {
   const tags = asset.tags || [];
+  const pageNo = pageNoFromAsset(asset);
   return tags.find((tag) => CONTROL_ROLE_FILTERS.includes(tag))
-    || `第 ${String(pageNoFromAsset(asset) || "").padStart(2, "0")} 页`;
+    || (pageNo ? `第 ${String(pageNo).padStart(2, "0")} 页` : "未编号");
 }

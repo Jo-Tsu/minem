@@ -34,10 +34,25 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from minem.tag_taxonomy import CONTROLLED_TAGS, FORBIDDEN_TAGS  # noqa: E402
+from minem.runtime_discovery import resolve_session_token  # noqa: E402
 
 DEFAULT_DB = ROOT / "data" / "materials.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:8790"
 RUNTIME_ROOT = ROOT
+SESSION_TOKEN = ""
+
+
+def default_runtime_root() -> Path:
+    configured = os.environ.get("MINEM_DATA_DIR", "").strip()
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path.home() / "Library" / "Application Support" / "MineM",
+        ROOT,
+    ]
+    for candidate in candidates:
+        if candidate and (candidate / "data" / "materials.db").is_file():
+            return candidate.resolve()
+    return ROOT
 
 
 class Reporter:
@@ -95,6 +110,10 @@ def canonical_preview_url(row: sqlite3.Row) -> str:
     preview_url = row["preview_url"] or ""
     if preview_url.startswith(("/extracted/_history/", "/reports/")):
         return preview_url
+    if row["asset_type"] != "report" and preview_url.startswith("/extracted/"):
+        direct = (RUNTIME_ROOT / preview_url.lstrip("/")).resolve()
+        if direct.is_relative_to(RUNTIME_ROOT / "extracted") and direct.is_file():
+            return preview_url
     upload_id = row["upload_id"] or ""
     source_path = row["source_path"] or ""
     if upload_id and source_path:
@@ -113,7 +132,11 @@ def thumbnail_source_fingerprint(row: sqlite3.Row) -> str:
         str(row["source_path"] or ""),
     ]
     html_path = None
-    if row["upload_id"] and row["source_path"]:
+    if row["asset_type"] != "report" and preview_url.startswith("/extracted/"):
+        candidate = (RUNTIME_ROOT / urlparse(preview_url).path.lstrip("/")).resolve()
+        if candidate.is_relative_to(RUNTIME_ROOT / "extracted") and candidate.is_file():
+            html_path = candidate
+    if html_path is None and row["upload_id"] and row["source_path"]:
         candidate = (RUNTIME_ROOT / "extracted" / row["upload_id"] / row["source_path"]).resolve()
         if candidate.is_relative_to(RUNTIME_ROOT / "extracted") and candidate.is_file():
             html_path = candidate
@@ -124,11 +147,63 @@ def thumbnail_source_fingerprint(row: sqlite3.Row) -> str:
     if html_path and html_path.suffix.lower() in {".html", ".htm"}:
         try:
             stat = html_path.stat()
-            relative = html_path.relative_to(ROOT).as_posix()
+            relative = html_path.relative_to(RUNTIME_ROOT).as_posix()
             parts.append(f"file:{relative}:{stat.st_size}:{stat.st_mtime_ns}")
         except (OSError, ValueError):
             pass
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def current_control_row(conn: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row:
+    if row["asset_type"] != "control":
+        return row
+    version_group = row["version_group"] or row["id"]
+    current = conn.execute(
+        """
+        select *
+        from assets
+        where asset_type = 'control'
+          and version_parent_id = ''
+          and (version_group = ? or id = ?)
+        order by updated_at desc, created_at desc, id desc
+        limit 1
+        """,
+        (version_group, version_group),
+    ).fetchone()
+    return current or row
+
+
+def report_cover_row(conn: sqlite3.Connection, report: sqlite3.Row) -> sqlite3.Row:
+    slots = conn.execute(
+        """
+        select control_id
+        from report_page_slots
+        where report_id = ? and control_id <> ''
+        order by page_number
+        """,
+        (report["id"],),
+    ).fetchall()
+    slot_ids = list(dict.fromkeys(row["control_id"] for row in slots if row["control_id"]))
+    if not slot_ids:
+        return report
+    arrangement = conn.execute(
+        "select page_order, hidden_page_ids from report_page_arrangements where report_id = ?",
+        (report["id"],),
+    ).fetchone()
+    try:
+        saved_order = json.loads(arrangement["page_order"]) if arrangement else []
+        hidden_ids = set(json.loads(arrangement["hidden_page_ids"]) if arrangement else [])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        saved_order, hidden_ids = [], set()
+    ordered_ids = [item for item in saved_order if item in slot_ids] if arrangement else slot_ids
+    cover_id = next((item for item in ordered_ids if item not in hidden_ids), "")
+    if not cover_id:
+        return report
+    cover = conn.execute(
+        "select * from assets where id = ? and asset_type = 'control'",
+        (cover_id,),
+    ).fetchone()
+    return current_control_row(conn, cover) if cover else report
 
 
 def thumbnail_has_nested_canvas(path: Path) -> bool:
@@ -281,9 +356,14 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         """
     ).fetchall()
     for row in thumbnail_rows:
-        thumbnail_path = RUNTIME_ROOT / "thumbnails" / f"{row['id']}.png"
+        thumbnail_row = report_cover_row(conn, row) if row["asset_type"] == "report" else current_control_row(conn, row)
+        thumbnail_path = RUNTIME_ROOT / "thumbnails" / f"{thumbnail_row['id']}.png"
         metadata_path = thumbnail_path.with_suffix(".json")
-        issue = {"assetCode": row["asset_code"], "assetId": row["id"]}
+        issue = {
+            "assetCode": row["asset_code"],
+            "assetId": row["id"],
+            "thumbnailAssetId": thumbnail_row["id"],
+        }
         if not thumbnail_path.is_file() or not metadata_path.is_file():
             issue["reason"] = "缩略图或指纹元数据缺失"
             thumbnail_issues.append(issue)
@@ -309,7 +389,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
             issue["reason"] = "缩略图只包含背景首帧，正文或主要素材未完成渲染"
             thumbnail_issues.append(issue)
             continue
-        expected_fingerprint = thumbnail_source_fingerprint(row)
+        expected_fingerprint = thumbnail_source_fingerprint(thumbnail_row)
         if int(metadata.get("version") or 0) != 4 or metadata.get("sourceFingerprint") != expected_fingerprint:
             issue["reason"] = "缩略图与当前 HTML 指纹不一致"
             thumbnail_issues.append(issue)
@@ -516,9 +596,16 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         reporter.passed("DATA-022", "可见素材、版本素材与原始记录数口径一致", visible=visible_assets, versions=version_assets, raw=len(rows))
 
 
+def request_headers() -> dict[str, str]:
+    headers = {"User-Agent": "MineM-Core-Test/1.0"}
+    if SESSION_TOKEN:
+        headers["X-MineM-Session-Token"] = SESSION_TOKEN
+    return headers
+
+
 def request_status(url: str, timeout: float) -> tuple[int, str]:
     try:
-        with urlopen(Request(url, headers={"User-Agent": "MineM-Core-Test/1.0"}), timeout=timeout) as response:
+        with urlopen(Request(url, headers=request_headers()), timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
             response.read(1024)
             return response.status, content_type
@@ -530,7 +617,7 @@ def request_status(url: str, timeout: float) -> tuple[int, str]:
 
 def request_json(url: str, timeout: float) -> tuple[int, dict]:
     try:
-        with urlopen(Request(url, headers={"User-Agent": "MineM-Core-Test/1.0"}), timeout=timeout) as response:
+        with urlopen(Request(url, headers=request_headers()), timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, OSError, HTTPException, json.JSONDecodeError):
         return 0, {}
@@ -538,7 +625,7 @@ def request_json(url: str, timeout: float) -> tuple[int, dict]:
 
 def request_text(url: str, timeout: float) -> tuple[int, str]:
     try:
-        with urlopen(Request(url, headers={"User-Agent": "MineM-Core-Test/1.0"}), timeout=timeout) as response:
+        with urlopen(Request(url, headers=request_headers()), timeout=timeout) as response:
             return response.status, response.read().decode("utf-8", "ignore")
     except (HTTPError, URLError, OSError, HTTPException):
         return 0, ""
@@ -645,6 +732,8 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
         if row["asset_type"] == "report":
             checks.append(("CLICK-004", row["asset_code"], urljoin(base_url, f"/api/reports/{quote(row['id'])}/arrangement/viewer"), "html"))
             checks.append(("CLICK-005", row["asset_code"], urljoin(base_url, f"/api/reports/{quote(row['id'])}/arrangement"), "json"))
+            checks.append(("CLICK-009A", row["asset_code"], urljoin(base_url, f"/reports/{quote(row['id'])}/presenter.html"), "html"))
+            checks.append(("CLICK-009A", row["asset_code"], urljoin(base_url, f"/reports/{quote(row['id'])}/audience.html"), "html"))
 
     failures = []
     with ThreadPoolExecutor(max_workers=min(8, len(checks))) as executor:
@@ -710,6 +799,22 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
             or "requestFullscreen" not in body
         ):
             layout_issues.append({"assetCode": report["asset_code"], "surface": "public-report", "status": status})
+        presenter_status, presenter_body = request_text(
+            urljoin(base_url, f"/reports/{quote(report['id'])}/presenter.html"), timeout
+        )
+        audience_status, audience_body = request_text(
+            urljoin(base_url, f"/reports/{quote(report['id'])}/audience.html"), timeout
+        )
+        if (
+            presenter_status != 200
+            or "当前页提示词" not in presenter_body
+            or "投影窗口" not in presenter_body
+            or "BroadcastChannel" not in presenter_body
+            or audience_status != 200
+            or "window.innerWidth / 1920" not in audience_body
+            or "BroadcastChannel" not in audience_body
+        ):
+            layout_issues.append({"assetCode": report["asset_code"], "surface": "presenter-mode", "presenterStatus": presenter_status, "audienceStatus": audience_status})
     if control:
         separator = "&" if "?" in control["preview_url"] else "?"
         status, body = request_text(urljoin(base_url, f"{control['preview_url']}{separator}embed=1"), timeout)
@@ -721,7 +826,7 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
     if layout_issues:
         reporter.fail("CLICK-011", "预览画布未应用统一等比适配", issues=layout_issues)
     else:
-        reporter.passed("CLICK-011", "公开汇报与嵌入页面均应用统一 1920×1080 等比画布，并提供全屏入口")
+        reporter.passed("CLICK-011", "公开汇报、嵌入页面和投影端均应用统一 1920×1080 等比画布，并提供全屏入口")
 
     versioned = conn.execute(
         """
@@ -794,6 +899,8 @@ def run_full_link_checks(conn: sqlite3.Connection, reporter: Reporter, base_url:
         if row["asset_type"] == "report":
             checks.append((code, "viewer", f"{base_url}/api/reports/{quote(row['id'])}/arrangement/viewer"))
             checks.append((code, "arrangement", f"{base_url}/api/reports/{quote(row['id'])}/arrangement"))
+            checks.append((code, "presenter", f"{base_url}/reports/{quote(row['id'])}/presenter.html"))
+            checks.append((code, "audience", f"{base_url}/reports/{quote(row['id'])}/audience.html"))
 
     failures = []
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -805,9 +912,9 @@ def run_full_link_checks(conn: sqlite3.Connection, reporter: Reporter, base_url:
             if status != 200 or (expected_json and "application/json" not in content_type):
                 failures.append({"assetCode": code, "surface": surface, "status": status, "contentType": content_type})
     if failures:
-        reporter.fail("CLICK-014", "全量素材详情、预览或汇报编排链接不可访问", failures=failures[:100], total=len(failures))
+        reporter.fail("CLICK-014", "全量素材详情、预览、汇报编排或汇报模式链接不可访问", failures=failures[:100], total=len(failures))
     else:
-        reporter.passed("CLICK-014", "全量主素材详情、预览与汇报编排链接均可访问", assets=len(rows), checked=len(checks))
+        reporter.passed("CLICK-014", "全量主素材详情、预览、汇报编排与汇报模式链接均可访问", assets=len(rows), checked=len(checks))
 
 
 def write_report(payload: dict, output: Path | None) -> Path:
@@ -818,26 +925,31 @@ def write_report(payload: dict, output: Path | None) -> Path:
 
 
 def main() -> int:
-    global RUNTIME_ROOT
+    global RUNTIME_ROOT, SESSION_TOKEN
     parser = argparse.ArgumentParser(description="Run read-only MineM core data and click-link tests.")
     parser.add_argument("--suite", choices=["data", "click", "all"], default="all")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--db", type=Path)
     parser.add_argument(
         "--runtime-root",
         type=Path,
         help="Runtime root containing extracted/, thumbnails/ and report-exports/.",
     )
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--base-url", default=os.environ.get("MINEM_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     parser.add_argument("--full", action="store_true", help="Check every primary material detail and preview link, not only representative samples.")
     args = parser.parse_args()
+    inferred_root = default_runtime_root()
     RUNTIME_ROOT = (
         args.runtime_root.expanduser().resolve()
         if args.runtime_root
         else args.db.expanduser().resolve().parent.parent
+        if args.db
+        else inferred_root
     )
+    args.db = args.db.expanduser().resolve() if args.db else RUNTIME_ROOT / "data" / "materials.db"
+    SESSION_TOKEN = resolve_session_token(args.base_url.rstrip("/"))
 
     reporter = Reporter()
     started = time.time()

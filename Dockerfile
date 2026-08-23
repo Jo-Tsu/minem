@@ -35,7 +35,7 @@ LABEL org.opencontainers.image.title="MineM" \
 
 COPY server.py product-version.json LICENSE NOTICE ./
 COPY minem ./minem
-COPY scripts ./scripts
+COPY scripts/start_local.py scripts/version_control.py ./scripts/
 COPY templates ./templates
 COPY --from=frontend-build /build/public ./public
 

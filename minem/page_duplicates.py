@@ -237,6 +237,7 @@ def attach_duplicate_version(
     primary_id: str,
     similarity_score: float,
     timestamp: int,
+    similarity_method: str = "semantic-visual-v1",
 ) -> bool:
     if not asset_id or not primary_id or asset_id == primary_id:
         return False
@@ -323,7 +324,7 @@ def attach_duplicate_version(
                 version_parent_id = ?,
                 similarity_score = ?,
                 similarity_method = case
-                  when ? then 'semantic-visual-v1'
+                  when ? then ?
                   else similarity_method
                 end,
                 updated_at = case when ? then ? else updated_at end
@@ -335,6 +336,7 @@ def attach_duplicate_version(
                 primary["id"],
                 score if from_source_group else row["similarity_score"],
                 1 if from_source_group else 0,
+                similarity_method,
                 1 if from_source_group else 0,
                 timestamp,
                 row["id"],

@@ -13,6 +13,7 @@ from pathlib import Path
 from minem.tag_taxonomy import (
     CONTROLLED_TAGS,
     MAX_CONFIRMED_TAGS,
+    MIN_CONFIRM_CONFIDENCE,
     MODEL_VERSION,
     TAXONOMY,
     TAXONOMY_VERSION,
@@ -80,10 +81,103 @@ def ensure_schema(conn):
             conn.execute(
                 """insert into tag_definitions(tag,dimension,aliases_json,active,sort_order,updated_at)
                 values (?,?,'[]',1,?,?)
-                on conflict(tag) do update set dimension=excluded.dimension,active=1,
-                  sort_order=excluded.sort_order,updated_at=excluded.updated_at""",
+                on conflict(tag) do nothing""",
                 (tag, dimension, order, now),
             )
+
+
+def taxonomy_definitions(conn):
+    ensure_schema(conn)
+    rows = conn.execute(
+        """
+        select tag, dimension, aliases_json, active, sort_order, updated_at
+        from tag_definitions
+        order by sort_order, tag
+        """
+    ).fetchall()
+    definitions = []
+    for row in rows:
+        try:
+            aliases = json.loads(row["aliases_json"] or "[]")
+        except json.JSONDecodeError:
+            aliases = []
+        definitions.append({
+            "tag": row["tag"],
+            "dimension": row["dimension"],
+            "aliases": aliases if isinstance(aliases, list) else [],
+            "active": bool(row["active"]),
+            "sortOrder": row["sort_order"],
+            "updatedAt": row["updated_at"],
+        })
+    dimensions = list(TAXONOMY)
+    for definition in definitions:
+        if definition["dimension"] not in dimensions:
+            dimensions.append(definition["dimension"])
+    return {
+        "version": TAXONOMY_VERSION,
+        "dimensions": dimensions,
+        "definitions": definitions,
+        "minimumConfirmConfidence": MIN_CONFIRM_CONFIDENCE,
+        "maximumConfirmedTags": MAX_CONFIRMED_TAGS,
+    }
+
+
+def update_taxonomy_definitions(conn, payload):
+    definitions = payload.get("definitions") if isinstance(payload, dict) else None
+    if not isinstance(definitions, list) or not definitions:
+        return {"ok": False, "error": "缺少标签定义"}
+    allowed_dimensions = set(TAXONOMY)
+    existing = {
+        row["tag"]
+        for row in conn.execute("select tag from tag_definitions").fetchall()
+    }
+    updates = []
+    seen = set()
+    for index, item in enumerate(definitions, start=1):
+        if not isinstance(item, dict):
+            return {"ok": False, "error": "标签定义格式无效"}
+        tag = str(item.get("tag") or "").strip()
+        dimension = str(item.get("dimension") or "").strip()
+        if tag not in existing or tag in seen:
+            return {"ok": False, "error": f"标签不存在或重复：{tag or '空标签'}"}
+        if dimension not in allowed_dimensions:
+            return {"ok": False, "error": f"标签维度不受支持：{dimension or '空维度'}"}
+        seen.add(tag)
+        updates.append((dimension, 1 if item.get("active", True) else 0, index, now_ms(), tag))
+
+    with conn:
+        conn.executemany(
+            """
+            update tag_definitions
+            set dimension = ?, active = ?, sort_order = ?, updated_at = ?
+            where tag = ?
+            """,
+            updates,
+        )
+        for dimension, _, _, _, tag in updates:
+            conn.execute("update asset_tags set dimension=? where tag=?", (dimension, tag))
+            conn.execute("update asset_tag_suggestions set dimension=? where tag=?", (dimension, tag))
+        asset_ids = [
+            row["asset_id"]
+            for row in conn.execute("select distinct asset_id from asset_tags").fetchall()
+        ]
+        for asset_id in asset_ids:
+            _sync_asset_tag_cache(conn, asset_id)
+    return {"ok": True, "taxonomy": taxonomy_definitions(conn)}
+
+
+def apply_taxonomy_definitions(conn, candidates):
+    rows = conn.execute(
+        "select tag, dimension, active from tag_definitions"
+    ).fetchall()
+    definitions = {row["tag"]: row for row in rows}
+    governed = []
+    for candidate in candidates:
+        definition = definitions.get(candidate["tag"])
+        if not definition or not definition["active"]:
+            continue
+        governed.append({**candidate, "dimension": definition["dimension"]})
+    return governed
 
 
 def recover_interrupted(conn):
@@ -151,6 +245,12 @@ def _visible_text(raw):
     return re.sub(r"\s+", " ", html_lib.unescape(raw)).strip()[:12000]
 
 
+def _metadata_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value or "")
+
+
 def collect_evidence(conn, asset, extracted_root: Path):
     item = dict(asset); sources = []
     path = None; preview = item.get("preview_url") or ""
@@ -167,7 +267,15 @@ def collect_evidence(conn, asset, extracted_root: Path):
         sources.append({"priority": "P1", "type": "page_html", "title": _visible_text(title.group(1)) if title else "", "headings": [_visible_text(x)[:240] for x in headings[:20]], "text": _visible_text(raw)})
         if alts: sources.append({"priority": "P1", "type": "image_alt", "text": " | ".join(alts[:30])})
     if item.get("title") or item.get("usage") or item.get("snippet"):
-        sources.append({"priority": "P1", "type": "page_metadata", "title": item.get("title") or "", "text": " ".join(filter(None, [item.get("usage"), item.get("snippet")]))[:3000]})
+        sources.append({
+            "priority": "P1",
+            "type": "page_metadata",
+            "title": _metadata_text(item.get("title")),
+            "text": " ".join(filter(None, [
+                _metadata_text(item.get("usage")),
+                _metadata_text(item.get("snippet")),
+            ]))[:3000],
+        })
     contexts = conn.execute("""
       select r.asset_code, r.title, s.page_number from report_page_slots s join assets r on r.id=s.report_id
       where s.control_id=? order by s.updated_at desc limit 12
@@ -209,7 +317,7 @@ def _sync_asset_tag_cache(conn, asset_id):
 
 def _store_candidates(conn, asset_id, evidence, apply_mode):
     now = now_ms()
-    candidates = evidence["candidates"]
+    candidates = apply_taxonomy_definitions(conn, evidence["candidates"])
     candidate_tags = {candidate["tag"] for candidate in candidates}
     for candidate in candidates:
         conn.execute("""insert into asset_tag_suggestions(
@@ -245,8 +353,6 @@ def _store_candidates(conn, asset_id, evidence, apply_mode):
     for candidate in selected:
         if manual_count + applied >= MAX_CONFIRMED_TAGS:
             break
-        if candidate["tag"] not in CONTROLLED_TAGS:
-            continue
         manual_dimension = conn.execute(
             "select 1 from asset_tags where asset_id=? and dimension=? and source='manual' limit 1",
             (asset_id, candidate["dimension"]),
@@ -283,16 +389,36 @@ def run_task(db_path, extracted_root, task_id):
                 current = conn.execute("select status from tag_analysis_tasks where id=?", (task_id,)).fetchone()
                 if not current or current["status"] == "cancelled": return
                 asset = conn.execute("select * from assets where id=?", (asset_id,)).fetchone()
-                if not asset: errors += 1; continue
-                evidence = collect_evidence(conn, asset, Path(extracted_root))
-                conn.execute("""insert into asset_tag_evidence values (?, ?, ?, 'classified', ?, ?)
-                  on conflict(asset_id) do update set source_fingerprint=excluded.source_fingerprint,evidence_json=excluded.evidence_json,status='classified',updated_at=excluded.updated_at""",
-                  (asset_id, evidence["fingerprint"], json.dumps(evidence, ensure_ascii=False), now_ms(), now_ms()))
-                applied += _store_candidates(conn, asset_id, evidence, task["apply_mode"])
-                action = "确认" if task["apply_mode"] == "confirmed" else "分析"
-                conn.execute("update tag_analysis_tasks set processed_count=?, error_count=?, message=?, updated_at=? where id=?", (index, errors, f'已{action} {index}/{len(ids)} 个素材', now_ms(), task_id))
+            if not asset:
+                errors += 1
+                with conn:
+                    conn.execute(
+                        "update tag_analysis_tasks set processed_count=?, error_count=?, updated_at=? where id=?",
+                        (index, errors, now_ms(), task_id),
+                    )
+                continue
+            try:
+                asset_applied = 0
+                with conn:
+                    evidence = collect_evidence(conn, asset, Path(extracted_root))
+                    conn.execute("""insert into asset_tag_evidence values (?, ?, ?, 'classified', ?, ?)
+                      on conflict(asset_id) do update set source_fingerprint=excluded.source_fingerprint,evidence_json=excluded.evidence_json,status='classified',updated_at=excluded.updated_at""",
+                      (asset_id, evidence["fingerprint"], json.dumps(evidence, ensure_ascii=False), now_ms(), now_ms()))
+                    asset_applied = _store_candidates(conn, asset_id, evidence, task["apply_mode"])
+                    action = "确认" if task["apply_mode"] == "confirmed" else "分析"
+                    conn.execute("update tag_analysis_tasks set processed_count=?, error_count=?, message=?, updated_at=? where id=?", (index, errors, f'已{action} {index}/{len(ids)} 个素材', now_ms(), task_id))
+                applied += asset_applied
+            except Exception:
+                errors += 1
+                with conn:
+                    conn.execute("update tag_analysis_tasks set processed_count=?, error_count=?, updated_at=? where id=?", (index, errors, now_ms(), task_id))
         with conn:
-            message = f"标签分析完成；已确认 {applied} 条正式标签" if task["apply_mode"] == "confirmed" else "标签候选与证据已生成"
+            if task["apply_mode"] == "confirmed":
+                message = f"标签分析完成；已确认 {applied} 条正式标签"
+            else:
+                message = "标签候选与证据已生成"
+            if errors:
+                message += f"；{errors} 个素材分析失败"
             conn.execute("update tag_analysis_tasks set status='completed', message=?, updated_at=? where id=?", (message, now_ms(), task_id))
     except Exception as error:
         with conn: conn.execute("update tag_analysis_tasks set status='failed', error=?, message='标签分析失败', updated_at=? where id=?", (str(error)[:1000], now_ms(), task_id))

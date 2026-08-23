@@ -35,6 +35,10 @@ MAX_HTML_DEPENDENCY_FILES = 1200
 MAX_HTML_DEPENDENCY_BYTES = 350 * 1024 * 1024
 
 
+class ImportCancelled(RuntimeError):
+    pass
+
+
 def runtime_record_path(path, runtime_root):
     """Store platform-owned paths relative to the runtime root."""
     candidate = Path(path).expanduser().resolve()
@@ -284,12 +288,32 @@ def run_import_task(
     existing_result_for_extract_root,
     now_ms,
     content_hash="",
+    is_cancelled=None,
+    begin_commit=None,
 ):
     stored_path = Path(stored_path)
     suffix = stored_path.suffix.lower()
     extract_root = Path(extracted_dir) / upload_id
+    cancelled = is_cancelled or (lambda: False)
+
+    def ensure_not_cancelled():
+        if cancelled():
+            raise ImportCancelled("导入已取消")
+
+    def remove_empty_upload():
+        with connect() as conn:
+            conn.execute(
+                """
+                delete from uploads
+                where id = ?
+                  and not exists(select 1 from assets where upload_id = uploads.id)
+                """,
+                (upload_id,),
+            )
+
     update_task(task_id, status="running", progress=12, message="正在解析文件")
     try:
+        ensure_not_cancelled()
         if extract_root.exists():
             shutil.rmtree(extract_root)
         if suffix in zip_suffixes:
@@ -304,53 +328,83 @@ def run_import_task(
             extract_root.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(stored_path, extract_root / original)
 
+        ensure_not_cancelled()
         update_task(task_id, progress=28, message="正在归一化页面依赖")
         normalize_ephemeral_runtime_references(extract_root)
         dependency_audit = audit_dependency_closure(extract_root)
         write_dependency_audit(extract_root, dependency_audit)
-        if dependency_audit["missing"]:
-            sample = ", ".join(item["resolved"] for item in dependency_audit["missing"][:3])
-            raise ValueError(f"导入包缺少 {len(dependency_audit['missing'])} 个本地资源：{sample}")
+        blocking_missing = dependency_audit.get("blockingMissing", dependency_audit["missing"])
+        if blocking_missing:
+            unique_paths = list(dict.fromkeys(item["resolved"] for item in blocking_missing))
+            sample = ", ".join(unique_paths[:3])
+            raise ValueError(f"导入包缺少 {len(unique_paths)} 个必要本地资源：{sample}")
 
+        ensure_not_cancelled()
         package_hash = normalized_package_hash(extract_root)
+        update_task(task_id, progress=38, message="正在事务性写入素材库")
+        runtime_root = Path(extracted_dir).resolve().parent
+        duplicate_id = ""
         with connect() as conn:
+            conn.execute("begin immediate")
             duplicate = conn.execute(
                 """select id from uploads where id <> ? and content_hash = ?
                    and exists(select 1 from assets where upload_id = uploads.id)
                    order by created_at desc limit 1""",
                 (upload_id, package_hash),
             ).fetchone()
-        if duplicate:
-            result = import_result_for_upload(duplicate["id"])
+            if duplicate:
+                duplicate_id = duplicate["id"]
+                ensure_not_cancelled()
+                if begin_commit and not begin_commit():
+                    raise ImportCancelled("导入已取消")
+            else:
+                conn.execute(
+                    "insert or replace into uploads (id, filename, stored_path, extract_path, content_hash, created_at) values (?, ?, ?, ?, ?, ?)",
+                    (
+                        upload_id,
+                        original,
+                        runtime_record_path(stored_path, runtime_root),
+                        runtime_record_path(extract_root, runtime_root),
+                        package_hash,
+                        now_ms(),
+                    ),
+                )
+                file_count, asset_count, version_matches = scan_upload(
+                    upload_id,
+                    extract_root,
+                    description,
+                    conn=conn,
+                )
+                ensure_not_cancelled()
+                if begin_commit and not begin_commit():
+                    raise ImportCancelled("导入已取消")
+        ensure_not_cancelled()
+        if duplicate_id:
+            result = import_result_for_upload(duplicate_id)
             shutil.rmtree(extract_root, ignore_errors=True)
             stored_path.unlink(missing_ok=True)
             update_task(
-                task_id, status="success", progress=100, message="相同内容已存在，已复用历史批次",
-                error="", fileCount=0, assetCount=0, thumbnailCount=0, uploadId=duplicate["id"], **result,
+                task_id,
+                status="success",
+                progress=100,
+                message="相同内容已存在，已复用历史批次",
+                error="",
+                fileCount=0,
+                assetCount=0,
+                thumbnailCount=0,
+                uploadId=duplicate_id,
+                **result,
             )
             return
-
-        update_task(task_id, progress=38, message="正在事务性写入素材库")
-        runtime_root = Path(extracted_dir).resolve().parent
-        with connect() as conn:
-            conn.execute(
-                "insert or replace into uploads (id, filename, stored_path, extract_path, content_hash, created_at) values (?, ?, ?, ?, ?, ?)",
-                (
-                    upload_id,
-                    original,
-                    runtime_record_path(stored_path, runtime_root),
-                    runtime_record_path(extract_root, runtime_root),
-                    package_hash,
-                    now_ms(),
-                ),
-            )
-            file_count, asset_count = scan_upload(upload_id, extract_root, description, conn=conn)
         update_task(task_id, progress=72, message="正在生成预览")
         thumbnail_count = generate_upload_thumbnails(upload_id)
         result = import_result_for_upload(upload_id)
         if not result.get("previewUrl") and existing_result_for_extract_root:
             result = existing_result_for_extract_root(extract_root)
             if result.get("previewUrl"):
+                remove_empty_upload()
+                shutil.rmtree(extract_root, ignore_errors=True)
+                stored_path.unlink(missing_ok=True)
                 update_task(
                     task_id,
                     status="success",
@@ -360,11 +414,13 @@ def run_import_task(
                     fileCount=file_count,
                     assetCount=asset_count,
                     thumbnailCount=thumbnail_count,
-                    uploadId=upload_id,
+                    uploadId=result.pop("sourceUploadId", "") or upload_id,
                     **result,
                 )
                 return
         if asset_count <= 0 or not result.get("previewUrl"):
+            remove_empty_upload()
+            shutil.rmtree(extract_root, ignore_errors=True)
             update_task(
                 task_id,
                 status="failed",
@@ -377,18 +433,39 @@ def run_import_task(
                 uploadId=upload_id,
             )
             return
+        version_msg = ""
+        version_extra = {}
+        if version_matches:
+            titles = ", ".join(m["matchedTitle"] for m in version_matches[:3])
+            version_msg = f"已识别为 {titles} 的新版本"
+            version_extra = {"versionMerged": True, "matchedAssetTitle": titles}
         update_task(
             task_id,
             status="success",
             progress=100,
-            message="导入成功，可点击预览",
+            message=version_msg or "导入成功，可点击预览",
             fileCount=file_count,
             assetCount=asset_count,
             thumbnailCount=thumbnail_count,
             uploadId=upload_id,
+            **version_extra,
             **result,
         )
+    except ImportCancelled:
+        if extract_root.exists():
+            shutil.rmtree(extract_root, ignore_errors=True)
+        stored_path.unlink(missing_ok=True)
+        update_task(
+            task_id,
+            status="cancelled",
+            progress=100,
+            message="导入已取消",
+            error="",
+            uploadId=upload_id,
+        )
     except Exception as error:
+        if extract_root.exists():
+            shutil.rmtree(extract_root, ignore_errors=True)
         update_task(
             task_id,
             status="failed",
@@ -448,7 +525,7 @@ def import_zip_file(
     source_path = Path(source_path)
     with connect() as conn:
         if conn.execute("select 1 from uploads where stored_path = ? limit 1", (str(source_path),)).fetchone():
-            return 0, 0
+            return 0, 0, []
     upload_id = f"auto-{time.strftime('%Y%m%d-%H%M%S')}-{hashlib.sha1(str(source_path).encode()).hexdigest()[:8]}"
     stored = Path(uploads_dir) / f"{upload_id}.zip"
     shutil.copy2(source_path, stored)
@@ -458,16 +535,16 @@ def import_zip_file(
         safe_extract(stored, extract_root)
     except handled_errors:
         stored.unlink(missing_ok=True)
-        return 0, 0
+        return 0, 0, []
     normalize_ephemeral_runtime_references(extract_root)
     dependency_audit = audit_dependency_closure(extract_root)
     write_dependency_audit(extract_root, dependency_audit)
-    if dependency_audit["missing"]:
+    if dependency_audit.get("blockingMissing", dependency_audit["missing"]):
         # Auto-import has no task drawer, so reject an incomplete package here
         # rather than creating records that can only render with broken media.
         shutil.rmtree(extract_root, ignore_errors=True)
         stored.unlink(missing_ok=True)
-        return 0, 0
+        return 0, 0, []
     with connect() as conn:
         conn.execute(
             "insert into uploads (id, filename, stored_path, extract_path, created_at) values (?, ?, ?, ?, ?)",
@@ -514,7 +591,7 @@ def auto_import_sources(
         scanned += 1
         if path.suffix.lower() in zip_suffixes:
             zip_files += 1
-            _, added = import_zip(path)
+            _, added, _ = import_zip(path)
             inserted += added
             continue
         with connect() as conn:

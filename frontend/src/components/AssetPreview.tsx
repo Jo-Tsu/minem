@@ -2,6 +2,7 @@ import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { previewSandbox } from "../previewSecurity";
 import type { Asset, LineageItem } from "../types";
+import { safeAbsoluteUrl, safePreviewUrl } from "../urlSafety";
 
 const HTML_PREVIEW_SIZE = { width: 1920, height: 1080 };
 
@@ -25,6 +26,7 @@ function previewSource(asset: Asset, mode: "thumbnail" | "interactive") {
     if (["image", "gif", "svg", "video"].includes(asset.media_kind) || isImagePreview(asset.preview_url)) {
       return asset.preview_url;
     }
+    if (asset.preview_url) return asset.preview_url;
     return "";
   }
   return asset.preview_url;
@@ -58,6 +60,7 @@ function FramePreview({
   interactive: boolean;
   canvasSize?: { width: number; height: number };
 }) {
+  const safeSrc = safeAbsoluteUrl(src);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
@@ -68,24 +71,26 @@ function FramePreview({
   const scale = viewport.width && viewport.height ? Math.min(viewport.width / frameWidth, viewport.height / frameHeight) : 0;
   const offsetX = scale ? (viewport.width - frameWidth * scale) / 2 : 0;
   const offsetY = scale ? (viewport.height - frameHeight * scale) / 2 : 0;
-  const frameSrc = `${src}${src.includes("?") ? "&" : "?"}embed=1&v=${encodeURIComponent(`${asset.updated_at || 0}-${loadAttempt}`)}`;
+  const frameSrc = safeSrc
+    ? `${safeSrc}${safeSrc.includes("?") ? "&" : "?"}embed=1&v=${encodeURIComponent(`${asset.updated_at || 0}-${loadAttempt}`)}`
+    : "";
 
   useEffect(() => {
     const node = shellRef.current;
-    if (!node) return;
+    if (!node || near) return;
     if (typeof IntersectionObserver === "undefined") {
       setNear(true);
       return;
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        for (const entry of entries) setNear(entry.isIntersecting);
+        for (const entry of entries) if (entry.isIntersecting) { setNear(true); observer.disconnect(); }
       },
       { rootMargin: "800px 0px" }
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [near]);
 
   useEffect(() => {
     const node = shellRef.current;
@@ -108,7 +113,7 @@ function FramePreview({
     setLoadState("loading");
     const timer = window.setTimeout(() => {
       setLoadState((current) => current === "loading" ? "slow" : current);
-    }, 20000);
+    }, 6000);
     return () => window.clearTimeout(timer);
   }, [frameSrc, near]);
 
@@ -116,9 +121,9 @@ function FramePreview({
     <div
       className={classNames("frame-shell", asset.preview_meta?.longPage && "is-long-page", `is-${loadState}`)}
       ref={shellRef}
-      style={{ aspectRatio: "16 / 9" }}
+      style={{ aspectRatio: `${frameWidth} / ${frameHeight}` }}
     >
-      {near ? (
+      {near && frameSrc ? (
         <div
           className="frame-stage"
           style={{
@@ -134,7 +139,7 @@ function FramePreview({
             src={frameSrc}
             title={asset.title}
             loading="lazy"
-            sandbox={previewSandbox(src)}
+            sandbox={previewSandbox(safeSrc)}
             referrerPolicy="no-referrer"
             onLoad={() => {
               try {
@@ -154,21 +159,21 @@ function FramePreview({
       ) : (
         <div className="frame-stage-pending" aria-hidden="true" />
       )}
-      {near && loadState === "loading" ? (
+      {near && frameSrc && loadState === "loading" ? (
         <div className="preview-status" role="status"><Loader2 className="spin" size={18} /><span>正在加载预览</span></div>
       ) : null}
-      {near && loadState === "slow" ? (
+      {near && frameSrc && loadState === "slow" ? (
         <div className="preview-status is-slow" role="status">
           <Loader2 className="spin" size={18} />
           <span>页面资源较多，仍在加载</span>
         </div>
       ) : null}
-      {near && loadState === "error" ? (
+      {near && (!frameSrc || loadState === "error") ? (
         <div className="preview-status is-error" role="alert">
           <AlertCircle size={20} />
           <strong>预览暂时无法显示</strong>
-          <span>素材仍然保留，可以重新加载或打开原链接。</span>
-          <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}><RefreshCw size={14} />重新加载</button>
+          <span>{frameSrc ? "素材仍然保留，可以重新加载或打开原链接。" : "预览地址不在安全白名单中。"}</span>
+          {frameSrc ? <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}><RefreshCw size={14} />重新加载</button> : null}
         </div>
       ) : null}
     </div>
@@ -186,23 +191,26 @@ function MediaPreview({
   video?: boolean;
   compact?: boolean;
 }) {
+  const safeSrc = safePreviewUrl(src);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const versionedSrc = src.startsWith("data:")
-    ? src
-    : `${src}${src.includes("?") ? "&" : "?"}preview_attempt=${loadAttempt}`;
-  const content = video
+  const versionedSrc = safeSrc.startsWith("data:")
+    ? safeSrc
+    : safeSrc ? `${safeSrc}${safeSrc.includes("?") ? "&" : "?"}preview_attempt=${loadAttempt}` : "";
+  const content = !versionedSrc
+    ? null
+    : video
     ? <video className="media-preview" src={versionedSrc} muted playsInline controls={!compact} onLoadedData={() => setLoadState("ready")} onError={() => setLoadState("error")} />
     : <img className="media-preview" src={versionedSrc} alt={title} loading="lazy" onLoad={() => setLoadState("ready")} onError={() => setLoadState("error")} />;
   return (
     <div className={classNames("media-preview-shell", `is-${loadState}`)}>
       {content}
-      {loadState === "loading" && !compact ? <div className="preview-status" role="status"><Loader2 className="spin" size={18} /><span>正在加载预览</span></div> : null}
-      {loadState === "error" ? (
+      {versionedSrc && loadState === "loading" && !compact ? <div className="preview-status" role="status"><Loader2 className="spin" size={18} /><span>正在加载预览</span></div> : null}
+      {!versionedSrc || loadState === "error" ? (
         <div className="preview-status is-error" role="alert">
           <AlertCircle size={compact ? 16 : 20} />
-          <strong>{compact ? "预览不可用" : "媒体预览加载失败"}</strong>
-          {!compact ? <button type="button" onClick={() => { setLoadState("loading"); setLoadAttempt((attempt) => attempt + 1); }}><RefreshCw size={14} />重新加载</button> : null}
+          <strong>{compact ? "预览不可用" : versionedSrc ? "媒体预览加载失败" : "预览地址不安全"}</strong>
+          {!compact && versionedSrc ? <button type="button" onClick={() => { setLoadState("loading"); setLoadAttempt((attempt) => attempt + 1); }}><RefreshCw size={14} />重新加载</button> : null}
         </div>
       ) : null}
     </div>
@@ -212,7 +220,7 @@ function MediaPreview({
 export function Preview({ asset, mode = "interactive", compact = false }: { asset: Asset; mode?: "thumbnail" | "interactive"; compact?: boolean }) {
   const src = previewSource(asset, mode);
   if (mode === "interactive" && asset.asset_type === "report") {
-    return <FramePreview asset={asset} src={`/api/reports/${encodeURIComponent(asset.id)}/arrangement/viewer`} interactive canvasSize={HTML_PREVIEW_SIZE} />;
+    return <FramePreview asset={asset} src={`/reports/${encodeURIComponent(asset.id)}/index.html`} interactive canvasSize={HTML_PREVIEW_SIZE} />;
   }
   if (mode === "interactive" && asset.asset_type === "control") {
     return <FramePreview asset={asset} src={`/pages/${encodeURIComponent(asset.id)}/index.html`} interactive canvasSize={HTML_PREVIEW_SIZE} />;
@@ -224,14 +232,24 @@ export function Preview({ asset, mode = "interactive", compact = false }: { asse
   if (asset.media_kind === "video") {
     return <MediaPreview src={src} title={asset.title} video compact={compact} />;
   }
-  if (mode === "thumbnail" || ["image", "gif", "svg"].includes(asset.media_kind) || asset.asset_type === "resource") {
+  if (["image", "gif", "svg"].includes(asset.media_kind) || isImagePreview(src)) {
+    return <MediaPreview src={src} title={asset.title} compact={compact} />;
+  }
+  if (mode === "thumbnail" && asset.asset_type === "resource") {
     return <MediaPreview src={src} title={asset.title} compact={compact} />;
   }
   return <FramePreview asset={asset} src={src} interactive={mode === "interactive"} />;
 }
 
 export function LineagePreview({ item }: { item?: LineageItem }) {
-  if (!item?.previewUrl) return <div className="preview-fallback">无预览</div>;
-  if (isVisualAsset(item)) return <img src={item.previewUrl} alt={item.title || item.assetCode || ""} loading="lazy" />;
-  return <iframe src={item.previewUrl} title={item.title || item.assetCode || ""} loading="lazy" sandbox={previewSandbox(item.previewUrl)} referrerPolicy="no-referrer" />;
+  const src = isVisualAsset(item)
+    ? safePreviewUrl(item?.previewUrl)
+    : safeAbsoluteUrl(item?.previewUrl);
+  if (!item?.previewUrl || !src) return <div className="preview-fallback">无预览</div>;
+  if (isVisualAsset(item)) return <img src={src} alt={item.title || item.assetCode || ""} loading="lazy" />;
+  return (
+    <div className="lineage-frame-shell">
+      <iframe src={src} title={item.title || item.assetCode || ""} loading="lazy" sandbox={previewSandbox(src)} referrerPolicy="no-referrer" />
+    </div>
+  );
 }

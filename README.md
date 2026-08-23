@@ -82,6 +82,10 @@ minem report page replace RPT-20260719-001 \
 # 5. 将已整理的 Markdown 确定性导入为案例页面；内容提炼由模型先完成
 minem case import ./customer-story.md \
   --name "制造业协同案例" --industry 制造业 --wait --output json
+
+# 6. 让 Agent 先读取 CLI 内置的案例筛选与生成契约；默认最多选择 3 个高价值案例
+minem case brief "https://example.com/source-document" \
+  --audience 管理层 --max-cases 3 --output json --no-input
 ```
 
 `--wait` 会等待导入完成，并返回最终素材 ID、编号、名称和可访问预览链接；
@@ -166,6 +170,11 @@ cd minem
 
 启动器会按需创建 `.venv`、安装依赖、构建前端并打开浏览器。访问：
 <http://127.0.0.1:8790/>
+
+在 macOS 上，轻量启动与 `MineM.app` 默认共用
+`~/Library/Application Support/MineM/`，网页和客户端读取同一份素材库。需要隔离的测试库时，
+显式传入 `./start.sh --data-dir /path/to/runtime`。若 `8790` 已由另一套运行库占用，
+启动器会停止并提示，不会静默打开错误数据库。
 
 #### 方式二：Docker
 
@@ -382,6 +391,12 @@ cd minem
 
 The launcher creates `.venv` when needed, installs dependencies, builds the
 frontend, starts MineM, and opens <http://127.0.0.1:8790/>.
+
+On macOS, lightweight startup and `MineM.app` share
+`~/Library/Application Support/MineM/` by default, so the browser and desktop
+client use the same library. Pass `./start.sh --data-dir /path/to/runtime` only
+for an intentionally isolated runtime. If port `8790` belongs to another MineM
+runtime, startup stops with a clear error instead of opening the wrong database.
 
 #### Docker
 
