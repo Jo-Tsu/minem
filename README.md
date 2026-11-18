@@ -1,153 +1,49 @@
 <div align="center">
 
-<img src="desktop/src-tauri/icons/icon.png" width="96" alt="MineM logo" />
+<img src="desktop/src-tauri/icons/icon.png" width="80" alt="MineM" />
 
 # MineM
 
-**让人和 AI 一起创建、复用、追溯并编排汇报素材。**
+**把已有 HTML 整理成页面，再编排成可播放、可交付的汇报。**
 
-**A local-first material system where people and AI build presentations together.**
+A local-first workspace for HTML pages and presentations.
 
-[![Release](https://img.shields.io/github/v/release/Jo-Tsu/minem?style=flat-square)](https://github.com/Jo-Tsu/minem/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/Jo-Tsu/minem/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/Jo-Tsu/minem/actions/workflows/ci.yml)
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/Jo-Tsu/minem/codeql.yml?branch=main&label=CodeQL&style=flat-square)](https://github.com/Jo-Tsu/minem/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/github/license/Jo-Tsu/minem?style=flat-square)](LICENSE)
 
-[中文](#中文) · [English](#english) · [快速开始](#五分钟开始使用) · [文档](docs/README.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [使用流程](#使用流程) · [飞书链接导入](#飞书链接导入) · [文档](docs/README.md) · [English](#english)
 
 </div>
 
-MineM 是一个本地优先的开源汇报素材平台。它不只是保存文件，而是把完整汇报、
-单页、案例和媒体资源组织成彼此关联的素材资产，让团队可以持续复用、追踪来源、
-管理版本、重新编排并导出新的汇报。任何能够执行命令行的 AI Agent 都可以通过
-MineM CLI 创建页面、生成汇报、插入或替换页面，并把结果纳入同一套素材管理体系。
+MineM 是个人 HTML 管理与快速创作工具，以网页为主要入口。导入完整汇报或单页，
+保留原来的文字、排版和媒体，再从页面库选择内容、调整顺序，生成新的汇报。
+数据库和素材保存在本地，默认无需 MineM 账号。
 
-MineM is a local-first, open-source presentation material platform. It turns
-complete reports, individual pages, cases, and media resources into connected
-assets that teams can reuse, trace, version, arrange, and export. Any AI agent
-that can run shell commands can use the JSON CLI to create and manage material.
+## 核心能力
 
-```mermaid
-flowchart LR
-    H["People · Web or macOS"] --> M["MineM Material Engine"]
-    A["AI Agent · CLI and JSON"] --> M
-    M --> R["Reports"]
-    M --> P["Pages"]
-    M --> C["Cases and resources"]
-    P --> E["Non-destructive arrangement"]
-    C --> E
-    E --> F["Standalone HTML or PDF"]
-```
-
-## 中文
-
-### AI 可以真正操作素材，而不只是给建议
-
-MineM 把平台能力封装为稳定的 CLI 和 JSON 返回值。AI 模型负责理解用户意图、
-提炼文档和生成页面 HTML，MineM 负责完成可验证的产品动作：安全导入、正确分类、
-生成编号、创建缩略图、保存来源、建立版本、编排汇报并返回真实预览链接。
-
-它不绑定某一家模型。Codex、Claude Code、Gemini CLI 或任何能够执行 Shell 命令的
-Agent，都可以调用同一套能力：
-
-```bash
-# 安装正式 CLI；轻量启动脚本也会自动完成这一步
-python3 -m pip install --no-deps -e .
-
-# 1. AI 生成单页 HTML 后，导入并命名页面素材；等待真实入库完成
-minem page import ./generated-page.html \
-  --name "客户案例：交付成果" --wait --output json
-
-# 2. 用多个页面素材创建一份完整汇报
-minem report create --name "2026 制造业解决方案" \
-  --page CTRL-PAGE-001 --page CTRL-PAGE-002 --output json
-
-# 3. 把新页面插入指定页面之后；正式汇报会应用新的编排
-minem report page add RPT-20260719-001 \
-  --page CTRL-PAGE-003 --after CTRL-PAGE-001 --confirm --output json
-
-# 4. 修改某页时创建新页面版本，再替换当前汇报中的旧页
-minem report page replace RPT-20260719-001 \
-  --page CTRL-PAGE-001 --with CTRL-PAGE-004 --confirm --output json
-```
-
-`--wait` 会等待导入完成，并返回最终素材 ID、编号、名称和可访问预览链接；
-`--output json` 提供稳定的 `minem.cli/v1` 机器协议；`--confirm` 用于确认会修改正式
-汇报的操作。命令中的素材引用既可以使用内部 ID，也可以使用公开编号或 MineM 链接。
-原始页面和旧版本不会因插入、替换或移出汇报而被删除。
-
-完整命令边界见 [MineM CLI 能力范围](docs/MineM_CLI_能力范围.md)。这套端到端链路
-已经进入 GitHub CI，每次提交都会真实创建页面、生成汇报、插入和替换页面，
-并验证正式预览链接。
-
-### 为什么需要 MineM
-
-多数汇报管理停留在文件层：文件散落在文件夹里，同一页面被反复复制，来源和版本
-逐渐失去记录，想复用几页内容时又必须打开多份旧汇报重新寻找。MineM 把管理单位
-从“文件”下沉到“页面和资源”，让每次汇报生产都能沉淀为下一次可直接使用的资产。
-
-MineM 重点解决这些问题：
-
-- **从整份汇报到单页资产**：导入多页 HTML 或 ZIP 汇报包后，完整汇报和每个独立
-  页面会进入对应素材层级，不再混在同一个列表里。
-- **来源关系不会丢失**：页面、资源、案例与汇报保留引用和生成关系，能够回答
-  “这页来自哪里、被哪些汇报使用”。
-- **编排不破坏原始素材**：排序、插入、隐藏只改变当前汇报的页面编排，不会删除
-  页面素材，也不会覆盖已有版本。
-- **预览规则保持一致**：平台统一处理画布尺寸、缩放、翻页、全屏和链接打开逻辑，
-  减少不同来源页面出现空白、裁切或重复控件。
-- **本地数据由自己掌控**：SQLite 数据库和导入素材默认保存在本机，不要求注册
-  云端账号，也不会自动扫描未授权目录。
-- **可接入自动化能力**：CLI、Agent 运行时和数据治理脚本可以支持后续 AI 工作流，
-  同时保留人工确认和非破坏性操作边界。
-
-### 它不是什么
-
-MineM 不是另一套 PPT 绘图工具，也不是把所有页面重新截图保存。它位于汇报生产
-链路的资产管理层，负责接住已有页面、外部汇报和案例内容，整理关系并形成可以持续
-复用的素材库。页面仍可保留原始 HTML、图片、视频和 GIF 等表现形式。
-
-### 适合这些场景
-
-| 场景 | MineM 带来的价值 |
+| 能力 | 当前行为 |
 | --- | --- |
-| 经常制作经营汇报、项目汇报或客户方案 | 从历史汇报快速找到并复用高质量页面 |
-| 多人维护品牌、产品或咨询材料 | 统一入口、预览规则、版本和来源关系 |
-| 一份汇报需要组合多个项目的页面 | 通过非破坏性编排插入、排序和隐藏页面 |
-| 外部 HTML 汇报需要进入内部素材库 | 保留完整汇报，同时拆分为独立页面素材 |
-| 对资料隐私和本地存储有要求 | 不依赖云端账号，数据目录完全由使用者控制 |
-| 希望通过 AI 或 CLI 调用素材能力 | 使用结构化接口完成导入、创建、替换和治理 |
+| 导入 | 支持 HTML、ZIP 和媒体文件；飞书文件夹链接通过本机下载服务异步处理 |
+| 页面 | 一条页面素材对应一页，图片、字体、脚本、视频等依赖随页面封装 |
+| 新建汇报 | 选择默认封面和已有页面，按选择顺序创建独立汇报 |
+| 编排 | 插入、排序、隐藏和移出页面；保存成功后可查看最新结果，继续修改后可再次保存 |
+| 播放 | 独立页面与完整汇报均可预览，支持等比适配、翻页和全屏 |
+| 交付 | 导出含资源与清单的 HTML ZIP，或供静态阅读的 PDF |
+| 自动化 | CLI 和 HTTP 接口可供脚本、Codex 等外部 Agent 调用 |
 
-### 核心能力
+主流程是 **页面 → 编排 → 汇报**。每页拥有独立的资源封装，汇报保存页面的播放顺序。
+插入到新汇报时复制对应页面内容和依赖，保留来源关系；不依赖跨汇报共享资源池。
+资源在页面内部管理，不提供独立的资源模块入口。
 
-| 能力 | 说明 |
-| --- | --- |
-| 汇报素材 | 保存完整多页汇报，支持预览、收藏、编排、重命名和导出 |
-| 页面素材 | 每条记录严格对应一页，可独立查看、搜索、复用和管理版本 |
-| 案例素材 | 将多个相关案例页面组织成案例组，并可插入新的汇报 |
-| 页面资源封装 | 图片、视频、GIF、Logo 等依赖随页面封装，资源模块不单独展示 |
-| 统一预览 | 统一尺寸适配、翻页、全屏、刷新和链接复制入口 |
-| 汇报编排 | 调整顺序、批量插入或隐藏页面，确认后应用到真实汇报链接 |
-| 导出交付 | 导出可独立打开的 HTML 包或等待页面稳定后的 PDF |
-| 数据治理 | 检查重复、失效路径、错误层级、缺失资源和异常预览 |
-| 桌面入口 | 提供 macOS 客户端与快捷浮窗源码，网页和客户端均可使用 |
+## 快速开始
 
-### 五分钟开始使用
+两种运行方式任选一种，默认访问 [http://127.0.0.1:8790/](http://127.0.0.1:8790/)。
 
-#### 方式一：轻量本地启动
+### Docker
 
-需要 Python 3.12、Node.js `^20.19.0` 或 `>=22.12.0`，然后执行：
-
-```bash
-git clone https://github.com/Jo-Tsu/minem.git
-cd minem
-./start.sh
-```
-
-启动器会按需创建 `.venv`、安装依赖、构建前端并打开浏览器。访问：
-<http://127.0.0.1:8790/>
-
-#### 方式二：Docker
+需要 Docker Engine 与 Compose，或 Docker Desktop。网页运行所需的 Python、
+Chromium 和字体由镜像提供，主机无需安装 Node.js。
 
 ```bash
 git clone https://github.com/Jo-Tsu/minem.git
@@ -155,203 +51,188 @@ cd minem
 docker compose up -d --build
 ```
 
-Docker 默认使用空素材库，不扫描任何本机目录。需要导入外部资料时，复制
-`docker-compose.override.example.yml` 为 `docker-compose.override.yml`，并显式
-设置 `MINEM_IMPORT_ROOT`。来源目录将以只读方式挂载。
-
-如需导入飞书云空间文件夹，在本机登录 `lark-cli` 后运行
-`./scripts/start_drive_import_worker.sh`，再在导入弹窗选择「飞书链接」。
-飞书制作项目中的 `output/index.html` 可直接导入，平台会下载该入口引用的播放资源。
-本机重启后，重新运行该脚本即可恢复飞书链接导入。
-提交成功后任务会在后台继续，刷新页面或重启网页服务后可按原任务 ID 查询。
-
-#### 恢复环境启动
-
-此目录的本地 Docker 配置使用 `minem-platform:stable-web`。
-在 macOS 运行 `./scripts/install_macos_launcher.sh` 可在桌面创建「MineM」快捷入口。
-双击会按需启动 Docker 和 MineM，再用默认浏览器打开网页。服务未运行时显示可关闭的“正在打开”窗口，就绪后自动消失；关闭提示不取消后台启动。服务已运行时直接打开网页。项目目录移动后重新运行安装脚本。
-使用 `docker build -f Dockerfile -t minem-platform:stable-web .` 更新后端时，构建会从当前源码完整生成前后端产物。
-可选：本机已有验证过的 Python/Chromium 运行镜像时，通过 `--build-arg MINEM_RUNTIME_BASE=镜像名` 复用系统依赖；应用代码仍会清空并从当前源码完整重建。`Dockerfile.recovered` 是同一构建文件的兼容入口。
-运行 `docker compose up -d --no-build` 启动网页。需要飞书链接导入时，再运行
-`./scripts/start_drive_import_worker.sh`。本地运行与后续启动统一使用该镜像。
-
-#### 手工启动
+首次构建需要下载依赖；之后使用 `docker compose up -d` 启动已有镜像。
+首次进入是空素材库，默认不会扫描本机材料目录。
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 -m pip install --no-deps -e .
-npm ci
-npm run build
-python3 server.py
+# 查看状态与日志
+docker compose ps
+docker compose logs --tail=100 minem-platform
+
+# 停止服务，保留本机数据
+docker compose down
 ```
 
-默认封面为无品牌几何背景。个人封面可放到运行目录的 `config/report-covers/cover-1.webp` 至 `cover-3.webp`，不会上传到源码仓库。已创建汇报仍保留各自封装的封面。
+### 直接在本机运行
 
-### 数据与隐私
+需要 Python 3.10+（推荐 3.12）、Node.js 20.19+（20.x）或 22.12+。
+缩略图和 PDF 渲染还需要可被发现的 Chromium、Google Chrome 或 macOS Microsoft Edge。
 
-运行目录的 `maintenance/` 集中保存维护资料。`maintenance/validation/`
-存放隔离验证库和测试报告，`maintenance/history/` 存放历史归档、备份和版本快照。
-清理测试时按单次运行目录处理，归档可继续复用。
+```bash
+git clone https://github.com/Jo-Tsu/minem.git
+cd minem
+./start.sh --data-dir ./runtime
+```
 
-MineM 采用源码与运行数据分离的结构。首次启动创建的 `data/`、`uploads/`、
-`extracted/`、`thumbnails/`、`report-exports/` 和 `artifacts/` 都是本地状态，
-已经从 Git 提交和 Docker 构建上下文中排除。
+启动器按需创建虚拟环境、安装依赖并构建前端，服务就绪后打开默认浏览器。
+此命令将运行数据统一保存在项目的 `runtime/` 下；按 `Ctrl+C` 停止服务。
 
-公开仓库不包含用户数据库、客户材料、导入汇报、预览图、模型权重、音频、桌面
-安装包或本机路径配置。完整规则见[公开版本边界](docs/OPEN_SOURCE_RELEASE.md)。
+再次启动沿用同一命令。可加 `--no-browser` 禁止自动打开浏览器，
+或用 `--port 8791` 改端口。`--skip-install --no-build` 仅适用于依赖与构建已准备好的环境。
 
-### 开源承诺
+### macOS 桌面快捷入口
 
-MineM 不是需要许可证密钥才能解锁功能的 Open Core 项目。仓库中的平台源码依据
-[Apache License 2.0](LICENSE) 完整开放：任何人都可以免费用于个人或商业项目，
-可以修改、私有部署和再发布，不需要 MineM 账号、付费订阅或额外授权。使用和分发
-时只需遵守 Apache-2.0 的标准许可证及声明保留要求。
+完成 Docker 首次构建后，在项目目录执行：
 
-### 项目结构
+```bash
+./scripts/install_macos_launcher.sh
+```
 
-| 路径 | 作用 |
+需要 Xcode Command Line Tools。脚本在桌面创建 `MineM.app`，双击后按需启动
+Docker Desktop 和网页服务，再打开默认浏览器。启动时的提示可关闭，就绪后自动消失；
+关闭提示不会取消后台启动。服务已运行时直接打开网页，项目移动后需重新安装入口。
+这是网页快捷入口，使用它不需要构建 `desktop/` 中的完整客户端。
+
+## 使用流程
+
+1. **导入材料**：点击「导入」，上传 HTML 或 ZIP。后台任务成功后，打开素材检查封面、页数和媒体。
+2. **新建汇报**：在汇报素材中点击「新增汇报素材」，填写名称、选择封面和正文页面。正文按选择顺序加入，封面模板自动生成为一页「封面」。
+3. **确认编排**：插入、拖动排序、隐藏或移出页面后点击「确认编排」。成功弹窗可查看最新汇报，也可返回继续编辑。
+4. **播放与交付**：检查实际播放效果，再导出 HTML ZIP 或 PDF。导出采用已经保存的编排，隐藏和移出的页不进入交付物。
+
+封面模板本身不作为页面素材入库；创建汇报后生成的「封面」属于该汇报。
+公开版提供三张原创几何背景。自定义封面可放在运行目录的
+`config/report-covers/cover-1.webp` 至 `cover-3.webp`，推荐 1920×1080。
+已有汇报保留创建时封装的封面。
+Docker 部署使用自定义封面时，需将该目录挂载到容器实际运行目录的同名子目录。
+
+### 导入格式与边界
+
+| 来源 | 准备方式 |
 | --- | --- |
-| `frontend/` | React + TypeScript 前端源码 |
-| `minem/` | Python 领域模块与数据访问 |
-| `server.py` | 本地 HTTP 服务入口和兼容路由 |
-| `desktop/` | macOS 桌面客户端与快捷浮窗源码 |
-| `scripts/` | 测试、校验、治理、版本和 CLI 工具 |
-| `docs/` | 产品、技术、设计、测试与发布文档 |
+| 单个 HTML | 使用自包含文件；引用本地图片、视频、CSS 等时改用 ZIP |
+| HTML ZIP | 保留入口与依赖的相对路径；明确汇报页序时提供 Manifest |
+| 多页 Deck | 识别受支持的页面结构后拆分，同时保留完整汇报入口 |
+| 飞书云空间文件夹 | 需包含兼容的 HTML 汇报入口，且当前账号有文件和依赖的读取权限 |
+| 图片与视频 | 可上传为底层资源记录；独立页面应使用包含媒体的 HTML |
 
-### 开发与贡献
+单个 HTML、独立多 HTML 页面包与完整汇报不会一律归为同一种素材。
+分类、Manifest 示例、默认体积限制和错误处理见[导入接口文档](docs/MineM_IMPORT_API.md)。
+
+HTML ZIP 是保留视频、音频和交互的主要交付格式；PDF 是静态阅读副本。
+缺失必需资源或仍依赖线上运行环境时，离线导出会返回具体错误。
+飞书在线文档和在线幻灯片不能直接通过文件夹入口转成 HTML 汇报，需先准备兼容的导出文件。
+已验证范围与剩余限制见 [HTML 文档交付标准](docs/MineM_EXPORT_STANDARD.md)。
+
+## 飞书链接导入
+
+在导入弹窗选择「飞书链接」，通过「添加链接」增加输入项，一次最多提交 8 个文件夹。
+提交后在任务列表查看进度、原链接和失败原因；不要将提交成功当作导入完成。
+
+此能力需要主机安装并登录有读取权限的 `lark-cli`，以及 Python 3.10+。
+本机下载服务与网页服务通过同一份 `drive-imports/` 目录交换任务。
+
+**使用上面的本机启动命令时**，运行目录已经是 `./runtime`，在另一个终端执行：
+
+```bash
+cd minem
+source .venv/bin/activate
+./scripts/start_drive_import_worker.sh
+```
+
+**使用仓库默认 Docker 配置时**，先在 `docker-compose.override.yml` 中增加队列挂载，
+再运行 `docker compose up -d` 应用配置：
+
+```yaml
+services:
+  minem-platform:
+    volumes:
+      - ./runtime/drive-imports:/app/drive-imports
+```
+
+随后在主机运行 `./scripts/start_drive_import_worker.sh`。已自定义 `MINEM_DATA_DIR`
+的部署应把同一主机目录挂载到实际运行目录的 `drive-imports/` 下。
+主机重启后需重新启动下载服务；不要把本机登录凭据复制进镜像或提交到仓库。
+具体队列、重试和查询约定见[导入接口文档](docs/MineM_IMPORT_API.md)。
+
+## 数据与维护
+
+| 运行方式 | 数据位置 |
+| --- | --- |
+| `./start.sh --data-dir ./runtime` | 项目内 `runtime/` |
+| 仓库默认 Docker Compose | 项目内各数据目录，分别挂载到容器 `/app/` 下 |
+| 自定义部署 | 以实际 `MINEM_DATA_DIR` 和 Compose 挂载为准 |
+
+运行目录中，`data/` 保存数据库，`uploads/` 保存上传文件，`extracted/` 保存页面与资源，
+`thumbnails/` 保存预览图，`report-exports/` 保存导出结果。
+维护验证放在 `maintenance/validation/`，历史归档放在 `maintenance/history/`。
+这些内容均属于本地状态，不进入公开源码。
+
+备份时先停止服务，再备份完整运行目录或全部数据挂载目录；只备份数据库不能恢复页面和视频。
+测试数据按独立验证目录清理，避免直接删除正式库的资源目录。
+默认服务仅面向本机；网络部署要求见[安全策略](SECURITY.md)，源码发布边界见[开源说明](docs/OPEN_SOURCE_RELEASE.md)。
+
+## CLI 与 Agent
+
+CLI 调用已经运行的 MineM 服务，可由人或外部 Agent 使用。
+它负责素材操作与结果查询；HTML 内容可由你自己的工具或模型生成。
+本机启动器会安装 CLI，使用前激活项目虚拟环境：
+
+```bash
+source .venv/bin/activate
+minem --help
+
+# 导入一页并等待任务结果
+minem page import ./page.html --name "产品介绍" --wait --output json
+
+# 用真实页面编号替换下方示例值
+minem report create --name "产品汇报" \
+  --page CTRL-PAGE-001 --page CTRL-PAGE-002 --output json
+```
+
+仅使用 Docker 时，可在容器中通过 `docker compose exec minem-platform minem --help`
+调用 CLI。文件导入路径必须能被执行该命令的环境访问。
+支持的命令、`--confirm` 和 JSON 协议见 [CLI 能力范围](docs/MineM_CLI_能力范围.md)，
+HTTP 导入协议见[接口文档](docs/MineM_IMPORT_API.md)。
+
+## 开发与文档
+
+网页使用 React + TypeScript，服务使用 Python + SQLite；浏览器渲染由 Chromium 提供。
+
+| 路径 | 用途 |
+| --- | --- |
+| `frontend/` | 网页交互与样式 |
+| `minem/`、`server.py` | 素材、导入、编排、播放与导出 |
+| `templates/` | 运行模板和默认封面 |
+| `scripts/` | 启动、测试和维护工具 |
+| `desktop/` | 可选完整桌面客户端源码 |
+| `docs/` | 产品、接口、交付与开发文档 |
+
+安装依赖后，基础检查为：
 
 ```bash
 npm run check
-python3 -m compileall -q minem scripts server.py
-python3 scripts/check_public_boundary.py
 python3 scripts/check_repository_docs.py
+python3 scripts/check_public_boundary.py
 python3 scripts/version_control.py check
 ```
 
-涉及真实数据治理的脚本必须先以只读模式运行，只有明确确认后才使用 `--apply`。
+CI 还会执行隔离数据回归、浏览器产品测试和 Docker 镜像内测试。
+只修改文档时无需重启正在运行的服务。
 
-- [文档索引](docs/README.md)
-- [贡献指南](CONTRIBUTING.md)
-- [支持说明](SUPPORT.md)
-- [安全策略](SECURITY.md)
-- [社区行为准则](CODE_OF_CONDUCT.md)
-- [第三方软件声明](THIRD_PARTY_NOTICES.md)
+[文档索引](docs/README.md) · [贡献指南](CONTRIBUTING.md) · [问题支持](SUPPORT.md) · [更新记录](CHANGELOG.md)
 
 ## English
 
-### AI operates the material system instead of only suggesting changes
+MineM is a local-first tool for organizing HTML pages and composing presentations.
+The web app is the main interface. Import HTML or ZIP material, keep page content and
+media together, arrange pages into a report, then play or export the saved result.
+Each page owns its dependencies; reports keep the ordered composition and source
+relationships. Resources are managed inside pages rather than through a separate module.
 
-MineM exposes product capabilities through a stable CLI with JSON output. The
-model interprets intent, extracts documents, and generates page HTML. MineM
-performs the verifiable product operations: safe import, classification, IDs,
-previews, lineage, versions, report arrangement, and real preview URLs.
+### Run
 
-MineM is model-agnostic. Codex, Claude Code, Gemini CLI, or any agent that can
-run shell commands can use the same workflow:
-
-```bash
-# Install the official command; the lightweight launcher also does this
-python3 -m pip install --no-deps -e .
-
-# Import and name an AI-generated page, then wait for the final asset
-minem page import ./generated-page.html \
-  --name "Customer outcome" --wait --output json
-
-# Create a report from existing page material codes
-minem report create --name "2026 Manufacturing Solution" \
-  --page CTRL-PAGE-001 --page CTRL-PAGE-002 --output json
-
-# Insert a page after an existing report page
-minem report page add RPT-20260719-001 \
-  --page CTRL-PAGE-003 --after CTRL-PAGE-001 --confirm --output json
-
-# Replace one report page with a newly created version
-minem report page replace RPT-20260719-001 \
-  --page CTRL-PAGE-001 --with CTRL-PAGE-004 --confirm --output json
-```
-
-`--wait` returns the final asset ID, code, title, and working preview URL.
-`--output json` uses the stable `minem.cli/v1` machine contract, while
-`--confirm` explicitly confirms operations that update a formal report. Asset
-references accept internal IDs, public codes, or MineM URLs. Insert, replace,
-and remove-from-report operations never delete source pages or old versions.
-
-See the [MineM CLI capability scope](docs/MineM_CLI_能力范围.md). The complete
-workflow runs in GitHub CI and creates pages and a report before
-testing insert, replace, and the final public preview.
-
-### Why MineM
-
-Most presentation libraries stop at the file level. Reports are scattered
-across folders, the same page is copied repeatedly, and source and version
-history disappear over time. MineM moves the unit of management from files to
-pages and resources, so every presentation can become reusable material for
-the next one.
-
-- **Reports become page-level assets:** importing a multi-page HTML or ZIP
-  package keeps the complete report while creating correctly classified,
-  independent page materials.
-- **Lineage stays visible:** reports, pages, cases, and resources preserve
-  reference and generation relationships.
-- **Arrangement is non-destructive:** reorder, insert, or hide pages without
-  deleting page materials or replacing existing versions.
-- **Preview behavior is consistent:** one canvas-fitting, navigation,
-  fullscreen, refresh, and link-opening model handles different sources.
-- **Your data remains local:** SQLite data and imported materials stay on the
-  machine by default, with no cloud account or implicit directory scanning.
-- **Automation remains optional:** CLI, Agent runtime, and governance tools can
-  power AI workflows while preserving explicit confirmation boundaries.
-
-### What MineM is not
-
-MineM is not another slide drawing application, and it does not flatten every
-page into a screenshot. It is the material system between existing content and
-new presentation delivery. Original HTML, images, video, GIF, and other media
-can remain part of the page.
-
-### Designed for
-
-| Scenario | Value |
-| --- | --- |
-| Recurring business, project, or client reports | Find and reuse strong pages from previous work |
-| Teams maintaining brand, product, or consulting content | Share one entry point, preview model, lineage, and version history |
-| Reports assembled from several projects | Insert, reorder, and hide pages non-destructively |
-| External HTML reports entering an internal library | Preserve the full report and create independent page materials |
-| Privacy-sensitive or local-only environments | Run without a cloud account and control every data directory |
-| AI or CLI-driven material operations | Use structured import, create, replace, and governance capabilities |
-
-### Core capabilities
-
-| Capability | Description |
-| --- | --- |
-| Reports | Preview, favorite, arrange, rename, and export complete multi-page reports |
-| Pages | Keep each record to one page, with independent viewing, search, reuse, and versions |
-| Cases | Organize related case pages into reusable case groups |
-| Resources | Manage image, video, GIF, and Logo dependencies with duplicate and version handling |
-| Unified preview | Apply one canvas, navigation, fullscreen, refresh, and copy-link model |
-| Arrangement | Reorder, insert, or hide pages and apply the confirmed result to the real report |
-| Delivery | Export standalone HTML packages or stable, fully loaded PDF output |
-| Governance | Audit duplicates, invalid paths, wrong hierarchy, missing resources, and broken previews |
-| Desktop access | Build the macOS client and quick-command window from source |
-
-### Start in five minutes
-
-#### Lightweight local startup
-
-Install Python 3.12 and Node.js `^20.19.0` or `>=22.12.0`, then run:
-
-```bash
-git clone https://github.com/Jo-Tsu/minem.git
-cd minem
-./start.sh
-```
-
-The launcher creates `.venv` when needed, installs dependencies, builds the
-frontend, starts MineM, and opens <http://127.0.0.1:8790/>.
-
-#### Docker
+With Docker and Compose installed:
 
 ```bash
 git clone https://github.com/Jo-Tsu/minem.git
@@ -359,76 +240,41 @@ cd minem
 docker compose up -d --build
 ```
 
-Docker starts with an empty library and scans no host directory. To mount an
-external source, copy `docker-compose.override.example.yml` to
-`docker-compose.override.yml` and set `MINEM_IMPORT_ROOT` explicitly. The
-source is mounted read-only.
+Open [http://127.0.0.1:8790/](http://127.0.0.1:8790/). The image includes Python,
+Chromium and fonts. It starts with an empty library and does not scan host folders.
+Use `docker compose down` to stop it while keeping the bind-mounted data.
 
-#### Manual startup
+Alternatively, install Python 3.10+ (3.12 recommended), a supported Node.js version
+(20.19+ on Node 20, or 22.12+), and Chromium or Chrome, then run
+`./start.sh --data-dir ./runtime`. The launcher installs dependencies, builds the
+frontend and opens the browser. Runtime data stays under `runtime/`.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 -m pip install --no-deps -e .
-npm ci
-npm run build
-python3 server.py
-```
+### Use
 
-### Data and privacy
+Import material, create a report with a cover and selected pages, arrange it, and
+save before playback or export. A successful save offers a link to the updated report;
+further changes can be saved again. HTML ZIP preserves media and interaction, while
+PDF is a static reading copy. Missing required dependencies block offline delivery.
 
-MineM separates source code from runtime data. `data/`, `uploads/`,
-`extracted/`, `thumbnails/`, `report-exports/`, and `artifacts/` are local
-state and are excluded from Git and the public Docker build context.
+Feishu folder import accepts up to eight links per submission. It requires a logged-in
+host `lark-cli` worker and a shared queue directory. For default Docker deployments,
+mount `./runtime/drive-imports` at `/app/drive-imports`; the host worker uses the former.
+Online documents and slides must first be exported to a compatible HTML package.
+See the [setup above](#飞书链接导入), [import API](docs/MineM_IMPORT_API.md) and
+[delivery standard](docs/MineM_EXPORT_STANDARD.md) for requirements and limits.
 
-The repository contains no user database, customer content, imported report,
-generated preview, model weight, audio, desktop installer, or machine-local
-path configuration. See the [release boundary](docs/OPEN_SOURCE_RELEASE.md).
+The CLI is available to external agents as well as people; run `minem --help` or
+`docker compose exec minem-platform minem --help`. Back up the database and material
+directories together with the service stopped. User data, private covers and machine
+configuration are excluded from the public source tree.
 
-### Open-source commitment
+[Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-MineM is not an Open Core product that requires a license key to unlock the
-platform. The source in this repository is available under the
-[Apache License 2.0](LICENSE). Anyone may use it for personal or commercial
-work, modify it, self-host it privately, and redistribute it without a MineM
-account, paid subscription, or separate permission. Standard Apache-2.0
-license and notice preservation requirements still apply.
+## License
 
-### Repository layout
+源码依据 [Apache License 2.0](LICENSE) 发布，支持个人与商业使用、修改和再分发；
+分发时保留许可证与相关声明。商标与第三方素材的权利以各自条款为准。
 
-| Path | Purpose |
-| --- | --- |
-| `frontend/` | React and TypeScript frontend source |
-| `minem/` | Python domain modules and data access |
-| `server.py` | Local HTTP service and compatibility routes |
-| `desktop/` | macOS desktop client and quick-command window source |
-| `scripts/` | Tests, validation, governance, versioning, and CLI tools |
-| `docs/` | Product, technical, design, testing, and release documents |
-
-### Development and contribution
-
-```bash
-npm run check
-python3 -m compileall -q minem scripts server.py
-python3 scripts/check_public_boundary.py
-python3 scripts/check_repository_docs.py
-python3 scripts/version_control.py check
-```
-
-Run data-governance tools in read-only mode first. Use `--apply` only after
-reviewing the proposed changes.
-
-- [Documentation index](docs/README.md)
-- [Contributing guide](CONTRIBUTING.md)
-- [Support](SUPPORT.md)
-- [Security policy](SECURITY.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Third-party notices](THIRD_PARTY_NOTICES.md)
-
-## 许可证 / License
-
-MineM 源码依据 [Apache License 2.0](LICENSE) 发布，可免费用于个人与商业用途，
-也可修改、私有部署和再发布。MineM source code is available under the
-[Apache License 2.0](LICENSE) for personal use, commercial use, modification,
-private deployment, and redistribution.
+Source code is available under [Apache License 2.0](LICENSE) for personal and
+commercial use, modification and redistribution, subject to its license and notice
+requirements. Trademarks and third-party content retain their respective terms.
