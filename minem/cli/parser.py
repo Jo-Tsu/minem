@@ -43,9 +43,6 @@ def normalize_argv(argv: list[str]) -> tuple[list[str], list[str]]:
     if len(command) >= 2 and command[:2] == ["page", "create"]:
         command[1] = "import"
         warnings.append("page create is deprecated; use page import")
-    if len(command) >= 2 and command[:2] == ["case", "create"]:
-        command[1] = "import"
-        warnings.append("case create is deprecated; use case import")
     if len(command) >= 3 and command[:2] == ["report", "page"] and command[2] not in PAGE_ACTIONS:
         report = command[2]
         if "--add" in command:
@@ -157,13 +154,6 @@ def build_parser() -> MineMParser:
     page_import = page_actions.add_parser("import", aliases=["create"])
     _add_import_options(page_import)
     page_import.set_defaults(handler=lambda ctx, args: commands.import_material(ctx, args, "page"), command_name="page.import")
-
-    case = resources.add_parser("case", help="Import deterministic case page material")
-    case_actions = case.add_subparsers(dest="case_command", required=True)
-    case_import = case_actions.add_parser("import", aliases=["create"])
-    _add_import_options(case_import)
-    case_import.add_argument("--industry")
-    case_import.set_defaults(handler=commands.case_import, command_name="case.import")
 
     task = resources.add_parser("task", help="Inspect asynchronous import tasks")
     task_actions = task.add_subparsers(dest="task_action", required=True)

@@ -32,15 +32,16 @@ def _relative_source_url(target: Path, source: Path) -> str:
 
 
 def _derived_html(source_url: str, title: str, target_width: int, target_height: int, source_width: int, source_height: int) -> str:
-    scale_x = target_width / max(source_width, 1)
-    scale_y = target_height / max(source_height, 1)
+    scale = min(target_width / max(source_width, 1), target_height / max(source_height, 1))
+    left = (target_width - source_width * scale) / 2
+    top = (target_height - source_height * scale) / 2
     return f"""<!doctype html>
 <html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>{html.escape(title, quote=True)}</title>
 <style>
 html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#030712}}
 .material-control-stage{{position:relative;width:{target_width}px;height:{target_height}px;overflow:hidden;background:#030712}}
-.minem-normalized-source{{position:absolute;inset:0;width:{source_width}px;height:{source_height}px;border:0;transform:scale({scale_x:.10f},{scale_y:.10f});transform-origin:top left}}
+.minem-normalized-source{{position:absolute;left:{left:.4f}px;top:{top:.4f}px;width:{source_width}px;height:{source_height}px;border:0;transform:scale({scale:.10f});transform-origin:top left}}
 </style></head><body>
 <main class=\"material-control-stage\" data-minem-normalized-canvas=\"true\"><iframe class=\"minem-normalized-source\" src=\"{html.escape(source_url, quote=True)}\" title=\"{html.escape(title, quote=True)}\"></iframe></main>
 <script>const DESIGN_W={target_width};const DESIGN_H={target_height};</script>
@@ -56,7 +57,6 @@ def normalize_report_page_canvases(
     now_ms,
     next_candidate_asset_code,
     next_asset_version_no,
-    merge_tags,
     read_text_sample,
 ):
     """Create/reuse report-targeted control versions and repoint only this report's slots."""
@@ -154,7 +154,6 @@ def normalize_report_page_canvases(
         if not normalized:
             code = next_candidate_asset_code(conn, source["asset_code"])
             version_group = source["version_group"] or source["id"]
-            tags = merge_tags(source["tags"], ["汇报尺寸适配", f"目标画布:{target_width}x{target_height}"])
             conn.execute(
                 """
                 insert into assets
@@ -165,7 +164,7 @@ def normalize_report_page_canvases(
                     normalized_id,
                     source["title"],
                     f"为汇报 {report['asset_code']} 适配 {target_width}×{target_height} 画布的页面版本。",
-                    ",".join(tags),
+                    "",
                     read_text_sample(target),
                     code,
                     rel,

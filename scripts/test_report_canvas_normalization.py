@@ -66,7 +66,7 @@ def main():
         insert_asset(conn, "control-1", "control", "upload-1", "pages/page.html", "control-hash", code="CTRL-TEST-001")
         conn.execute("insert into report_page_slots values ('report-1',1,'page','attached','control-1','','',?,?)", (now_ms(), now_ms()))
         conn.commit()
-        args = dict(extracted_root=root, detect_dimensions=detect_html_dimensions, now_ms=now_ms, next_candidate_asset_code=next_code, next_asset_version_no=next_version, merge_tags=tags, read_text_sample=lambda path: Path(path).read_text(encoding="utf-8")[:500])
+        args = dict(extracted_root=root, detect_dimensions=detect_html_dimensions, now_ms=now_ms, next_candidate_asset_code=next_code, next_asset_version_no=next_version, read_text_sample=lambda path: Path(path).read_text(encoding="utf-8")[:500])
         first = normalize_report_page_canvases(conn, "report-1", **args)
         assert first["normalized"] == 1 and len(first["created"]) == 1, first
         normalized_id = conn.execute("select control_id from report_page_slots where report_id = 'report-1'").fetchone()[0]

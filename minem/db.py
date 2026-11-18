@@ -105,31 +105,12 @@ create table if not exists asset_history (
   captured_at integer not null
 );
 
-create table if not exists report_storyline_collections (
-  id text primary key,
-  code text not null default '',
-  title text not null default '',
-  source_report_id text not null,
-  source_report_code text not null default '',
-  output_report_id text not null,
-  output_report_code text not null default '',
-  target_report_id text not null default '',
-  mode text not null default 'collection',
-  note text not null default '',
-  tags text not null default '',
-  version_group text not null default '',
-  version_no integer not null default 1,
-  version_parent_id text not null default '',
-  created_at integer not null,
-  updated_at integer not null
-);
 """
 
 
 def connect_database(db_path, *, timeout=5):
     conn = sqlite3.connect(Path(db_path), timeout=timeout)
     conn.row_factory = sqlite3.Row
-    conn.execute("pragma busy_timeout = 5000")
     conn.execute("pragma foreign_keys = on")
     return conn
 
@@ -203,19 +184,7 @@ def ensure_asset_schema(conn):
     conn.execute("create unique index if not exists idx_report_page_candidates_unique on report_page_candidates(report_id, page_number, control_id)")
     conn.execute("create index if not exists idx_report_page_candidates_report on report_page_candidates(report_id, page_number, status)")
     conn.execute("create index if not exists idx_report_page_candidates_control on report_page_candidates(control_id)")
-    conn.execute("create index if not exists idx_report_storyline_source on report_storyline_collections(source_report_id)")
-    conn.execute("create index if not exists idx_report_storyline_output on report_storyline_collections(output_report_id)")
-    conn.execute("create index if not exists idx_report_storyline_target on report_storyline_collections(target_report_id)")
-    storyline_columns = table_columns(conn, "report_storyline_collections")
-    if "version_group" not in storyline_columns:
-        conn.execute("alter table report_storyline_collections add column version_group text not null default ''")
-    if "version_no" not in storyline_columns:
-        conn.execute("alter table report_storyline_collections add column version_no integer not null default 1")
-    if "version_parent_id" not in storyline_columns:
-        conn.execute("alter table report_storyline_collections add column version_parent_id text not null default ''")
-    conn.execute("create index if not exists idx_report_storyline_version_group on report_storyline_collections(version_group, version_no)")
     conn.execute("update assets set version_group = id where version_group = ''")
-    conn.execute("update report_storyline_collections set version_group = id where version_group = ''")
 
 
 def ensure_upload_schema(conn):
@@ -235,31 +204,15 @@ def run_compat_migrations(conn):
     conn.execute("create index if not exists idx_report_page_normalizations_control on report_page_normalizations(normalized_control_id)")
     conn.execute("update assets set asset_type = 'report' where asset_type = 'page'")
     conn.execute("update assets set asset_code = replace(asset_code, 'PAGE-', 'RPT-') where asset_code like 'PAGE-%'")
-    conn.execute("update assets set tags = replace(tags, '页面素材', '汇报素材') where tags like '%页面素材%'")
-    legacy_storyline_outputs = """
-        select output_report_id
-        from report_storyline_collections
-        where output_report_id <> ''
-          and output_report_id in (
-            select id from assets where source_type = 'storyline-collection'
-          )
-    """
-    conn.execute(f"delete from asset_history where asset_id in ({legacy_storyline_outputs})")
-    conn.execute(f"delete from report_page_slots where report_id in ({legacy_storyline_outputs})")
-    conn.execute(f"delete from report_page_candidates where report_id in ({legacy_storyline_outputs})")
-    conn.execute(f"delete from assets where id in ({legacy_storyline_outputs})")
     conn.execute(
-        """
-        update report_storyline_collections
-        set output_report_id = '',
-            output_report_code = '',
-            target_report_id = '',
-            mode = 'collection',
-            tags = replace(replace(tags, ',新汇报', ''), ',版本', '')
-        where output_report_id <> ''
-          and output_report_id not in (select id from assets)
-        """
+        """update assets set source_type = 'created-report'
+           where asset_type = 'report' and source_type in ('storyline-report-manual', 'storyline-report-chat')"""
     )
+    if conn.execute("select 1 from sqlite_master where name = 'report_storyline_collections' and type = 'table'").fetchone():
+        if conn.execute("select 1 from report_storyline_collections limit 1").fetchone():
+            conn.execute("alter table report_storyline_collections rename to retired_report_storyline_collections")
+        else:
+            conn.execute("drop table report_storyline_collections")
 
 
 def ensure_storage_dirs(*paths):

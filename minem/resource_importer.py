@@ -73,11 +73,6 @@ def sync_report_package_resources(
     file_hash,
     find_existing_asset,
     resource_kind_for,
-    merge_tags,
-    resource_kinds,
-    suggest_material_tags,
-    normalize_role_tags,
-    apply_company_logo_metadata,
     slugify,
     next_asset_code,
     now_ms,
@@ -99,13 +94,6 @@ def sync_report_package_resources(
         ).fetchone()
         title = file_path.stem.replace("-", " ").replace("_", " ").strip() or file_path.name
         resource_kind = resource_kind_for(file_path, media_kind, title, "")
-        tags = merge_tags(
-            path_existing["tags"] if path_existing else "",
-            ["资源素材", "汇报资源", report_code, report_title, resource_kinds.get(resource_kind, resource_kind), "自动同步"],
-            suggest_material_tags(" ".join([title, rel, report_title]), resource_kind),
-        )
-        tags = normalize_role_tags(tags, "resource", resource_kind, " ".join([title, rel]))
-        title, tag_text = apply_company_logo_metadata(title, ",".join(tags), rel, f"从汇报素材 {report_code} 自动同步", resource_kind)
         if content_existing and (not path_existing or content_existing["id"] != path_existing["id"]):
             usage = content_existing["usage"] or ""
             if report_code not in usage:
@@ -113,7 +101,7 @@ def sync_report_package_resources(
             conn.execute(
                 "update assets set tags = ?, usage = ?, updated_at = ? where id = ?",
                 (
-                    ",".join(merge_tags(content_existing["tags"], tag_text, ["复用资源"])),
+                    "",
                     usage,
                     now_ms(),
                     content_existing["id"],
@@ -145,7 +133,7 @@ def sync_report_package_resources(
                 asset_id,
                 title,
                 f"从汇报素材 {report_code} 自动同步的基础资源。",
-                tag_text,
+                "",
                 asset_code,
                 media_kind,
                 resource_kind,

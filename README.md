@@ -69,10 +69,6 @@ minem report page add RPT-20260719-001 \
 # 4. 修改某页时创建新页面版本，再替换当前汇报中的旧页
 minem report page replace RPT-20260719-001 \
   --page CTRL-PAGE-001 --with CTRL-PAGE-004 --confirm --output json
-
-# 5. 将已整理的 Markdown 确定性导入为案例页面；内容提炼由模型先完成
-minem case import ./customer-story.md \
-  --name "制造业协同案例" --industry 制造业 --wait --output json
 ```
 
 `--wait` 会等待导入完成，并返回最终素材 ID、编号、名称和可访问预览链接；
@@ -81,7 +77,7 @@ minem case import ./customer-story.md \
 原始页面和旧版本不会因插入、替换或移出汇报而被删除。
 
 完整命令边界见 [MineM CLI 能力范围](docs/MineM_CLI_能力范围.md)。这套端到端链路
-已经进入 GitHub CI，每次提交都会真实创建页面与案例、生成汇报、插入和替换页面，
+已经进入 GitHub CI，每次提交都会真实创建页面、生成汇报、插入和替换页面，
 并验证正式预览链接。
 
 ### 为什么需要 MineM
@@ -129,8 +125,7 @@ MineM 不是另一套 PPT 绘图工具，也不是把所有页面重新截图保
 | 汇报素材 | 保存完整多页汇报，支持预览、收藏、编排、重命名和导出 |
 | 页面素材 | 每条记录严格对应一页，可独立查看、搜索、复用和管理版本 |
 | 案例素材 | 将多个相关案例页面组织成案例组，并可插入新的汇报 |
-| 资源素材 | 管理图片、视频、GIF、Logo 等页面依赖，识别重复内容和版本 |
-| 故事线 | 将汇报收藏为可查看、可保留历史版本的叙事线索 |
+| 页面资源封装 | 图片、视频、GIF、Logo 等依赖随页面封装，资源模块不单独展示 |
 | 统一预览 | 统一尺寸适配、翻页、全屏、刷新和链接复制入口 |
 | 汇报编排 | 调整顺序、批量插入或隐藏页面，确认后应用到真实汇报链接 |
 | 导出交付 | 导出可独立打开的 HTML 包或等待页面稳定后的 PDF |
@@ -164,6 +159,22 @@ Docker 默认使用空素材库，不扫描任何本机目录。需要导入外�
 `docker-compose.override.example.yml` 为 `docker-compose.override.yml`，并显式
 设置 `MINEM_IMPORT_ROOT`。来源目录将以只读方式挂载。
 
+如需导入飞书云空间文件夹，在本机登录 `lark-cli` 后运行
+`./scripts/start_drive_import_worker.sh`，再在导入弹窗选择「飞书链接」。
+飞书制作项目中的 `output/index.html` 可直接导入，平台会下载该入口引用的播放资源。
+本机重启后，重新运行该脚本即可恢复飞书链接导入。
+提交成功后任务会在后台继续，刷新页面或重启网页服务后可按原任务 ID 查询。
+
+#### 恢复环境启动
+
+此目录的本地 Docker 配置使用 `minem-platform:stable-web`。
+在 macOS 运行 `./scripts/install_macos_launcher.sh` 可在桌面创建「MineM」快捷入口。
+双击会按需启动 Docker 和 MineM，再用默认浏览器打开网页。服务未运行时显示可关闭的“正在打开”窗口，就绪后自动消失；关闭提示不取消后台启动。服务已运行时直接打开网页。项目目录移动后重新运行安装脚本。
+使用 `docker build -f Dockerfile -t minem-platform:stable-web .` 更新后端时，构建会从当前源码完整生成前后端产物。
+可选：本机已有验证过的 Python/Chromium 运行镜像时，通过 `--build-arg MINEM_RUNTIME_BASE=镜像名` 复用系统依赖；应用代码仍会清空并从当前源码完整重建。`Dockerfile.recovered` 是同一构建文件的兼容入口。
+运行 `docker compose up -d --no-build` 启动网页。需要飞书链接导入时，再运行
+`./scripts/start_drive_import_worker.sh`。本地运行与后续启动统一使用该镜像。
+
 #### 手工启动
 
 ```bash
@@ -176,7 +187,13 @@ npm run build
 python3 server.py
 ```
 
+默认封面为无品牌几何背景。个人封面可放到运行目录的 `config/report-covers/cover-1.webp` 至 `cover-3.webp`，不会上传到源码仓库。已创建汇报仍保留各自封装的封面。
+
 ### 数据与隐私
+
+运行目录的 `maintenance/` 集中保存维护资料。`maintenance/validation/`
+存放隔离验证库和测试报告，`maintenance/history/` 存放历史归档、备份和版本快照。
+清理测试时按单次运行目录处理，归档可继续复用。
 
 MineM 采用源码与运行数据分离的结构。首次启动创建的 `data/`、`uploads/`、
 `extracted/`、`thumbnails/`、`report-exports/` 和 `artifacts/` 都是本地状态，
@@ -200,7 +217,6 @@ MineM 不是需要许可证密钥才能解锁功能的 Open Core 项目。仓库
 | `minem/` | Python 领域模块与数据访问 |
 | `server.py` | 本地 HTTP 服务入口和兼容路由 |
 | `desktop/` | macOS 桌面客户端与快捷浮窗源码 |
-| `templates/` | 平台运行时 HTML 模板 |
 | `scripts/` | 测试、校验、治理、版本和 CLI 工具 |
 | `docs/` | 产品、技术、设计、测试与发布文档 |
 
@@ -254,10 +270,6 @@ minem report page add RPT-20260719-001 \
 # Replace one report page with a newly created version
 minem report page replace RPT-20260719-001 \
   --page CTRL-PAGE-001 --with CTRL-PAGE-004 --confirm --output json
-
-# Import model-refined Markdown as deterministic case page material
-minem case import ./customer-story.md \
-  --name "Manufacturing collaboration case" --wait --output json
 ```
 
 `--wait` returns the final asset ID, code, title, and working preview URL.
@@ -267,7 +279,7 @@ references accept internal IDs, public codes, or MineM URLs. Insert, replace,
 and remove-from-report operations never delete source pages or old versions.
 
 See the [MineM CLI capability scope](docs/MineM_CLI_能力范围.md). The complete
-workflow runs in GitHub CI and creates pages, case material, and a report before
+workflow runs in GitHub CI and creates pages and a report before
 testing insert, replace, and the final public preview.
 
 ### Why MineM
@@ -318,7 +330,6 @@ can remain part of the page.
 | Pages | Keep each record to one page, with independent viewing, search, reuse, and versions |
 | Cases | Organize related case pages into reusable case groups |
 | Resources | Manage image, video, GIF, and Logo dependencies with duplicate and version handling |
-| Storylines | Preserve report collections as viewable, versioned narrative threads |
 | Unified preview | Apply one canvas, navigation, fullscreen, refresh, and copy-link model |
 | Arrangement | Reorder, insert, or hide pages and apply the confirmed result to the real report |
 | Delivery | Export standalone HTML packages or stable, fully loaded PDF output |
@@ -392,7 +403,6 @@ license and notice preservation requirements still apply.
 | `minem/` | Python domain modules and data access |
 | `server.py` | Local HTTP service and compatibility routes |
 | `desktop/` | macOS desktop client and quick-command window source |
-| `templates/` | Runtime HTML templates |
 | `scripts/` | Tests, validation, governance, versioning, and CLI tools |
 | `docs/` | Product, technical, design, testing, and release documents |
 

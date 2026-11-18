@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{{TITLE}}</title>
+  <style>
+    :root{color-scheme:dark;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(120% 100% at 50% 50%,#101b33,#050916 62%,#02040a);color:#fff}
+    .viewer{position:fixed;inset:0;display:grid;place-items:center;overflow:hidden}
+    .canvas{position:relative}
+    .canvas[aria-busy="true"]{pointer-events:none}
+    .page-frame{position:absolute;inset:0;border:0;transform-origin:0 0;background:#050916}
+    .page-frame[hidden]{display:block!important;visibility:hidden;pointer-events:none}
+    .controls,.tools{position:fixed;display:flex;align-items:center;gap:4px;padding:4px;border:1px solid #8396b761;border-radius:12px;background:#101a2bed}
+    .controls{left:50%;bottom:max(12px,env(safe-area-inset-bottom));transform:translateX(-50%)}
+    .tools{right:max(12px,env(safe-area-inset-right));top:max(12px,env(safe-area-inset-top))}
+    button,input{color:inherit;font:inherit}
+    button{min-width:34px;min-height:34px;border:0;border-radius:8px;background:none;padding:0 8px;cursor:pointer}
+    button:hover:not(:disabled){background:#293959}
+    button:disabled{opacity:.35;cursor:default}
+    button:focus-visible,input:focus-visible{outline:2px solid #a5c7ff;outline-offset:2px}
+    form{display:flex;align-items:center;gap:3px;padding:0 4px;font-variant-numeric:tabular-nums;font-size:14px}
+    input{width:3ch;border:1px solid transparent;border-radius:5px;background:#24354e;text-align:center;padding:3px;box-sizing:content-box}
+    .notice{position:fixed;bottom:58px;left:50%;transform:translateX(-50%);padding:8px 14px;background:#101a2b;color:#fff;border-radius:8px}
+    .page-loading{position:fixed;inset:0;display:grid;place-items:center;background:#02040a40;pointer-events:none}
+    .loading-card{display:flex;align-items:center;gap:12px;padding:16px 22px;border:1px solid #8396b761;border-radius:14px;background:#101a2bf2;box-shadow:0 8px 32px #0005;font-size:16px}
+    .loading-spinner{width:20px;height:20px;border:2px solid #8396b750;border-top-color:#d6e7ff;border-radius:50%;animation:loading-spin .8s linear infinite}
+    @keyframes loading-spin{to{transform:rotate(360deg)}}
+    @media(prefers-reduced-motion:reduce){.loading-spinner{animation:none}}
+    [hidden],html[data-embed] .tools,html[data-cover] :is(.controls,.tools){display:none!important}
+  </style>
+</head>
+<body>
+  <main class="viewer" aria-label="{{TITLE}}">
+    <p id="empty" hidden>当前汇报没有可见页面</p>
+    <div class="canvas" aria-busy="false"></div>
+    <div id="page-loading" class="page-loading" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <div class="loading-card"><span class="loading-spinner" aria-hidden="true"></span><span id="loading-text"></span></div>
+    </div>
+    <nav class="controls" aria-label="播放控制">
+      <button type="button" id="previous" aria-label="上一页" title="上一页（←）">‹</button>
+      <form id="jump"><input id="page" aria-label="跳转到页码" inputmode="numeric" autocomplete="off"><span id="total"></span></form>
+      <button type="button" id="next" aria-label="下一页" title="下一页（→ / 空格）">›</button>
+      <button type="button" id="fullscreen" aria-label="全屏" title="全屏（F）">⛶</button>
+    </nav>
+    <div class="tools" aria-label="链接工具">
+      <button type="button" id="copy">复制本页链接</button>
+      <button type="button" id="reload">刷新</button>
+    </div>
+    <output class="notice" role="status" hidden></output>
+  </main>
+  <script type="application/json" id="player-data">{{DATA}}</script>
+  <script>
+    const {pages, releaseUrl} = JSON.parse(document.querySelector("#player-data").textContent);
+    const canvas = document.querySelector(".canvas");
+    const frames = new Map();
+    let frame;
+    const pageInput = document.querySelector("#page");
+    const previous = document.querySelector("#previous");
+    const next = document.querySelector("#next");
+    const fullscreen = document.querySelector("#fullscreen");
+    const notice = document.querySelector(".notice");
+    const loading = document.querySelector("#page-loading");
+    const loadingText = document.querySelector("#loading-text");
+    const options = new URLSearchParams(location.search);
+    if (options.get("embed") === "1") document.documentElement.dataset.embed = "1";
+    if (options.get("cover") === "1") document.documentElement.dataset.cover = "1";
+    let index = -1;
+    let noticeTimer;
+    let preloadTimer;
+    let loadingTimer;
+    const localFile = location.protocol === "file:";
+
+    function setLoading(position = null) {
+      clearTimeout(loadingTimer);
+      canvas.setAttribute("aria-busy", String(position !== null));
+      if (position === null) { loading.hidden = true; return; }
+      loadingText.textContent = "正在加载第 " + (position + 1) + " 页…";
+      // Already loaded pages switch immediately; only a noticeable wait needs a veil.
+      if (loading.hidden) loadingTimer = setTimeout(() => {
+        if (index === position && !frames.get(position)?.ready) loading.hidden = false;
+      }, 180);
+    }
+
+    function fitPage() {
+      const page = pages[Number(frame?.dataset.playerPage)];
+      if (!page) return;
+      const scale = Math.min(innerWidth / page.width, innerHeight / page.height);
+      canvas.style.width = page.width * scale + "px";
+      canvas.style.height = page.height * scale + "px";
+      frame.style.width = page.width + "px";
+      frame.style.height = page.height + "px";
+      frame.style.transform = "scale(" + scale + ")";
+    }
+    function setPageActive(state, active) {
+      state.frame.hidden = !active;
+      state.frame.classList.toggle("deck-frame", active);
+      try {
+        const doc = state.frame.contentDocument;
+        if (!doc) return;
+        for (const media of doc.querySelectorAll("video,audio")) {
+          if (!active) {
+            if (!media.paused || media.dataset.minemPlayerResume) state.playing.add(media);
+            media.pause();
+          } else if (state.playing.has(media) || media.dataset.minemPlayerResume || media.autoplay) {
+            delete media.dataset.minemPlayerResume;
+            media.play().catch(() => {});
+          }
+        }
+        for (const animation of doc.getAnimations()) {
+          if (!active && animation.playState === "running") {
+            state.animations.add(animation);
+            animation.pause();
+          } else if (active && state.animations.has(animation)) animation.play();
+        }
+        doc.documentElement.toggleAttribute("data-minem-player-paused", !active);
+        if (active) { state.playing.clear(); state.animations.clear(); }
+      } catch {}
+    }
+    function activatePage(position, state) {
+      if (position !== index || frames.get(position) !== state) return;
+      if (state.ready) setLoading();
+      if (frame && frame !== state.frame) {
+        const previousPosition = Number(frame.dataset.playerPage);
+        setPageActive(frames.get(previousPosition), false);
+        if (localFile) { frame.remove(); frames.delete(previousPosition); }
+      }
+      frame = state.frame;
+      setPageActive(state, true);
+      fitPage();
+      for (const [number, cached] of frames) {
+        if (Math.abs(number - index) > 1) {
+          cached.frame.remove();
+          frames.delete(number);
+        }
+      }
+      clearTimeout(preloadTimer);
+      if (state.ready && !localFile) preloadTimer = setTimeout(() => {
+        loadPage(index + 1);
+        loadPage(index - 1);
+      }, 150);
+    }
+    function loadPage(position) {
+      if (!pages[position]) return;
+      if (frames.has(position)) return frames.get(position);
+      // Keep only three documents; a distant jump retains the visible page until ready.
+      if (frames.size >= 3) {
+        const [oldPosition, oldState] = [...frames].find(([number, state]) => number !== index && state.frame !== frame);
+        oldState.frame.remove();
+        frames.delete(oldPosition);
+      }
+      const page = pages[position];
+      const element = document.createElement("iframe");
+      element.className = "page-frame";
+      element.dataset.playerPage = position;
+      element.hidden = true;
+      element.title = page.title;
+      element.allow = "fullscreen";
+      element.allowFullscreen = true;
+      element.style.width = page.width + "px";
+      element.style.height = page.height + "px";
+      const state = {frame: element, ready: false, playing: new Set(), animations: new Set()};
+      frames.set(position, state);
+      element.addEventListener("load", async () => {
+        const doc = element.contentDocument;
+        try {
+          doc.addEventListener("keydown", keyboard, true);
+          doc.addEventListener("play", event => {
+            if (element.hidden) { state.playing.add(event.target); event.target.pause(); }
+          }, true);
+          await Promise.all([doc.fonts.ready, ...[...doc.images].map(image => image.decode().catch(() => {}))]);
+        } catch {}
+        if (element.contentDocument !== doc) return;
+        state.ready = true;
+        if (frames.get(position) !== state) return;
+        if (position === index) activatePage(position, state);
+        else setPageActive(state, false);
+      });
+      const url = new URL(page.src, location.href);
+      url.searchParams.set("embed", "1");
+      element.src = url.href;
+      canvas.append(element);
+      return state;
+    }
+    function fromHash() {
+      const raw = location.hash.slice(1);
+      if (/^\d+$/.test(raw)) return Number(raw) - 1;
+      if (raw.startsWith("p=")) {
+        try { return Math.max(0, pages.findIndex(page => page.id === decodeURIComponent(raw.slice(2)))); }
+        catch { return 0; }
+      }
+      return 0;
+    }
+    function showPage(position, updateHash = true) {
+      if (!pages.length) return;
+      const nextIndex = Math.max(0, Math.min(position, pages.length - 1));
+      pageInput.value = String(nextIndex + 1).padStart(2, "0");
+      if (index !== nextIndex) {
+        index = nextIndex;
+        clearTimeout(preloadTimer);
+        const state = loadPage(index);
+        if (!state.ready) setLoading(index);
+        if (state.ready || !frame) activatePage(index, state);
+        previous.disabled = index === 0;
+        next.disabled = index === pages.length - 1;
+      }
+      if (updateHash) {
+        const url = new URL(location.href);
+        url.hash = String(index + 1);
+        history.replaceState(null, "", url.href);
+      }
+    }
+    async function toggleFullscreen() {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    }
+    function keyboard(event) {
+      const key = event.key.toLowerCase();
+      const field = event.target.closest?.("input,textarea,select,button,a,[contenteditable],video,audio");
+      const playerButton = field === previous || field === next || field === fullscreen;
+      const navigationKey = ["arrowleft", "arrowright", "pageup", "pagedown", "home", "end", "f"].includes(key);
+      if (event.defaultPrevented || (field && !(playerButton && navigationKey)) || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (key === "f") toggleFullscreen().catch(() => {});
+      else if (key === "arrowleft" || key === "pageup") showPage(index - 1);
+      else if (key === "arrowright" || key === "pagedown" || key === " ") showPage(index + 1);
+      else if (key === "home") showPage(0);
+      else if (key === "end") showPage(pages.length - 1);
+      else return;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    document.querySelector("#total").textContent = "/ " + pages.length;
+    document.querySelector("#empty").hidden = Boolean(pages.length);
+    for (const bar of document.querySelectorAll(".controls,.tools")) bar.hidden = !pages.length;
+    showPage(fromHash(), false);
+    addEventListener("hashchange", () => showPage(fromHash(), false));
+    addEventListener("resize", fitPage);
+    addEventListener("keydown", keyboard);
+    addEventListener("message", event => {
+      if (!['minem-player-ready', 'minem-player-key'].includes(event.data?.type)) return;
+      for (const [position, state] of frames) {
+        if (event.source !== state.frame.contentWindow) continue;
+        const address = new URL(state.frame.src); address.hash = '';
+        if (event.data.href !== address.href) return;
+        if (event.data.type === 'minem-player-ready') {
+          state.ready = true;
+          if (position === index) activatePage(position, state);
+          else setPageActive(state, false);
+        } else if (state.frame === frame && typeof event.data.key === 'string') {
+          keyboard({key:event.data.key, target:document.body, preventDefault(){}, stopPropagation(){}});
+        }
+        return;
+      }
+    });
+    previous.onclick = () => showPage(index - 1);
+    next.onclick = () => showPage(index + 1);
+    document.querySelector("#jump").onsubmit = event => {
+      event.preventDefault();
+      const number = Number(pageInput.value);
+      showPage(Number.isInteger(number) && number > 0 ? number - 1 : index);
+      pageInput.blur();
+    };
+    fullscreen.onclick = () => toggleFullscreen().catch(() => {});
+    document.addEventListener("fullscreenchange", () => {
+      const label = document.fullscreenElement ? "退出全屏" : "全屏";
+      fullscreen.setAttribute("aria-label", label);
+      fullscreen.title = label + "（F）";
+    });
+    document.querySelector("#copy").onclick = async () => {
+      const page = pages[index];
+      const url = new URL(page.copySrc || location.href, location.href);
+      url.searchParams.delete("embed");
+      if (!page.copySrc) url.hash = "p=" + encodeURIComponent(page.id);
+      try {
+        await navigator.clipboard.writeText(url.href);
+        notice.textContent = "已复制本页链接";
+        notice.hidden = false;
+        clearTimeout(noticeTimer);
+        noticeTimer = setTimeout(() => { notice.hidden = true; }, 1400);
+      } catch { window.prompt("复制本页链接", url.href); }
+    };
+    document.querySelector("#reload").onclick = () => {
+      const state = frames.get(index);
+      if (!state) return;
+      clearTimeout(preloadTimer);
+      state.ready = false;
+      setLoading(index);
+      const url = new URL(state.frame.src);
+      url.searchParams.set("v", Date.now());
+      state.frame.src = url.href;
+    };
+
+    if (releaseUrl) {
+      const heartbeat = releaseUrl.replace(/\/release$/, "/heartbeat");
+      const keepAlive = () => fetch(heartbeat, {method:"POST", keepalive:true}).catch(() => {});
+      keepAlive();
+      const timer = setInterval(keepAlive, 5000);
+      addEventListener("pagehide", () => {
+        clearInterval(timer);
+        if (!navigator.sendBeacon?.(releaseUrl, "{}")) fetch(releaseUrl,{method:"POST",body:"{}",keepalive:true}).catch(() => {});
+      }, {once:true});
+    }
+  </script>
+</body>
+</html>

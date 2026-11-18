@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import urljoin, parse_qs, quote, unquote, urlparse
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 import cgi
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
+import gzip
 import hashlib
 import html
 import io
@@ -18,6 +19,7 @@ import queue
 import re
 import secrets
 import shutil
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -26,32 +28,23 @@ import threading
 import time
 import zipfile
 
-from minem.assets import list_assets_response
+from minem.assets import list_assets_response, save_asset_metadata
 from minem.agent import AgentRuntime
 from minem.case_groups import load_case_groups
-from minem.db import connect_database, ensure_asset_schema, initialize_database
+from minem.db import connect_database, initialize_database
 from minem.html_splitter import (
-    build_control_html as split_control_html,
-    build_viewer_pages_from_manifest as split_viewer_pages_from_manifest,
+    build_control_html,
     detect_report_page_count as split_detect_report_page_count,
-    extract_body_scripts as split_body_scripts,
-    extract_control_page_node as split_control_page_node,
-    extract_head as split_head,
+    extract_control_page_node,
     extract_page_node_spans as split_page_node_spans,
-    extract_page_nodes as split_page_nodes,
-    find_balanced_element as split_balanced_element,
-    find_balanced_element_span as split_balanced_element_span,
+    extract_page_nodes,
     is_manifest_driven_report as split_manifest_driven_report,
-    manifest_page_id as split_manifest_page_id,
-    replace_report_page_node as split_replace_report_page_node,
-    strip_outer_element as split_outer_element,
+    replace_report_page_node,
     sync_manifest_viewer_pages as split_sync_manifest_viewer_pages,
-    viewer_pages_array_count as split_viewer_pages_array_count,
-    viewer_pages_array_span as split_viewer_pages_array_span,
+    viewer_pages_array_count,
 )
 from minem.imports import (
     auto_import_sources as run_auto_import_sources,
-    copy_html_dependency_bundle,
     create_import_task as create_import_task_record,
     get_import_task as get_import_task_record,
     import_direct_file as import_direct_asset_file,
@@ -63,82 +56,59 @@ from minem.imports import (
     run_import_task as execute_import_task,
     update_import_task as update_import_task_record,
 )
+from minem.html_assets import extract_bundle_images
+from minem.http_requests import RequestBodyError, read_json_request, request_content_length
+from minem.html_dependencies import DependencyParser, audit_dependency_closure, css_references, is_external, normalize_reference
+from minem.drive_fonts import localize_drive_fonts
+from minem.drive_import import DRIVE_DOWNLOAD_SECONDS, DRIVE_JOB_ID, DRIVE_QUEUE_SECONDS, MAX_DRIVE_LINKS, drive_import_queue, drive_worker_alive, parse_drive_folder_link, write_json_atomically
+from minem.config import MAX_UPLOAD_REQUEST_BYTES, MAX_ZIP_FILES, MAX_ZIP_TOTAL_BYTES
+from minem.offline_bundle import OfflineBundle, validate_offline_package
+from minem.delivery import download_name, write_delivery_inventory
+from minem.hosted_deck_media import MEDIA_DIRECTORY
+from minem.native_deck import external_deck_base, read_native_deck, render_native_deck, resolve_deck_base
+from minem.runtime_layout import history_root
 from minem.import_tasks import ImportTaskStore
-from minem.tag_tasks import (
-    changed_asset_ids as tag_changed_asset_ids,
-    create_task as create_tag_analysis_task_record,
-    ensure_schema as ensure_tag_task_schema,
-    public_task as public_tag_analysis_task,
-    run_task as run_tag_analysis_task_record,
-)
+from minem.image_deck import prepare_image_deck
+from minem.spark_package import UNPACKAGED_ERROR, has_online_spark_storage, spark_package_root
 from minem.report_exports import ReportExportTaskStore
 from minem.lineage import (
     asset_lineage_details as build_asset_lineage_details,
     attach_source_batches as hydrate_source_batches,
-    lineage_asset_summary as summarize_lineage_asset,
     pipeline_summary as build_pipeline_summary,
     upload_batch_summaries as summarize_upload_batches,
 )
-from minem.paths import is_path_within
+from minem.paths import is_path_within, is_safe_filename_stem
+from minem.player_bridge import add_player_bridge
+from minem.pdf_capture import add_pdf_checks, capture as capture_pdf_page
 from minem.reports import (
     attach_report_page_control as attach_slot_control,
     get_report_page_slots as load_report_page_slots,
-    normalize_page_numbers as normalize_report_page_numbers,
+    normalize_page_numbers,
     register_report_page_candidate as register_slot_candidate,
-    report_page_candidate_id as make_report_page_candidate_id,
     upsert_report_page_slots as save_report_page_slots,
 )
 from minem.report_package_importer import (
-    copy_page_variant as import_copy_page_variant,
+    copy_page_variant,
     discover_report_package_roots as import_discover_report_package_roots,
+    html_document_title,
     load_report_package_manifest as import_load_report_package_manifest,
-    page_number_from_slide_path as import_page_number_from_slide_path,
-    report_code_to_control_code as import_report_code_to_control_code,
+    report_code_to_control_code,
     report_manifest_page_items as import_report_manifest_page_items,
-    report_package_entry_path as import_report_package_entry_path,
-    safe_int as import_safe_int,
-    variant_page_rel as import_variant_page_rel,
+    report_package_entry_path,
+    safe_int,
 )
 from minem.report_package_writer import sync_report_material_package as write_report_material_package
 from minem.report_canvas import normalize_report_page_canvases as normalize_report_canvas_versions
 from minem.resource_importer import sync_report_package_resources as write_report_package_resources
-from minem.similarity import (
-    apply_similarity_versions as similarity_apply_versions,
-    collect_similarity_features as similarity_collect_features,
-    dhash_image as similarity_dhash_image,
-    hamming_distance as similarity_hamming_distance,
-    merge_similar_resource_versions as run_merge_similar_resource_versions,
-    normalized_svg_hash as similarity_normalized_svg_hash,
-    same_shape as similarity_same_shape,
-    similarity_for as similarity_similarity_for,
-)
-from minem.tagging import (
-    allowed_icon_subtags as tagging_allowed_icon_subtags,
-    allowed_logo_subtags as tagging_allowed_logo_subtags,
-    apply_company_logo_metadata as tagging_apply_company_logo_metadata,
-    asset_value as tagging_asset_value,
-    extract_company_logo_name as tagging_extract_company_logo_name,
-    generic_logo_title as tagging_generic_logo_title,
-    image_trait_tags as tagging_image_trait_tags,
-    image_traits as tagging_image_traits,
-    infer_tags as tagging_infer_tags,
-    infer_tags_from_text as tagging_infer_tags_from_text,
-    is_generic_logo_title as tagging_is_generic_logo_title,
-    merge_tags as tagging_merge_tags,
-    normalize_role_tags as tagging_normalize_role_tags,
-    page_usage_tags as tagging_page_usage_tags,
-    resource_kind_for as tagging_resource_kind_for,
-    source_process_tags as tagging_source_process_tags,
-    split_tags as tagging_split_tags,
-    suggest_material_tags as tagging_suggest_material_tags,
-)
+from minem.similarity import merge_similar_resource_versions as run_merge_similar_resource_versions
+from minem.media import resource_kind_for as classify_resource_kind, split_tags
 from minem.thumbnails import (
     chrome_path as preview_chrome_path,
-    detect_html_dimensions as detect_preview_dimensions,
+    detect_html_dimensions as detected_html_preview_size,
     generate_html_thumbnail as render_html_thumbnail,
     save_contained_thumbnail as render_contained_thumbnail,
 )
-from minem.upload_safety import UploadLimitError, copy_limited_stream, safe_extract_zip, validate_upload_request_size
+from minem.upload_safety import UploadLimitError, copy_limited_stream, safe_extract_zip
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageSequence
@@ -152,15 +122,18 @@ RESOURCE_ROOT = Path(os.environ.get("MINEM_APP_ROOT") or getattr(sys, "_MEIPASS"
 RUNTIME_ROOT = Path(os.environ.get("MINEM_DATA_DIR") or RESOURCE_ROOT).expanduser().resolve()
 ROOT = RESOURCE_ROOT
 PUBLIC = RESOURCE_ROOT / "public"
+REPORT_COVERS = RESOURCE_ROOT / "templates" / "report-covers"
+DEFAULT_REPORT_COVER = "cover-1"
+REPORT_COVER_IDS = frozenset((DEFAULT_REPORT_COVER, "cover-2", "cover-3"))
 DATA = RUNTIME_ROOT / "data"
 UPLOADS = RUNTIME_ROOT / "uploads"
 EXTRACTED = RUNTIME_ROOT / "extracted"
 THUMBNAILS = RUNTIME_ROOT / "thumbnails"
 REPORT_EXPORTS = RUNTIME_ROOT / "report-exports"
-HISTORY_DIR = EXTRACTED / "_history"
+LEGACY_HISTORY_DIR = EXTRACTED / "_history"
+HISTORY_DIR = history_root(RUNTIME_ROOT) / "asset-snapshots"
 DB_PATH = DATA / "materials.db"
 AUTO_IMPORT_CONFIG = RUNTIME_ROOT / "import-sources.json"
-STORYLINES_PATH = DATA / "storylines.json"
 VERSION_MANIFEST_PATH = RESOURCE_ROOT / "product-version.json"
 
 
@@ -177,8 +150,6 @@ PRODUCT_VERSION = load_product_version()
 IMPORT_TASK_STORE = ImportTaskStore(DB_PATH)
 REPORT_EXPORT_TASK_STORE = ReportExportTaskStore(DB_PATH)
 AGENT_RUNTIME = AgentRuntime(ROOT, DATA)
-AI_PRESENTER_VERSION = "edgetts5"
-AI_PRESENTER_TEMPLATE = ROOT / "templates" / "ai-presenter.html"
 THUMBNAIL_META_VERSION = 2
 TEMP_REPORT_TTL_MS = 60 * 60 * 1000
 TEMP_REPORT_STALE_MS = 15 * 1000
@@ -190,7 +161,6 @@ THUMBNAIL_REFRESH_ENQUEUED = set()
 THUMBNAIL_REFRESH_FAILED = {}
 THUMBNAIL_REFRESH_LOCK = threading.Lock()
 THUMBNAIL_REFRESH_WORKER = None
-TAG_SCHEDULER_WORKER = None
 
 ALLOWED_SUFFIXES = {".html", ".htm", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}
 ZIP_SUFFIXES = {".zip"}
@@ -244,24 +214,6 @@ CATEGORIES = {
     "visual": "视觉素材",
     "code": "代码片段",
 }
-
-TAG_RULES = [
-    ("证据与指标", ["kpi", "metric", "指标", "数据", "roi", "percent", "%", "占比", "证明", "quote", "原话", "证据"]),
-    ("流程与路径", ["flow", "pipeline", "timeline", "step", "流程", "路径", "步骤", "节点", "演进", "journey"]),
-    ("界面参考", ["screen", "console", "phone", "chat", "iframe", "demo", "界面", "控制台", "手机", "对话", "弹窗"]),
-    ("叙事表达", ["story", "persona", "经验", "故事", "专家", "判断", "推理", "叙事", "角色", "场景"]),
-    ("视觉素材", ["image", "logo", "icon", "background", "visual", "图片", "图标", "背景", "截图", "svg", "png", "jpg", "gif"]),
-    ("代码片段", ["css", "javascript", "function", "const ", "class=", "style", "json", "markdown", "代码", "片段"]),
-    ("汇报页面", ["deck", "slide", "report", "汇报", "材料", "封面", "页面"]),
-    ("可拼接页面", ["card", "panel", "component", "widget", "卡片", "面板", "页面", "组件"]),
-    ("资源依赖", ["assets/", "src=", "url(", "logo", "icon", "资源", "素材"]),
-    ("制造业", ["制造", "工厂", "车间", "设备", "生产", "质检", "巡检", "供应商", "qms", "andon", "plc"]),
-    ("客户案例", ["客户", "案例", "顺达", "蔚来", "继峰", "海亮", "宝龙达", "customer", "case"]),
-    ("生产巡检", ["生产", "巡检", "点检", "plc", "气体", "摄像头", "inspection"]),
-    ("质量管理", ["质量", "质检", "qms", "mqc", "异常", "quality"]),
-    ("安全巡检", ["安全", "风险", "预警", "安防", "safety", "warning"]),
-    ("供应商管理", ["供应商", "采购", "supplier", "vendor"]),
-]
 
 ASSET_TYPES = {
     "report": "汇报素材",
@@ -319,71 +271,7 @@ SOURCE_TYPES = {
     "manual-version-import": "手动版本导入",
     "report-material-sync": "汇报材料同步",
     "report-material-candidate": "汇报候选页",
-    "storyline-collection": "故事线收藏",
-}
-
-MATERIAL_TAG_TAXONOMY = {
-    "汇报素材": ["完整汇报", "HTML汇报", "可导出", "汇报母版"],
-    "页面素材": ["单页素材", "可拼接页面", "页面片段", "页面模板"],
-    "基础资源": ["图片素材", "视频素材", "GIF素材", "SVG素材", "资源依赖"],
-    "图片素材": ["产品截图", "页面截图", "实景照片", "装饰插画"],
-    "企业logo": ["客户logo", "飞书logo", "合作伙伴logo", "品牌标识"],
-    "方案素材": ["AI方案", "效率工程", "组织管理", "业务提效", "办公协同"],
-    "产品icon": ["飞书产品", "协作工具", "管理工具", "AI产品", "第三方产品"],
-    "页面背景": ["封面背景", "内容页背景", "深色科技风"],
-    "人物/头像": ["客户人物", "员工头像", "数字人"],
-    "数据图表": ["地图", "柱状图", "时间轴", "矩阵图"],
-    "页面用途": ["封面", "内容页", "案例页", "数据页", "过渡页", "结尾页"],
-    "视觉风格": ["浅色简洁", "深色科技风", "品牌色", "透明底", "横版", "竖版", "方形", "高清大图", "小尺寸图"],
-    "业务场景": ["制造业", "客户案例", "生产巡检", "质量管理", "安全巡检", "供应商管理"],
-    "参考截图": ["产品截图", "页面截图", "设计参考", "不可直接使用"],
-    "复用状态": ["可直接使用", "需二次编辑", "仅作参考"],
-    "来源过程": ["完整汇报导入", "单页拆分", "页面抽取", "手动导入", "自动扫描"],
-}
-
-ALL_MATERIAL_TAGS = {
-    tag
-    for primary, children in MATERIAL_TAG_TAXONOMY.items()
-    for tag in [primary, *children]
-}
-
-LOGO_ROLE_TAGS = {"企业logo", "客户logo", "飞书logo", "合作伙伴logo", "品牌标识"}
-ICON_ROLE_TAGS = {"产品icon", "飞书产品", "协作工具", "管理工具", "AI产品", "第三方产品"}
-ICON_SUBTYPE_TAGS = ICON_ROLE_TAGS - {"产品icon"}
-RESOURCE_STRUCTURE_TAGS = {"汇报素材", "完整汇报", "HTML汇报", "可导出", "汇报页面", "页面素材", "单页素材", "可拼接页面", "页面片段", "页面模板"}
-REFERENCE_TAGS = {"参考截图", "产品截图", "页面截图", "设计参考", "不可直接使用", "仅作参考"}
-IDENTITY_MEDIA_EXCLUDED_TAGS = {"页面背景", "封面背景", "内容页背景", "深色科技风", "界面参考", "数据图表", "地图", "柱状图", "时间轴", "矩阵图", "叙事表达"}
-
-COMPANY_NAME_RULES = [
-    (("feishu", "lark", "飞书"), "飞书", "飞书logo"),
-    (("nio", "蔚来"), "蔚来", "客户logo"),
-    (("jifeng", "继峰"), "继峰座椅", "客户logo"),
-    (("hailiang", "海亮"), "海亮股份", "客户logo"),
-    (("pengfei", "鹏飞"), "鹏飞集团", "客户logo"),
-    (("bge",), "BGE", "客户logo"),
-    (("efficiency", "效率工程"), "效率工程标识", "品牌标识"),
-    (("cxmt", "长鑫", "长鑫存储"), "长鑫存储（CXMT）", "客户logo"),
-    (("mooreelite", "摩尔精英"), "摩尔精英", "客户logo"),
-    (("navinfo", "四维图新"), "四维图新", "客户logo"),
-    (("horizon", "地平线", "horizon robotics"), "地平线", "客户logo"),
-    (("huami", "华米"), "华米", "客户logo"),
-    (("cr micro", "crmicro", "华润微"), "华润微电子", "客户logo"),
-    (("faith long", "惠伦晶体"), "惠伦晶体", "客户logo"),
-    (("yunstilicon", "云脉芯联"), "云脉芯联", "客户logo"),
-    (("huafon", "华峰"), "华峰", "客户logo"),
-]
-
-LOGO_TITLE_BY_SOURCE = {
-    "input/input/property-logo-wall.png": ("企业 Logo 墙", "客户logo"),
-    "ppt-media/image136.png": ("长鑫存储（CXMT）", "客户logo"),
-    "ppt-media/image137.png": ("摩尔精英", "客户logo"),
-    "ppt-media/image138.png": ("四维图新", "客户logo"),
-    "ppt-media/image139.png": ("地平线", "客户logo"),
-    "ppt-media/image141.png": ("华米", "客户logo"),
-    "ppt-media/image150.png": ("华润微电子", "客户logo"),
-    "ppt-media/image167.png": ("惠伦晶体", "客户logo"),
-    "ppt-media/image169.png": ("云脉芯联", "客户logo"),
-    "ppt-media/image236.png": ("华峰", "客户logo"),
+    "created-report": "新建汇报",
 }
 
 CONTROL_CODE_PARTS = {
@@ -422,112 +310,6 @@ def db():
 
 
 
-def split_tags(value):
-    return tagging_split_tags(value)
-
-
-# The former flat tag field mixed system metadata, import state, and business
-# semantics. Keep it disabled until the governed taxonomy migration lands.
-LEGACY_TAGS_ENABLED = False
-
-
-def merge_tags(*tag_groups):
-    if not LEGACY_TAGS_ENABLED:
-        return []
-    return tagging_merge_tags(*tag_groups)
-
-
-
-
-
-
-def normalize_role_tags(tags, asset_type, resource_kind="", identity_text=""):
-    if not LEGACY_TAGS_ENABLED:
-        return []
-    return tagging_normalize_role_tags(
-        tags,
-        asset_type,
-        resource_kind,
-        identity_text,
-        resource_structure_tags=RESOURCE_STRUCTURE_TAGS,
-        reference_tags=REFERENCE_TAGS,
-        identity_media_excluded_tags=IDENTITY_MEDIA_EXCLUDED_TAGS,
-        logo_role_tags=LOGO_ROLE_TAGS,
-        icon_role_tags=ICON_ROLE_TAGS,
-        icon_subtype_tags=ICON_SUBTYPE_TAGS,
-    )
-
-
-def infer_tags(asset):
-    if not LEGACY_TAGS_ENABLED:
-        return []
-    return tagging_infer_tags(
-        asset,
-        categories=CATEGORIES,
-        tag_rules=TAG_RULES,
-        asset_library_path=asset_library_path,
-        image_trait_tags_fn=image_trait_tags,
-    )
-
-
-def infer_tags_from_text(text):
-    if not LEGACY_TAGS_ENABLED:
-        return []
-    return tagging_infer_tags_from_text(text, tag_rules=TAG_RULES)
-
-
-def ai_tag_assets(asset_type="control"):
-    if not LEGACY_TAGS_ENABLED:
-        return {
-            "ok": False,
-            "error": "旧标签体系已停用，等待新标签体系启用后再执行自动标注",
-            "updated": 0,
-            "scanned": 0,
-            "assetType": asset_type,
-        }
-    where = ""
-    params = []
-    if asset_type != "all":
-        where = " where asset_type = ?"
-        params.append(asset_type)
-    updated = 0
-    with db() as conn:
-        rows = conn.execute(f"select * from assets{where}", params).fetchall()
-        for row in rows:
-            item = dict(row)
-            new_title = row["title"]
-            new_kind = row["resource_kind"] or ""
-            if row["asset_type"] == "resource":
-                path = asset_library_path(row) or Path(row["source_path"] or row["title"] or "")
-                new_kind = resource_kind_for(path, row["media_kind"], row["title"], row["tags"])
-                item["resource_kind"] = new_kind
-                new_title, seeded_tags = apply_company_logo_metadata(
-                    row["title"],
-                    ",".join(merge_tags(row["tags"], [RESOURCE_KINDS.get(new_kind, new_kind)])),
-                    row["source_path"],
-                    row["usage"],
-                    new_kind,
-                )
-                item["title"] = new_title
-                item["tags"] = seeded_tags
-            inferred = infer_tags(item)
-            suggested = suggest_material_tags(item) if row["asset_type"] == "resource" else []
-            merged = normalize_role_tags(
-                merge_tags(item.get("tags") or row["tags"], inferred, suggested),
-                row["asset_type"],
-                new_kind,
-                " ".join([new_title or "", row["source_path"] or ""]),
-            )
-            tag_text = ",".join(merged)
-            if tag_text != (row["tags"] or "") or new_kind != (row["resource_kind"] or "") or new_title != row["title"]:
-                conn.execute(
-                    "update assets set title = ?, resource_kind = ?, tags = ?, tag_seeded = 1, updated_at = ? where id = ?",
-                    (new_title, new_kind, tag_text, now_ms(), row["id"]),
-                )
-                updated += 1
-    return {"ok": True, "updated": updated, "scanned": len(rows), "assetType": asset_type}
-
-
 def date_key():
     return time.strftime("%Y%m%d")
 
@@ -551,46 +333,8 @@ def media_kind_for(path):
 
 
 
-def image_trait_tags(path):
-    return tagging_image_trait_tags(path, image_module=Image, image_sequence_module=ImageSequence)
-
-
-def source_process_tags(source_type):
-    return tagging_source_process_tags(source_type)
-
-
-def page_usage_tags(text):
-    return tagging_page_usage_tags(text)
-
-
 def resource_kind_for(path, media_kind, title="", tags=""):
-    return tagging_resource_kind_for(path, media_kind, title, tags, image_module=Image, image_sequence_module=ImageSequence)
-
-
-
-
-def suggest_material_tags(asset_or_text, resource_kind=""):
-    return tagging_suggest_material_tags(asset_or_text, resource_kind, tag_rules=TAG_RULES)
-
-
-
-
-
-
-
-
-def apply_company_logo_metadata(title, tags, source_path="", usage="", resource_kind=""):
-    if not LEGACY_TAGS_ENABLED:
-        return title, ""
-    return tagging_apply_company_logo_metadata(
-        title,
-        tags,
-        source_path,
-        usage,
-        resource_kind,
-        logo_title_by_source=LOGO_TITLE_BY_SOURCE,
-        company_name_rules=COMPANY_NAME_RULES,
-    )
+    return classify_resource_kind(path, media_kind, title, tags, image_module=Image, image_sequence_module=ImageSequence)
 
 
 def is_page_level_html(path):
@@ -691,6 +435,9 @@ def backfill_asset_codes(conn):
 
 
 def init_db():
+    if LEGACY_HISTORY_DIR.is_dir() and not LEGACY_HISTORY_DIR.is_symlink() and not HISTORY_DIR.exists():
+        HISTORY_DIR.parent.mkdir(parents=True, exist_ok=True)
+        LEGACY_HISTORY_DIR.rename(HISTORY_DIR)
     initialize_database(
         data_dir=DATA,
         uploads_dir=UPLOADS,
@@ -706,13 +453,24 @@ def init_db():
     )
     REPORT_EXPORTS.mkdir(parents=True, exist_ok=True)
     REPORT_EXPORT_TASK_STORE.ensure_schema()
-    with db() as conn:
-        ensure_tag_task_schema(conn)
     # Reports are served through a stable public entry.  It composes their
     # existing page slots and makes future arrangement changes visible to both
     # newly opened and previously copied report links without modifying source
     # packages under extracted/.
     with db() as conn:
+        interrupted = ("任务已中断", "服务重启中断了任务，请重新提交。", now_ms())
+        active = conn.execute("select id from import_tasks where status in ('queued', 'running')").fetchall()
+        queue_root = drive_import_queue(RUNTIME_ROOT)
+        conn.executemany(
+            "update import_tasks set status='failed', message=?, error=?, updated_at=? where id=?",
+            [(*interrupted, row["id"]) for row in active if not (
+                DRIVE_JOB_ID.fullmatch(row["id"]) and (queue_root / row["id"] / "job.json").is_file()
+            )],
+        )
+        conn.execute(
+            "update report_export_tasks set status='failed', progress=100, message=?, error=?, updated_at=? where status in ('queued', 'running')",
+            interrupted,
+        )
         conn.execute(
             """
             update assets
@@ -746,6 +504,8 @@ def canonical_preview_url(data):
     # the canonical URL instead of falling back to the imported source file.
     if preview_url.startswith("/extracted/_history/") or preview_url.startswith("/reports/"):
         return preview_url
+    if data.get("asset_type") == "report" and data.get("source_type") == "created-report":
+        return report_public_url(data["id"])
     upload_id = data.get("upload_id") or ""
     source_path = data.get("source_path") or ""
     if upload_id and source_path:
@@ -759,33 +519,37 @@ def canonical_preview_url(data):
 # The platform shell is the sole owner of these controls while a page is embedded.
 PREVIEW_EMBED_STYLE = """
 <style id="minem-embedded-preview-style">
-  #minem-page-tools, .page-pill, .slide-controls, .slide-navigation,
-  .slide-nav, .deck-controls, .deck-navigation, .presentation-controls,
-  [data-minem-page-tools], [data-slide-navigation], [data-deck-navigation] {
+  #minem-page-tools, [data-minem-page-tools],
+  body:has([data-material-control="true"]) :is(.page-pill,.slide-controls,.slide-navigation,
+      .slide-nav,.deck-controls,.deck-navigation,.presentation-controls,[data-slide-navigation],[data-deck-navigation]) {
     display: none !important;
   }
-  /* Split page exports use a 1280x720 staging wrapper inside a 1920x1080
-     iframe. Let the platform canvas own the sizing so the page is not
-     letterboxed a second time inside the report viewer. */
-  html, body { width: 100% !important; height: 100% !important; }
-  .material-control-stage {
-    width: 100vw !important;
-    height: 100vh !important;
-    max-width: none !important;
-    max-height: none !important;
-    --fs-scale: 1 !important;
-  }
+  html[data-minem-player-paused] *, html[data-minem-player-paused] *::before,
+  html[data-minem-player-paused] *::after { animation-play-state: paused !important; }
 </style>
+<script>
+(() => {
+  const frame = window.frameElement;
+  if (!frame?.hasAttribute("data-player-page")) return;
+  document.documentElement.toggleAttribute("data-minem-player-paused", frame.hidden);
+  document.addEventListener("play", event => {
+    if (frame.hidden) {
+      event.target.dataset.minemPlayerResume = "1";
+      event.target.pause();
+    }
+  }, true);
+})();
+</script>
 """
 
 
 def inject_embedded_preview_style(html_text):
     if "minem-embedded-preview-style" in html_text:
-        return html_text
+        return add_player_bridge(html_text)
     marker = re.search(r"</head\s*>", html_text, flags=re.IGNORECASE)
     if marker:
-        return f"{html_text[:marker.start()]}{PREVIEW_EMBED_STYLE}{html_text[marker.start():]}"
-    return f"{PREVIEW_EMBED_STYLE}{html_text}"
+        return add_player_bridge(f"{html_text[:marker.start()]}{PREVIEW_EMBED_STYLE}{html_text[marker.start():]}")
+    return add_player_bridge(f"{PREVIEW_EMBED_STYLE}{html_text}")
 
 
 def thumbnail_path(asset_id):
@@ -798,16 +562,16 @@ def thumbnail_meta_path(asset_id):
 
 def local_html_preview_path(data):
     preview_url = canonical_preview_url(data)
-    if not preview_url.startswith("/"):
+    preview_path = unquote(urlparse(preview_url).path)
+    if preview_path.startswith("/extracted/_history/"):
+        html_path = history_snapshot_file(preview_path.removeprefix("/extracted/"))
+    elif preview_path.startswith("/extracted/"):
+        html_path = extracted_url_to_path(preview_path)
+    elif preview_path.startswith("/reports/"):
+        html_path = asset_library_path(data)
+    else:
         return None
-    preview_path = urlparse(preview_url).path
-    html_path = (ROOT / preview_path.lstrip("/")).resolve()
-    if (
-        is_path_within(html_path, ROOT)
-        and html_path.exists()
-        and html_path.is_file()
-        and html_path.suffix.lower() in {".html", ".htm"}
-    ):
+    if html_path and html_path.is_file() and html_path.suffix.lower() in {".html", ".htm"}:
         return html_path
     return None
 
@@ -821,11 +585,13 @@ def thumbnail_source_fingerprint(data):
         str(preview_url or ""),
         str(data.get("source_path") or ""),
     ]
+    if data.get("asset_type") in {"report", "page"}:
+        parts.append("arrangement:" + str(data.get("updated_at") or 0))
     html_path = local_html_preview_path({**dict(data), "preview_url": preview_url})
     if html_path:
         try:
             stat = html_path.stat()
-            relative = html_path.relative_to(ROOT).as_posix()
+            relative = html_path.relative_to(RUNTIME_ROOT).as_posix()
             parts.append(f"file:{relative}:{stat.st_size}:{stat.st_mtime_ns}")
         except (OSError, ValueError):
             pass
@@ -935,7 +701,9 @@ def asset_thumbnail_url(data):
     thumb = thumbnail_path(data["id"])
     if html_path and thumb.exists():
         try:
-            if thumb.stat().st_mtime_ns >= html_path.stat().st_mtime_ns:
+            if (not thumbnail_meta_path(data["id"]).exists()
+                and thumb.stat().st_mtime_ns >= html_path.stat().st_mtime_ns
+                and thumb.stat().st_mtime_ns >= int(data.get("updated_at") or 0) * 1_000_000):
                 write_thumbnail_meta(data["id"], fingerprint)
                 return thumbnail_url(data["id"], fingerprint)
         except OSError:
@@ -945,19 +713,13 @@ def asset_thumbnail_url(data):
     return ""
 
 
-def detected_html_preview_size(html_path):
-    return detect_preview_dimensions(html_path)
-
-
-
-
 def preview_meta_for_asset(data):
     preview_url = data.get("preview_url") or ""
     media_kind = data.get("media_kind") or ""
     if media_kind != "html" or not preview_url.startswith("/"):
         return {"width": 0, "height": 0, "aspectRatio": 0, "longPage": False}
-    html_path = (ROOT / preview_url.lstrip("/")).resolve()
-    if not is_path_within(html_path, ROOT) or not html_path.exists() or html_path.suffix.lower() not in {".html", ".htm"}:
+    html_path = local_html_preview_path(data)
+    if html_path is None:
         return {"width": 1920, "height": 1080, "aspectRatio": round(16 / 9, 6), "longPage": False}
     try:
         stat = html_path.stat()
@@ -991,6 +753,8 @@ def row_to_asset(row):
     data["mediaLabel"] = MEDIA_KINDS.get(data["media_kind"], data["media_kind"])
     data["resourceKindLabel"] = RESOURCE_KINDS.get(data.get("resource_kind") or "", data.get("resource_kind") or "")
     data["thumbnail_url"] = asset_thumbnail_url(data)
+    if data["asset_type"] == "report" and data["media_kind"] == "html" and data["preview_url"].startswith("/reports/"):
+        data["cover_preview_url"] = f"{report_public_url(data['id'])}?cover=1&v={data['updated_at'] or 0}"
     data["preview_meta"] = preview_meta_for_asset(data)
     data["tags"] = split_tags(data["tags"])
     data["versionCount"] = data.get("version_count", 1) or 1
@@ -1039,55 +803,10 @@ def backfill_resource_kinds(conn):
         if not path:
             path = Path(row["source_path"] or row["title"] or "")
         kind = resource_kind_for(path, row["media_kind"], row["title"], row["tags"])
-        tags = normalize_role_tags(
-            merge_tags(row["tags"], [RESOURCE_KINDS.get(kind, kind)]),
-            row["asset_type"],
-            kind,
-            " ".join([row["title"] or "", row["source_path"] or ""]),
-        )
-        title, tag_text = apply_company_logo_metadata(row["title"], ",".join(tags), row["source_path"], row["usage"], kind)
         conn.execute(
-            "update assets set title = ?, resource_kind = ?, tags = ?, updated_at = ? where id = ?",
-            (title, kind, tag_text, now_ms(), row["id"]),
+            "update assets set resource_kind = ?, updated_at = ? where id = ?",
+            (kind, now_ms(), row["id"]),
         )
-    seed_material_tags(conn)
-    backfill_company_logo_titles(conn)
-
-
-def seed_material_tags(conn):
-    if not LEGACY_TAGS_ENABLED:
-        return
-    rows = conn.execute(
-        "select * from assets where asset_type = 'resource' and tag_seeded = 0"
-    ).fetchall()
-    for row in rows:
-        suggested = merge_tags(suggest_material_tags(row), infer_tags(row))
-        if suggested:
-            tags = normalize_role_tags(
-                merge_tags(row["tags"], suggested),
-                row["asset_type"],
-                row["resource_kind"],
-                " ".join([row["title"] or "", row["source_path"] or ""]),
-            )
-            conn.execute(
-                "update assets set tags = ?, tag_seeded = 1, updated_at = ? where id = ?",
-                (",".join(tags), now_ms(), row["id"]),
-            )
-        else:
-            conn.execute("update assets set tag_seeded = 1 where id = ?", (row["id"],))
-
-
-def backfill_company_logo_titles(conn):
-    rows = conn.execute(
-        "select * from assets where asset_type = 'resource' and (resource_kind = 'logo' or instr(','||tags||',', ',企业logo,')>0)"
-    ).fetchall()
-    for row in rows:
-        title, tags = apply_company_logo_metadata(row["title"], row["tags"], row["source_path"], row["usage"], row["resource_kind"])
-        if title != row["title"] or tags != row["tags"]:
-            conn.execute(
-                "update assets set title = ?, tags = ?, updated_at = ? where id = ?",
-                (title, tags, now_ms(), row["id"]),
-            )
 
 
 def safe_extract(zip_path, target_dir):
@@ -1120,13 +839,6 @@ def file_hash(path):
     return digest.hexdigest()
 
 
-def stable_source_hash(path, kind="file"):
-    try:
-        stat = path.stat()
-        base = f"{kind}:{path.resolve()}:{stat.st_size}:{int(stat.st_mtime)}"
-    except OSError:
-        base = f"{kind}:{path}"
-    return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 
 def asset_exists(conn, source_hash):
@@ -1134,7 +846,8 @@ def asset_exists(conn, source_hash):
 
 
 def asset_library_path(asset):
-    if not asset["upload_id"] or not asset["source_path"]:
+    asset = dict(asset)
+    if not asset.get("upload_id") or not asset.get("source_path"):
         return None
     path = (EXTRACTED / asset["upload_id"] / asset["source_path"]).resolve()
     if not is_path_within(path, EXTRACTED):
@@ -1188,11 +901,7 @@ def reclassify_single_page_report_assets():
             except OSError:
                 same_content = None
             code = asset["asset_code"] if asset["asset_type"] == 'control' else next_asset_code(conn, "control", "page", "html")
-            tags = merge_tags(
-                asset["tags"],
-                ["页面素材", "单页素材", "导入分类修复"],
-            )
-            tags = [tag for tag in tags if tag not in {"汇报素材", "完整汇报", "HTML 汇报"}]
+            tags = []
             group_id = same_content["version_group"] or same_content["id"] if same_content else (asset["version_group"] or asset["id"])
             parent_id = same_content["id"] if same_content else (asset["version_parent_id"] or "")
             version_no = next_asset_version_no(conn, group_id) if same_content and asset["version_group"] != group_id else (asset["version_no"] or 1)
@@ -1258,19 +967,9 @@ def insert_control_resource_assets(conn, extract_root, upload_id, control, descr
         asset_id = f"{slugify(file_path.stem)}-{source_hash[:10]}"
         title = file_path.stem.replace("-", " ").replace("_", " ").strip() or file_path.name
         resource_kind = resource_kind_for(file_path, media_kind, title, "")
-        tags = merge_tags(
-            ["资源素材", MEDIA_KINDS.get(media_kind, media_kind), RESOURCE_KINDS.get(resource_kind, resource_kind), f"源页面:{control['asset_code']}", control["title"]],
-            infer_tags_from_text(description),
-            suggest_material_tags(" ".join([title, rel, description, control["title"]]), resource_kind),
-            image_trait_tags(file_path) if media_kind in {"image", "gif"} else [],
-            source_process_tags("control-resource"),
-            page_usage_tags(" ".join([title, rel, description, control["title"]])),
-        )
         usage = f"从页面素材 {control['asset_code']} 提取"
         if description:
             usage += f"；上传描述：{description}"
-        tags = normalize_role_tags(tags, "resource", resource_kind, " ".join([title, rel]))
-        title, tag_text = apply_company_logo_metadata(title, ",".join(tags), rel, usage, resource_kind)
         existing = conn.execute(
             "select id, tags, usage from assets where asset_type = 'resource' and source_hash = ? limit 1",
             (source_hash,),
@@ -1279,7 +978,7 @@ def insert_control_resource_assets(conn, extract_root, upload_id, control, descr
             conn.execute(
                 "update assets set tags = ?, usage = ?, updated_at = ? where id = ?",
                 (
-                    ",".join(merge_tags(existing["tags"], tag_text, ["复用资源"])),
+                    "",
                     existing["usage"] if control["asset_code"] in (existing["usage"] or "") else f"{existing['usage']}；复用到页面素材 {control['asset_code']}",
                     now_ms(),
                     existing["id"],
@@ -1297,7 +996,7 @@ def insert_control_resource_assets(conn, extract_root, upload_id, control, descr
                 asset_id,
                 title,
                 usage,
-                tag_text,
+                "",
                 asset_code,
                 media_kind,
                 resource_kind,
@@ -1330,7 +1029,7 @@ def insert_control_template_asset(conn, extract_root, upload_id, source_type="te
     asset_id = f"{slugify(deck_id)}-{source_hash[:10]}"
     asset_code = next_asset_code(conn, "control", "page", "html")
     title = manifest.get("title") or primary_path.stem.replace("-", " ")
-    tags = merge_tags(["页面素材", "基础模板", "feishu-deck-h5-library", "单页模板", "手动导入"], infer_tags_from_text(description))
+    tags = []
     snippet = read_text_sample(primary_path)
     usage = "从标准页面模板包导入；导出时保持 feishu-deck-h5-library 包结构"
     if description:
@@ -1367,30 +1066,8 @@ def insert_control_template_asset(conn, extract_root, upload_id, source_type="te
 
 
 
-def extract_page_nodes(html):
-    return split_page_nodes(html)
-
-
-
-
-def extract_control_page_node(control_html):
-    return split_control_page_node(control_html)
-
-
-def replace_report_page_node(report_html, page_number, page_html):
-    return split_replace_report_page_node(report_html, page_number, page_html)
-
-
 def is_manifest_driven_report(source, report_html):
     return split_manifest_driven_report(source, report_html, read_json_file=read_json_file)
-
-
-
-
-def viewer_pages_array_count(report_html):
-    return split_viewer_pages_array_count(report_html)
-
-
 
 
 
@@ -1405,10 +1082,6 @@ def detect_report_page_count(source):
 
 
 
-
-
-def build_control_html(report_html, page_html, title):
-    return split_control_html(report_html, page_html, title)
 
 
 def iter_export_support_files(root):
@@ -1483,105 +1156,56 @@ def build_deck_json(title, html):
 def export_asset_zip(asset_id):
     with db() as conn:
         asset = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
-        if not asset:
-            return None, "素材不存在", ""
-        if asset["asset_type"] != "control":
-            return None, "只有页面素材支持模板包导出", ""
+        if not asset or asset["asset_type"] != "control":
+            return None, "请选择可导出的页面素材", ""
         source = asset_library_path(asset)
-        if not source or not source.exists():
+        if not source or not source.is_file():
             return None, "找不到页面素材 HTML 文件", ""
-        root = (EXTRACTED / asset["upload_id"]).resolve() if asset["upload_id"] else source.parent
-        title = asset["title"]
-        deck_id = safe_download_name(asset["asset_code"].lower())
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            if control_template_manifest(root) and source.relative_to(root).as_posix() == "index.html":
-                for path in root.rglob("*"):
-                    if path.is_file():
-                        archive.write(path, path.relative_to(root).as_posix())
+        frame = native_control_frames(conn, [asset_id]).get(asset_id)
+    try:
+        with tempfile.TemporaryDirectory(prefix="minem-page-export-") as temporary:
+            package = Path(temporary).resolve() / "page"
+            package.mkdir()
+            owned = read_json_file(source.parent / "manifest.json").get("format")
+            if owned in {"minem-owned-page", "minem-owned-native-page"}:
+                shutil.copytree(source.parent, package, dirs_exist_ok=True)
+                if source.name != "index.html":
+                    shutil.copyfile(package / source.name, package / "index.html")
+            elif frame:
+                write_native_deck_export(frame[0], [frame[1]], package / "index.html", package, single_page=True)
             else:
-                html = source.read_text(encoding="utf-8", errors="ignore")
-                archive.writestr("index.html", html)
-                archive.writestr("texts.md", build_texts_markdown(title))
-                archive.writestr("ingestion-manifest.json", json.dumps(build_export_manifest(asset, deck_id, title), ensure_ascii=False, indent=2))
-                archive.writestr("deck.json", json.dumps(build_deck_json(title, html), ensure_ascii=False, indent=2))
-                support_files = []
-                for path, rel in iter_export_support_files(root):
-                    archive.write(path, rel)
-                    support_files.append(rel)
-                groups = {"framework": [], "deck-local": []}
-                for rel in support_files:
-                    if rel.startswith("assets/") or rel.startswith("viewer-style"):
-                        groups["framework"].append(rel)
-                    else:
-                        groups["deck-local"].append(rel)
-                yaml = "# Generated by MineM.\n# Paths are relative to this zip package.\n"
-                for group, values in groups.items():
-                    yaml += f"{group}:\n"
-                    for rel in sorted(values):
-                        yaml += f"  - {rel}\n"
-                archive.writestr("assets-manifest.yaml", yaml)
-        return buffer.getvalue(), "", f"{deck_id}.zip"
+                bundle = OfflineBundle(EXTRACTED, package, excluded=report_export_excluded_path)
+                copied = bundle.add(source)
+                relative = quote(copied.relative_to(package).as_posix(), safe="/")
+                (package / "index.html").write_text(report_viewer_html(asset["title"], [{
+                    "title": asset["title"], "src": relative, "canvas": preview_meta_for_asset(dict(asset)),
+                }]), encoding="utf-8")
+            validate_offline_package(package)
+            document = (package / "index.html").read_text(encoding="utf-8")
+            (package / "deck.json").write_text(json.dumps(build_deck_json(asset["title"], document), ensure_ascii=False), encoding="utf-8")
+            manifest = build_export_manifest(asset, safe_download_name(asset["asset_code"]), asset["title"])
+            write_delivery_inventory(package, manifest, "ingestion-manifest.json")
+            destination = Path(temporary) / "page.zip"
+            zip_report_export_directory(package, destination)
+            return destination.read_bytes(), "", download_name(asset["title"]) + ".zip"
+    except (OSError, ValueError) as error:
+        return None, str(error), ""
 
 
-def report_export_page_html(title, source_url):
-    """A control-free, fixed canvas wrapper used only for PDF capture."""
+def report_export_page_html(title, source_url, dimensions=None):
+    """Fit the page's original viewport to a presentation-sized PDF sheet."""
+    dimensions = dimensions or {}
+    width = dimensions.get("width") or 1920
+    height = dimensions.get("height") or 1080
+    scale = min(1920 / width, 1080 / height)
+    left, top = (1920 - width * scale) / 2, (1080 - height * scale) / 2
     safe_title = html.escape(title or "汇报页面", quote=True)
     safe_src = html.escape(source_url, quote=True)
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>{safe_title}</title>
-    <style>html,body{{margin:0;width:1920px;height:1080px;overflow:hidden;background:#030712}}iframe{{width:1920px;height:1080px;border:0;background:#030712}}</style>
+    <style>html,body{{margin:0;width:1920px;height:1080px;overflow:hidden;background:#030712}}iframe{{position:absolute;left:{left}px;top:{top}px;width:{width}px;height:{height}px;border:0;transform:scale({scale});transform-origin:0 0;background:#030712}}</style>
     </head><body><iframe title="{safe_title}" src="{safe_src}"></iframe></body></html>"""
 
 
-def report_export_source_relative_url(source_url):
-    clean = str(source_url or "").split("?", 1)[0]
-    if not clean.startswith("/extracted/"):
-        return ""
-    relative = unquote(clean.removeprefix("/extracted/")).strip("/")
-    path = (EXTRACTED / relative).resolve()
-    return relative if is_path_within(path, EXTRACTED) and path.exists() and path.is_file() else ""
-
-
-def report_export_local_references(source_path):
-    """Extract static local resource URLs from HTML and CSS without evaluating JS."""
-    try:
-        text = source_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
-    raw_values = re.findall(r"(?:src|href|poster)\s*=\s*['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
-    raw_values.extend(re.findall(r"url\(\s*['\"]?([^'\")\s]+)", text, flags=re.IGNORECASE))
-    for srcset in re.findall(r"srcset\s*=\s*['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE):
-        raw_values.extend(part.strip().split(" ", 1)[0] for part in srcset.split(","))
-    seen = set()
-    references = []
-    for value in raw_values:
-        value = str(value or "").strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        parsed = urlparse(value)
-        if parsed.scheme or parsed.netloc or value.startswith(("#", "data:", "blob:", "javascript:")):
-            continue
-        references.append(value)
-    return references
-
-
-def report_export_reference_path(reference, source_path, upload_root):
-    parsed = urlparse(reference)
-    raw_path = unquote(parsed.path or "")
-    if not raw_path:
-        return None
-    if raw_path.startswith("/"):
-        # Imported pages occasionally use /assets/... as a server shorthand.
-        # In an offline bundle it maps to the same upload's assets directory.
-        if not raw_path.startswith("/assets/"):
-            return None
-        candidate = (upload_root / raw_path.lstrip("/")).resolve()
-    else:
-        candidate = (source_path.parent / raw_path).resolve()
-    if not is_path_within(candidate, upload_root) or not candidate.exists() or not candidate.is_file():
-        return None
-    return candidate
 
 
 def report_export_excluded_path(path):
@@ -1593,60 +1217,81 @@ def report_export_excluded_path(path):
     return bool(excluded_parts.intersection(parts)) or name == "ai-presenter.html" or Path(name).suffix in model_suffixes
 
 
-def copy_report_export_dependency(source_path, destination_path, upload_root, bundle_root, copied):
-    source_path = source_path.resolve()
-    destination_path = destination_path.resolve()
-    if report_export_excluded_path(source_path):
-        return
-    key = (str(source_path), str(destination_path))
-    if key in copied:
-        return
-    copied.add(key)
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, destination_path)
-    if source_path.suffix.lower() not in {".html", ".htm", ".css"}:
-        return
-    if source_path.suffix.lower() in {".html", ".htm"}:
-        try:
-            destination_path.write_text(
-                inject_embedded_preview_style(destination_path.read_text(encoding="utf-8", errors="ignore")),
-                encoding="utf-8",
-            )
-        except OSError as error:
-            raise ValueError(f"无法写入离线预览：{error}") from error
-    for reference in report_export_local_references(source_path):
-        dependency = report_export_reference_path(reference, source_path, upload_root)
-        if not dependency or report_export_excluded_path(dependency):
-            continue
-        relative = os.path.relpath(dependency, start=source_path.parent)
-        target = (destination_path.parent / relative).resolve()
-        if not is_path_within(target, bundle_root):
-            continue
-        copy_report_export_dependency(dependency, target, upload_root, bundle_root, copied)
+def write_native_deck_export(source, numbers, destination, bundle_root, *, single_page=False, extracted_root=None):
+    source = source.resolve()
+    deck = read_native_deck(source)
+    if external_deck_base(deck):
+        document = render_native_deck(deck, numbers, deck.base_href, single_page=single_page)
+    else:
+        source_root = (extracted_root or EXTRACTED).resolve()
+        source_rel = source.relative_to(source_root)
+        upload_root = source_root / source_rel.parts[0]
+        archive_root = bundle_root / "deck-resources" / source_rel.parts[0]
+        source_url = "/" + quote(source.relative_to(upload_root).as_posix(), safe="/")
+        base_url = resolve_deck_base(deck, source_url)
+        base_path = unquote(urlparse(base_url).path)
+        archive_base = archive_root / base_path.lstrip("/")
+        bundled_base = Path(os.path.relpath(archive_base, destination.parent)).as_posix()
+        bundled_base = quote(bundled_base, safe="/")
+        if base_path.endswith("/"):
+            bundled_base += "/"
+        document = render_native_deck(deck, numbers, bundled_base, single_page=single_page)
+        parser = DependencyParser()
+        parser.feed(document)
+        parser.close()
+        parser.finish()
+        pending = [(base_url, value) for _, value in parser.references]
+        copied = set()
+        while pending:
+            reference_base, value = pending.pop()
+            value = normalize_reference(value)
+            if is_external(value):
+                continue
+            reference = urljoin(reference_base, value)
+            relative = unquote(urlparse(reference).path).lstrip("/")
+            if not relative or "\x00" in relative or any(len(part.encode("utf-8")) > 255 for part in relative.split("/")):
+                continue
+            resource = (upload_root / relative).resolve()
+            if (resource == source or resource in copied or not resource.is_relative_to(upload_root.resolve())
+                    or not resource.is_file() or report_export_excluded_path(resource)):
+                continue
+            copied.add(resource)
+            target = archive_root / resource.relative_to(upload_root.resolve())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resource, target)
+            if resource.suffix.lower() == ".css":
+                pending.extend((reference, name) for name in css_references(resource.read_text(encoding="utf-8", errors="ignore")))
+            elif resource.suffix.lower() in {".html", ".htm"}:
+                document_parser = DependencyParser()
+                document_parser.feed(resource.read_text(encoding="utf-8", errors="ignore"))
+                document_parser.close()
+                document_parser.finish()
+                page_base = urljoin(reference, document_parser.base_href or "")
+                pending.extend((page_base, name) for _, name in document_parser.references)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(document, encoding="utf-8")
 
 
 def copy_report_export_sources(target_root, page_items, progress=None):
-    """Copy only static dependencies needed by each confirmed report page."""
+    """Materialize each page with its local resource tree."""
+    bundle = OfflineBundle(EXTRACTED, target_root, excluded=report_export_excluded_path)
     exported_pages = []
     for index, item in enumerate(page_items, start=1):
-        relative = report_export_source_relative_url(item.get("src"))
-        if not relative:
-            raise ValueError(f"第 {index} 页没有可导出的原始 HTML")
-        upload_id = relative.split("/", 1)[0]
-        source_root = (EXTRACTED / upload_id).resolve()
-        if not is_path_within(source_root, EXTRACTED) or not source_root.exists():
-            raise ValueError(f"第 {index} 页的素材目录不存在")
-        source_page = (EXTRACTED / relative).resolve()
-        if not source_page.exists():
-            raise ValueError(f"第 {index} 页的 HTML 文件缺失")
-        page_root = (target_root / "pages" / f"page-{index:03d}").resolve()
-        destination_page = page_root / source_page.name
-        copy_report_export_dependency(source_page, destination_page, source_root, target_root, set())
-        exported_pages.append({
-            "title": item.get("title") or f"Page {index:02d}",
-            "code": item.get("code") or "",
-            "src": f"pages/page-{index:03d}/{source_page.name}",
-        })
+        source = extracted_url_to_path(item.get("src"))
+        bundle_manifest = read_json_file(source.parent / "manifest.json") if source else {}
+        if source and bundle_manifest.get("format") == "minem-owned-native-page":
+            relative = f"pages/page-{index:03d}/index.html"
+            shutil.copytree(source.parent, (target_root / relative).parent)
+        elif frame := item.get("nativeFrame"):
+            source, number = frame
+            relative = f"pages/page-{index:03d}/index.html"
+            write_native_deck_export(source, [number], target_root / relative, target_root, single_page=True)
+        else:
+            if not source or not source.is_file():
+                raise ValueError(f"第 {index} 页的原始 HTML 不存在")
+            destination = bundle.add(source)
+            relative = quote(destination.relative_to(bundle.target).as_posix(), safe="/")
+        exported_pages.append({**item, "src": relative, "displaySrc": relative})
         if progress:
             progress(index, len(page_items))
     return exported_pages
@@ -1689,12 +1334,42 @@ def generate_report_html_export(task_id, report, page_items, progress=None):
     package_root = output_dir / "html"
     shutil.rmtree(output_dir, ignore_errors=True)
     package_root.mkdir(parents=True, exist_ok=True)
-    exported_pages = copy_report_export_sources(package_root, page_items, progress=progress)
-    (package_root / "index.html").write_text(report_viewer_html(report["title"], exported_pages), encoding="utf-8")
-    (package_root / "minem-export-manifest.json").write_text(
-        json.dumps(report_export_manifest(report, exported_pages, "html"), ensure_ascii=False, indent=2), encoding="utf-8"
+    index = package_root / "index.html"
+    owned_native = any(
+        source and read_json_file(source.parent / "manifest.json").get("format") == "minem-owned-native-page"
+        for source in (extracted_url_to_path(item.get("src")) for item in page_items)
     )
-    filename = f"{safe_download_name(report['asset_code'] or report['title'])}-html.zip"
+    if not owned_native and (native := native_deck_view(page_items)):
+        source, numbers = native
+        write_native_deck_export(source, numbers, index, package_root)
+        exported_pages = [{**item, "src": f"index.html#{page}"} for page, item in enumerate(page_items, start=1)]
+        if progress:
+            progress(len(page_items), len(page_items))
+    else:
+        exported_pages = copy_report_export_sources(package_root, page_items, progress=progress)
+        index.write_text(report_viewer_html(report["title"], exported_pages), encoding="utf-8")
+    for item in exported_pages:
+        source = package_root / unquote(urlparse(item["src"]).path)
+        source.write_text(add_player_bridge(source.read_text(encoding="utf-8")), encoding="utf-8")
+    saved_images = set()
+
+    def store_image(path, data):
+        if path not in saved_images:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            saved_images.add(path)
+
+    # Iterate only over page documents and nested HTML copied into this bundle.
+    for page in list(package_root.rglob("*")):
+        if not page.is_file() or page.suffix.lower() not in {".htm", ".html"}:
+            continue
+        document = page.read_text(encoding="utf-8")
+        lightweight = extract_bundle_images(document, page, package_root, store_image)
+        if lightweight != document:
+            page.write_text(lightweight, encoding="utf-8")
+    validate_offline_package(package_root)
+    write_delivery_inventory(package_root, report_export_manifest(report, exported_pages, "html"))
+    filename = download_name(report["title"]) + ".zip"
     destination = output_dir / filename
     zip_report_export_directory(package_root, destination)
     return destination, filename
@@ -1704,19 +1379,7 @@ def capture_report_export_page(wrapper_path, screenshot_path):
     chrome = preview_chrome_path()
     if not chrome:
         raise RuntimeError("当前运行环境未安装 Chromium，无法生成 PDF")
-    command = [
-        chrome, "--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking",
-        "--disable-extensions", "--hide-scrollbars", "--no-first-run", "--no-sandbox",
-        "--allow-file-access-from-files",
-        "--run-all-compositor-stages-before-draw", "--virtual-time-budget=10000", "--window-size=1920,1080",
-        f"--screenshot={screenshot_path}", wrapper_path.resolve().as_uri(),
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, check=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError("PDF 页面渲染超时") from error
-    if result.returncode != 0 or not screenshot_path.exists() or screenshot_path.stat().st_size < 1024:
-        raise RuntimeError("PDF 页面渲染失败")
+    capture_pdf_page(chrome, wrapper_path, screenshot_path)
 
 
 def generate_report_pdf_export(task_id, report, page_items, progress):
@@ -1725,45 +1388,47 @@ def generate_report_pdf_export(task_id, report, page_items, progress):
     output_dir = REPORT_EXPORTS / task_id
     shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="minem-report-pdf-") as temp_dir:
-        root = Path(temp_dir)
-        images = []
-        for index, item in enumerate(page_items, start=1):
-            source = extracted_url_to_path(item.get("src"))
-            if not source or not source.exists():
-                raise ValueError(f"第 {index} 页原始 HTML 不存在")
-            # Use an absolute file URL so the capture never depends on a
-            # browser session or on the report's mutable public entry.
-            wrapper = root / f"page-{index:03d}.html"
-            page_url = f"http://127.0.0.1:{os.environ.get('PORT', '8790')}{item['src']}"
-            separator = "&" if "?" in page_url else "?"
-            wrapper.write_text(report_export_page_html(item.get("title") or f"Page {index:02d}", f"{page_url}{separator}embed=1"), encoding="utf-8")
-            screenshot = root / f"page-{index:03d}.png"
-            capture_report_export_page(wrapper, screenshot)
-            images.append(Image.open(screenshot).convert("RGB"))
-            progress(index, len(page_items), f"已完成第 {index}/{len(page_items)} 页渲染")
-        filename = f"{safe_download_name(report['asset_code'] or report['title'])}.pdf"
-        destination = output_dir / filename
-        images[0].save(destination, "PDF", save_all=True, append_images=images[1:], resolution=150.0)
+    images = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="minem-report-pdf-") as temp_dir:
+            root = Path(temp_dir)
+            package = root / "content"
+            exported = copy_report_export_sources(package, page_items)
+            validate_offline_package(package)
+            for page in package.rglob("*"):
+                if page.suffix.lower() in {".html", ".htm"} and page.is_file():
+                    page.write_text(add_pdf_checks(page.read_text(encoding="utf-8")), encoding="utf-8")
+            for index, item in enumerate(exported, start=1):
+                source = package / unquote(urlparse(item["src"]).path)
+                wrapper = root / f"page-{index:03d}.html"
+                wrapper.write_text(report_export_page_html(item.get("title") or f"第 {index} 页", source.resolve().as_uri(), item.get("canvas")), encoding="utf-8")
+                screenshot = root / f"page-{index:03d}.png"
+                try:
+                    capture_report_export_page(wrapper, screenshot)
+                except (ValueError, RuntimeError) as error:
+                    raise ValueError(f"第 {index} 页：{error}") from error
+                with Image.open(screenshot) as captured:
+                    images.append(captured.convert("RGB"))
+                progress(index, len(exported), f"已完成第 {index}/{len(exported)} 页渲染")
+            filename = download_name(report["title"]) + ".pdf"
+            destination = output_dir / filename
+            images[0].save(destination, "PDF", save_all=True, append_images=images[1:], resolution=150.0)
+        return destination, filename
+    finally:
         for image in images:
             image.close()
-    return destination, filename
 
 
-def run_report_export_task(task_id):
+def run_report_export_task(task_id, page_items):
     task = REPORT_EXPORT_TASK_STORE.get(task_id, include_private=True)
     if not task:
         return
-    REPORT_EXPORT_TASK_STORE.update(task_id, status="running", progress=5, message="正在读取已确认编排", error="")
+    REPORT_EXPORT_TASK_STORE.update(task_id, status="running", progress=15, message="正在准备页面素材", error="")
     try:
         with db() as conn:
             report = conn.execute("select * from assets where id = ? and asset_type = 'report'", (task["reportId"],)).fetchone()
         if not report:
             raise ValueError("汇报素材不存在")
-        result, page_items = report_public_page_items(task["reportId"])
-        if not result.get("ok") or not page_items:
-            raise ValueError(result.get("error") or "该汇报没有可导出的可见页面")
-        REPORT_EXPORT_TASK_STORE.update(task_id, pageCount=len(page_items), progress=15, message="正在准备页面素材")
         if task["format"] == "html":
             output_path, filename = generate_report_html_export(
                 task_id, report, page_items,
@@ -1784,6 +1449,7 @@ def run_report_export_task(task_id):
             task_id, status="completed", progress=100, message="导出完成", filename=filename, outputPath=str(output_path), error=""
         )
     except Exception as error:
+        shutil.rmtree(REPORT_EXPORTS / task_id, ignore_errors=True)
         REPORT_EXPORT_TASK_STORE.update(task_id, status="failed", progress=100, message="导出失败", error=str(error) or "导出失败")
 
 
@@ -1794,16 +1460,12 @@ def create_report_export_task(report_id, export_format):
     result, page_items = report_public_page_items(report_id)
     if not result.get("ok") or not page_items:
         return {"ok": False, "error": result.get("error") or "该汇报没有可导出的可见页面"}
+    if any(has_online_spark_storage(extracted_url_to_path(page.get("src"))) for page in page_items):
+        return {"ok": False, "error": UNPACKAGED_ERROR}
     task_id = f"export-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
     task = REPORT_EXPORT_TASK_STORE.create({"id": task_id, "reportId": report_id, "format": export_format, "pageCount": len(page_items)})
-    threading.Thread(target=run_report_export_task, args=(task_id,), name=f"report-export-{task_id}", daemon=True).start()
+    threading.Thread(target=run_report_export_task, args=(task_id, page_items), name=f"report-export-{task_id}", daemon=True).start()
     return {"ok": True, "task": task}
-
-
-def normalize_page_numbers(value):
-    return normalize_report_page_numbers(value)
-
-
 
 
 def next_candidate_asset_code(conn, base_code):
@@ -2009,10 +1671,10 @@ def upsert_report_page_slots(report_id, pages, title_prefix="", note=""):
     return save_report_page_slots(report_id, pages, title_prefix, note, connect=db, now_ms=now_ms, get_slots=get_report_page_slots)
 
 
-def get_report_page_slots(report_id):
+def get_report_page_slots(report_id, conn=None):
     return load_report_page_slots(
         report_id,
-        connect=db,
+        connect=db if conn is None else lambda: nullcontext(conn),
         row_to_asset=row_to_asset,
         asset_library_path=asset_library_path,
         detect_report_page_count=detect_report_page_count,
@@ -2021,15 +1683,17 @@ def get_report_page_slots(report_id):
 
 
 def report_arrangement_payload(report_id):
-    normalize_report_page_canvases(report_id)
-    slots_result = get_report_page_slots(report_id)
-    if not slots_result.get("ok"):
-        return slots_result
+    with db() as conn:
+        conn.execute("begin")
+        slots_result = get_report_page_slots(report_id, conn)
+        if not slots_result.get("ok"):
+            return slots_result
+        controls = [slot["control_id"] for slot in slots_result["slots"] if slot.get("control")]
+        native = native_control_frames(conn, controls)
+        row = conn.execute("select * from report_page_arrangements where report_id = ?", (report_id,)).fetchone()
     slots = [slot for slot in slots_result.get("slots", []) if slot.get("control")]
     if not slots:
         return {"ok": False, "error": "该汇报暂未关联可编排的页面素材", "slots": []}
-    with db() as conn:
-        row = conn.execute("select * from report_page_arrangements where report_id = ?", (report_id,)).fetchone()
     try:
         saved_order = json.loads(row["page_order"]) if row else []
         hidden_ids = set(json.loads(row["hidden_page_ids"]) if row else [])
@@ -2047,16 +1711,26 @@ def report_arrangement_payload(report_id):
     for index, control_id in enumerate(order, start=1):
         slot = by_id[control_id]
         control = slot["control"]
-        pages.append({
+        page = {
             "id": control_id,
             "slotNumber": slot["page_number"],
             "order": index,
             "title": control.get("title") or slot.get("title") or f"第 {index} 页",
             "code": control.get("asset_code") or "",
             "previewUrl": canonical_preview_url(control),
-            "thumbnailUrl": control.get("thumbnail_url") or canonical_preview_url(control),
+            "thumbnailUrl": control.get("thumbnail_url") or "",
+            "canvas": control.get("preview_meta"),
             "hidden": control_id in hidden_ids,
-        })
+        }
+        if frame := native.get(control_id):
+            deck = read_native_deck(frame[0])
+            live_cover = deck and (
+                (deck.external_runtime and (index == 1 or frame[1] == 1))
+                or re.search(r'<img\b[^>]*\bcover-art\b', deck.frames[frame[1] - 1][2], re.IGNORECASE)
+            )
+            if live_cover:
+                page["thumbnailFrameUrl"] = control_public_url(control_id) + "?cover=1"
+        pages.append(page)
     return {
         "ok": True,
         "reportId": report_id,
@@ -2069,6 +1743,9 @@ def report_arrangement_payload(report_id):
 def normalize_report_page_canvases(report_id):
     """Ensure a report only references pages sized for its own canvas."""
     with db() as conn:
+        report = conn.execute("select * from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone()
+        if report and read_native_deck(asset_library_path(report)):
+            return {"normalized": 0, "created": [], "refreshed": []}
         result = normalize_report_canvas_versions(
             conn,
             report_id,
@@ -2077,7 +1754,6 @@ def normalize_report_page_canvases(report_id):
             now_ms=now_ms,
             next_candidate_asset_code=next_candidate_asset_code,
             next_asset_version_no=next_asset_version_no,
-            merge_tags=merge_tags,
             read_text_sample=read_text_sample,
         )
     refresh_items = [*result.get("created", []), *result.get("refreshed", [])]
@@ -2109,173 +1785,210 @@ def control_public_url(control_id):
     return f"/pages/{quote(control_id, safe='')}/index.html"
 
 
+def native_control_frames(conn, control_ids):
+    """Map imported and existing canvas-derived pages back to native frames."""
+    if not control_ids:
+        return {}
+    placeholders = ",".join("?" for _ in control_ids)
+    rows = conn.execute(
+        f"""
+        select c.id, coalesce(parent.upload_id, c.upload_id) as upload_id,
+               coalesce(parent.source_path, c.source_path) as source_path,
+               coalesce(parent.source_type, c.source_type) as source_type,
+               (select r.source_path from assets r where r.upload_id = coalesce(parent.upload_id, c.upload_id)
+                and r.asset_type = 'report' and r.source_type = 'report-material-sync'
+                order by r.created_at limit 1) as report_path
+        from assets c left join assets parent on c.source_type = 'report-canvas-normalized' and parent.id = c.version_parent_id
+        where c.id in ({placeholders}) and c.asset_type = 'control'
+        """,
+        control_ids,
+    ).fetchall()
+    result = {}
+    for row in rows:
+        batch = (EXTRACTED / (row["upload_id"] or "")).resolve()
+        if not batch.is_relative_to(EXTRACTED.resolve()):
+            continue
+        match = re.fullmatch(r"_minem_pages/(?:current-)?page-(\d+)(?:-[a-f0-9]+)?/index\.html", row["source_path"] or "")
+        if row["source_type"] == "report-material-sync" and match and row["report_path"]:
+            page_file = (batch / row["source_path"]).resolve()
+            if page_file.is_relative_to(batch) and read_json_file(page_file.parent / "manifest.json").get("format") == "minem-owned-native-page":
+                path, index = page_file, 1
+            else:
+                path = (batch / row["report_path"]).resolve()
+                index = int(match[1])
+        elif row["source_type"] == "created-report-page" and row["source_path"]:
+            path = (batch / row["source_path"]).resolve()
+            index = 1
+        else:
+            continue
+        if not path.is_relative_to(batch):
+            continue
+        deck = read_native_deck(path)
+        if deck and 1 <= index <= len(deck.frames):
+            result[row["id"]] = (path, index)
+    return result
+
+
+def native_deck_view(page_items):
+    """A contiguous viewer can use native navigation for any order of one deck."""
+    frames = [item.get("nativeFrame") for item in page_items]
+    if not frames or not all(frames):
+        return None
+    source = frames[0][0]
+    if any(path != source for path, _ in frames):
+        return None
+    return source, [number for _, number in frames]
+
+
+def online_native_deck(source, numbers, *, single_page=False, cover_title=None):
+    deck = read_native_deck(source)
+    source_url = "/extracted/" + quote(source.relative_to(EXTRACTED.resolve()).as_posix(), safe="/")
+    return render_native_deck(deck, numbers, resolve_deck_base(deck, source_url), single_page=single_page, cover_title=cover_title)
+
+
 def report_public_page_items(report_id):
     """Return the current visible arrangement for the public report entry."""
     result = report_arrangement_payload(report_id)
     if not result.get("ok"):
         return result, []
-    page_items = [
-        {"title": page["title"], "code": page["code"], "src": page["previewUrl"]}
-        for page in result["pages"] if not page["hidden"]
-    ]
+    visible = [page for page in result["pages"] if not page["hidden"]]
+    with db() as conn:
+        native_frames = native_control_frames(conn, [page["id"] for page in visible])
+    page_items = []
+    for page in visible:
+        item = {"title": page["title"], "code": page["code"], "src": page["previewUrl"], "canvas": page.get("canvas")}
+        if native_frame := native_frames.get(page["id"]):
+            item.update(nativeFrame=native_frame, displaySrc=control_public_url(page["id"]), canvas=None)
+        page_items.append(item)
     return result, page_items
 
 
 def update_report_arrangement(report_id, payload):
-    current = report_arrangement_payload(report_id)
-    if not current.get("ok"):
-        return current
-    known_ids = [page["id"] for page in current["pages"]]
-    inserted = payload.get("insertedControlIds") or payload.get("inserted_control_ids") or []
-    if not isinstance(inserted, list):
-        return {"ok": False, "error": "插入页面格式无效"}
-    inserted = list(dict.fromkeys(str(item) for item in inserted if str(item)))
-    requested = payload.get("pageOrder") or payload.get("page_order") or []
-    if not isinstance(requested, list):
-        return {"ok": False, "error": "页面排序格式无效"}
-    requested = list(dict.fromkeys(str(item) for item in requested if str(item)))
-    removed = payload.get("removedPageIds") or payload.get("removed_page_ids") or []
-    if not isinstance(removed, list):
-        return {"ok": False, "error": "移出页面格式无效"}
-    removed = set(str(item) for item in removed if str(item))
+    staged = []
+    try:
+        return save_report_arrangement(report_id, payload, staged)
+    except (OSError, ValueError) as error:
+        for path in staged:
+            shutil.rmtree(path, ignore_errors=True)
+        return {"ok": False, "error": f"页面素材封装失败：{error}"}
+
+
+def save_report_arrangement(report_id, payload, staged):
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "编排参数格式无效"}
+    expected = payload.get("expectedUpdatedAt")
+    if expected is not None and (type(expected) is not int or expected < 0):
+        return {"ok": False, "error": "编排版本格式无效"}
+
+    fields = {}
+    for camel, snake in (
+        ("pageOrder", "page_order"),
+        ("insertedControlIds", "inserted_control_ids"),
+        ("removedPageIds", "removed_page_ids"),
+        ("hiddenPageIds", "hidden_page_ids"),
+    ):
+        value = payload.get(camel, payload.get(snake, []))
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            return {"ok": False, "error": "编排页面参数格式无效"}
+        fields[camel] = list(dict.fromkeys(filter(None, value)))
+
     with db() as conn:
-        valid_inserted = {
-            row["id"] for row in conn.execute(
-                f"select id from assets where asset_type = 'control' and id in ({','.join('?' for _ in inserted)})",
-                inserted,
-            ).fetchall()
-        } if inserted else set()
-        removed &= set(known_ids)
-        allowed = set(known_ids) | valid_inserted
-        order = [item for item in requested if item in allowed and item not in removed]
-        order.extend(item for item in known_ids if item not in order and item not in removed)
-        order.extend(item for item in inserted if item in valid_inserted and item not in order)
-    if not order:
-        return {"ok": False, "error": "汇报至少需要保留一页"}
-    raw_hidden = payload.get("hiddenPageIds") or payload.get("hidden_page_ids") or []
-    if not isinstance(raw_hidden, list):
-        return {"ok": False, "error": "隐藏页面格式无效"}
-    hidden = [str(item) for item in raw_hidden if str(item) in order]
-    timestamp = now_ms()
-    with db() as conn:
-        existing_rows = conn.execute(
-            "select control_id, title, note from report_page_slots where report_id = ? and control_id <> '' order by page_number",
+        conn.execute("begin immediate")
+        report = conn.execute("select * from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone()
+        if not report:
+            return {"ok": False, "error": "汇报不存在"}
+        saved = conn.execute("select page_order, updated_at from report_page_arrangements where report_id = ?", (report_id,)).fetchone()
+        revision = int(saved["updated_at"] or 0) if saved else 0
+        if expected is not None and expected != revision:
+            return {"ok": False, "code": "ARRANGEMENT_CONFLICT", "error": "汇报编排已更新，请重新打开编排后再保存。"}
+
+        slots = conn.execute(
+            """
+            select s.*, a.title as asset_title from report_page_slots s
+            left join assets a on a.id = s.control_id and a.asset_type = 'control'
+            where s.report_id = ? order by s.page_number
+            """,
             (report_id,),
         ).fetchall()
-        existing_meta = {}
-        for row in existing_rows:
-            existing_meta.setdefault(row["control_id"], {"title": row["title"], "note": row["note"]})
-        controls = {}
-        if order:
-            placeholders = ",".join("?" for _ in order)
-            controls = {
-                row["id"]: row
-                for row in conn.execute(
-                    f"select id, title from assets where asset_type = 'control' and id in ({placeholders})",
-                    order,
-                ).fetchall()
-            }
+        existing = {}
+        for slot in slots:
+            if slot["asset_title"] is not None:
+                existing.setdefault(slot["control_id"], slot)
+        try:
+            prior = json.loads(saved["page_order"]) if saved else []
+            prior = prior if isinstance(prior, list) else []
+        except (TypeError, ValueError):
+            prior = []
+        known_ids = list(dict.fromkeys([*(key for key in prior if isinstance(key, str) and key in existing), *existing]))
 
-        # Rebuild the attached rows in one transaction.  Updating individual
-        # rows fails when old data contains the same control in multiple slots:
-        # both rows would be assigned the same new page number.  Rebuilding
-        # also normalizes those legacy duplicates without copying page assets.
-        conn.execute("delete from report_page_slots where report_id = ?", (report_id,))
-        saved_order = []
-        for index, control_id in enumerate(order, start=1):
-            control = controls.get(control_id)
-            if not control:
+        new_ids = fields["insertedControlIds"]
+        inserted = {}
+        if new_ids:
+            placeholders = ",".join("?" for _ in new_ids)
+            inserted = {
+                row["id"]: row["title"] for row in conn.execute(
+                    f"select id, title from assets where asset_type = 'control' and id in ({placeholders})",
+                    new_ids,
+                )
+            }
+            if set(new_ids) != inserted.keys():
+                return {"ok": False, "error": "部分所选页面已不存在，请重新选择。"}
+
+        removed = set(fields["removedPageIds"])
+        allowed = (existing.keys() | inserted.keys()) - removed
+        order = list(dict.fromkeys(key for key in [*fields["pageOrder"], *known_ids, *new_ids] if key in allowed))
+        hidden = [key for key in fields["hiddenPageIds"] if key in allowed]
+        if not set(order).difference(hidden):
+            return {"ok": False, "error": "汇报至少需要保留一张可见页面。"}
+
+        timestamp = max(now_ms(), revision + 1)
+        copies = {}
+        for control_id in new_ids:
+            if control_id not in order or control_id in existing:
                 continue
-            meta = existing_meta.get(control_id, {})
-            note = meta.get("note") or ("人工编排插入页面" if control_id in valid_inserted else "汇报页面编排")
-            title = meta.get("title") or control["title"] or f"第 {index} 页"
+            if conn.execute("select 1 from report_page_slots where control_id=? and report_id<>? limit 1",
+                            (control_id, report_id)).fetchone():
+                source = conn.execute("select * from assets where id=?", (control_id,)).fetchone()
+                copies[control_id] = copy_page_for_arrangement(conn, report, source, timestamp, staged)
+        conn.execute("delete from report_page_slots where report_id = ?", (report_id,))
+        for index, control_id in enumerate(order, 1):
+            old = existing.get(control_id)
+            title = (old["title"] or old["asset_title"]) if old else inserted[control_id]
+            note = old["note"] if old else "人工编排插入页面"
             conn.execute(
                 """insert into report_page_slots
                 (report_id, page_number, title, status, control_id, task_key, note, created_at, updated_at)
-                values (?, ?, ?, 'attached', ?, '', ?, ?, ?)""",
-                (report_id, index, title, control_id, note, timestamp, timestamp),
+                values (?, ?, ?, 'attached', ?, ?, ?, ?, ?)""",
+                (report_id, index, title or f"第 {index} 页", copies.get(control_id, control_id),
+                 old["task_key"] if old else "", note, old["created_at"] if old else timestamp, timestamp),
             )
-            saved_order.append(control_id)
-        order = saved_order
+        # Planned pages are not visible in the player but retain their relative
+        # order and task metadata when the attached pages are rearranged.
+        for index, slot in enumerate((slot for slot in slots if not slot["control_id"]), len(order) + 1):
+            conn.execute(
+                """insert into report_page_slots
+                (report_id, page_number, title, status, control_id, task_key, note, created_at, updated_at)
+                values (?, ?, ?, ?, '', ?, ?, ?, ?)""",
+                (report_id, index, slot["title"], slot["status"], slot["task_key"], slot["note"], slot["created_at"], timestamp),
+            )
         conn.execute(
             """
             insert into report_page_arrangements (report_id, page_order, hidden_page_ids, updated_by, updated_at)
             values (?, ?, ?, 'manual-arrangement', ?)
-            on conflict(report_id) do update set
-              page_order = excluded.page_order,
-              hidden_page_ids = excluded.hidden_page_ids,
-              updated_by = excluded.updated_by,
-              updated_at = excluded.updated_at
+            on conflict(report_id) do update set page_order=excluded.page_order,
+                hidden_page_ids=excluded.hidden_page_ids, updated_by=excluded.updated_by, updated_at=excluded.updated_at
             """,
-            (report_id, json.dumps(order), json.dumps(hidden), timestamp),
+            (report_id, json.dumps([copies.get(key, key) for key in order]),
+             json.dumps([copies.get(key, key) for key in hidden]), timestamp),
         )
-        # The public report entry composes the saved page slots at request
-        # time.  This keeps the imported source package intact while making
-        # both the UI link and an old raw entry URL show the confirmed order.
-        conn.execute(
-            "update assets set preview_url = ?, updated_at = ? where id = ? and asset_type = 'report'",
-            (report_public_url(report_id), timestamp, report_id),
-        )
+        conn.execute("update assets set preview_url = ?, updated_at = ? where id = ?", (report_public_url(report_id), timestamp, report_id))
+    staged.clear()
     invalidate_stats_cache()
     return report_arrangement_payload(report_id)
 
 
-def adopt_report_page_candidate(candidate_id):
-    with db() as conn:
-        candidate = conn.execute(
-            "select * from report_page_candidates where id = ?",
-            (candidate_id,),
-        ).fetchone()
-        if not candidate:
-            return {"ok": False, "error": "候选页不存在"}
-        if candidate["status"] != "candidate":
-            return {"ok": False, "error": "候选页状态不可采用"}
-        control = conn.execute(
-            "select * from assets where id = ? and asset_type = 'control'",
-            (candidate["control_id"],),
-        ).fetchone()
-        if not control:
-            return {"ok": False, "error": "候选页面素材不存在"}
-        slot = conn.execute(
-            "select * from report_page_slots where report_id = ? and page_number = ?",
-            (candidate["report_id"], candidate["page_number"]),
-        ).fetchone()
-        if slot and slot["control_id"] and slot["control_id"] != candidate["control_id"]:
-            previous = conn.execute("select * from assets where id = ?", (slot["control_id"],)).fetchone()
-            if previous:
-                register_report_page_candidate(
-                    conn,
-                    candidate["report_id"],
-                    candidate["page_number"],
-                    previous["id"],
-                    previous["title"],
-                    "采用新候选页前的上一版当前页",
-                )
-        promote_asset_version(conn, candidate["control_id"])
-        attach_report_page_control(
-            conn,
-            candidate["report_id"],
-            candidate["page_number"],
-            candidate["control_id"],
-            candidate["title"] or control["title"],
-            "已手动采用候选页",
-            replace=True,
-        )
-        sync_result = sync_report_index_from_slots(conn, candidate["report_id"], [candidate["page_number"]], "采用候选页后同步最新汇报 index")
-        conn.execute(
-            "update report_page_candidates set status = 'adopted', updated_at = ? where id = ?",
-            (now_ms(), candidate_id),
-        )
-        report_id = candidate["report_id"]
-    result = get_report_page_slots(report_id)
-    result["reportSync"] = sync_result
-    return result
 
 
-
-
-def copy_page_variant(extract_root, source_rel, variant, source_hash):
-    return import_copy_page_variant(extract_root, source_rel, variant, source_hash)
 
 
 def insert_control_asset(
@@ -2329,11 +2042,14 @@ def insert_control_asset(
 def report_trusted_url(report):
     if not report:
         return ""
+    preview_url = report["preview_url"] if "preview_url" in report.keys() else ""
+    if (preview_url or "").startswith("/reports/"):
+        return preview_url
     upload_id = report["upload_id"] if "upload_id" in report.keys() else ""
     source_path = report["source_path"] if "source_path" in report.keys() else ""
     if upload_id and source_path:
         return f"/extracted/{upload_id}/{source_path}"
-    return report["preview_url"] if "preview_url" in report.keys() else ""
+    return preview_url
 
 
 def trusted_entry_from_row(report):
@@ -2515,10 +2231,7 @@ def sync_report_index_from_slots(conn, report_id, page_numbers=None, change_note
             report["id"],
         ),
     )
-    try:
-        generate_html_thumbnail(report["id"], source, source_hash)
-    except Exception:
-        pass
+    # The next metadata read queues a thumbnail after this transaction ends.
     trusted_entry = validate_report_trusted_entry(conn, report_id, refresh=True)
     invalidate_stats_cache()
     return {"synced": True, "reason": change_note, "pages": changed_pages, "sourcePath": rel, "trustedEntry": trusted_entry}
@@ -2577,7 +2290,7 @@ def import_report_page_as_control(report_id, page_number, title=""):
             "select * from assets where source_hash = ? and asset_type = 'control' limit 1",
             (source_hash,),
         ).fetchone()
-        tags = merge_tags(report["tags"], ["页面素材", "页面片段", "手动导入", f"源汇报:{report['asset_code']}", f"第{page_number}页"])
+        tags = []
         usage = f"从汇报素材 {report['asset_code']} 手动导入的第 {page_number} 页"
 
         if current_asset:
@@ -2720,30 +2433,17 @@ def insert_asset_record(
         return None
     asset_code = next_asset_code(conn, asset_type, category, media_kind)
     title = file_path.stem.replace("-", " ").replace("_", " ").strip() or file_path.name
+    if media_kind == "html" and asset_type == "control":
+        with file_path.open(encoding="utf-8-sig", errors="replace") as source:
+            title = html_document_title(source.read(65536)) or title
     tags = ""
     resource_kind = resource_kind_for(file_path, media_kind, title, tags) if asset_type == "resource" else ""
-    if resource_kind:
-        tags = ",".join(normalize_role_tags(
-            merge_tags(
-                tags,
-                [RESOURCE_KINDS.get(resource_kind, resource_kind)],
-                suggest_material_tags(" ".join([title, rel, usage]), resource_kind),
-                image_trait_tags(file_path) if media_kind in {"image", "gif"} else [],
-                source_process_tags(source_type),
-                page_usage_tags(" ".join([title, rel, usage])),
-            ),
-            asset_type,
-            resource_kind,
-            " ".join([title, rel]),
-        ))
     preview_url = ""
 
     if asset_type in {"report", "page", "control"} and not snippet:
         snippet = read_text_sample(file_path)
     if asset_type in {"report", "page", "resource", "control"}:
         preview_url = f"/extracted/{upload_id}/{rel}"
-    if asset_type == "resource":
-        title, tags = apply_company_logo_metadata(title, tags, rel, usage, resource_kind)
 
     conn.execute(
         """
@@ -2789,6 +2489,7 @@ def scan_upload(upload_id, extract_root, description="", conn=None):
     if conn is None:
         with db() as owned_conn:
             return scan_upload(upload_id, extract_root, description, conn=owned_conn)
+    prepare_image_deck(extract_root, report_viewer_html)
     files = [path for path in extract_root.rglob("*") if path.is_file()]
     if control_template_manifest(extract_root):
         control_id, resource_count = insert_control_template_asset(conn, extract_root, upload_id, "template", description)
@@ -2845,10 +2546,6 @@ def scan_upload(upload_id, extract_root, description="", conn=None):
 
 
 
-def report_code_to_control_code(report_code, page_number):
-    return import_report_code_to_control_code(report_code, page_number)
-
-
 def find_existing_asset(conn, upload_id, source_path, asset_type):
     return conn.execute(
         """
@@ -2887,16 +2584,8 @@ def control_display_title(title, page_number):
     return f"{padded} {value}"
 
 
-def safe_int(value, default=0):
-    return import_safe_int(value, default)
-
-
 def load_report_package_manifest(extract_root):
     return import_load_report_package_manifest(extract_root, read_json_file=read_json_file)
-
-
-def report_package_entry_path(extract_root, manifest, manifest_kind):
-    return import_report_package_entry_path(extract_root, manifest, manifest_kind)
 
 
 def clean_slide_label(value):
@@ -2965,7 +2654,11 @@ def generated_external_report_page_items(extract_root, manifest, manifest_kind):
         report_html = report_html_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return []
-    page_spans = split_page_node_spans(report_html)
+    native_deck = read_native_deck(report_html_path)
+    spark_root = spark_package_root(Path(extract_root)) if native_deck else None
+    has_archived_media = (report_html_path.parent / MEDIA_DIRECTORY).is_dir()
+    own_native_pages = native_deck and (report_html_path.parent == spark_root or has_archived_media)
+    page_spans = native_deck.frames if native_deck else split_page_node_spans(report_html)
     if not page_spans:
         return []
     deck_slides, deck_by_key, index_slides, index_by_key = load_deck_slides(extract_root)
@@ -2975,7 +2668,28 @@ def generated_external_report_page_items(extract_root, manifest, manifest_kind):
         title = external_report_page_title(page_number, page_node, deck_slides, deck_by_key, index_slides, index_by_key)
         rel = f"_minem_pages/page-{page_number:03d}/index.html"
         target = generated_root / f"page-{page_number:03d}" / "index.html"
-        page_html = inject_html_base_href(split_control_html(report_html, page_node, title), "../../")
+        if own_native_pages:
+            write_native_deck_export(report_html_path, [page_number], target, target.parent, single_page=True)
+            if has_archived_media:
+                audit = audit_dependency_closure(target.parent)
+                if audit["missing"] or audit["truncated"]:
+                    raise ValueError(f"第 {page_number} 页的播放资源检查未通过")
+            page_manifest = {"format": "minem-owned-native-page", "title": title, "sourcePage": page_number}
+            (target.parent / "manifest.json").write_text(json.dumps(page_manifest, ensure_ascii=False), encoding="utf-8")
+            page_html = target.read_text(encoding="utf-8")
+        elif native_deck:
+            source_url = "/" + quote(report_html_path.relative_to(extract_root).as_posix(), safe="/")
+            native_base = resolve_deck_base(native_deck, source_url)
+            if not external_deck_base(native_deck):
+                base_path = unquote(urlparse(native_base).path)
+                base_file = extract_root / base_path.lstrip("/")
+                native_base = quote(Path(os.path.relpath(base_file, target.parent)).as_posix(), safe="/")
+                if base_path.endswith("/"):
+                    native_base += "/"
+            page_html = render_native_deck(native_deck, [page_number], native_base, single_page=True)
+        else:
+            source_base = Path(os.path.relpath(report_html_path.parent, target.parent)).as_posix()
+            page_html = inject_html_base_href(build_control_html(report_html, page_node, title), quote(source_base, safe="/") + "/")
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             current = target.read_text(encoding="utf-8") if target.exists() else ""
@@ -3007,7 +2721,6 @@ def report_manifest_page_items(extract_root, manifest, manifest_kind):
         manifest,
         manifest_kind,
         read_json_file=read_json_file,
-        merge_tags=merge_tags,
     )
     if items:
         return items
@@ -3059,7 +2772,10 @@ def copy_package_preview_thumbnail(asset_id, extract_root, preview_rel, html_pat
             return True
         except Exception:
             pass
-    return generate_html_thumbnail(asset_id, html_path, source_fingerprint)
+    # Scanning owns a write transaction. Browser rendering belongs to the
+    # post-commit preview phase (or the lazy thumbnail endpoint), otherwise a
+    # large report blocks every unrelated edit while its pages render.
+    return False
 
 
 def sync_report_package_resources(conn, upload_id, extract_root, report_code, report_title):
@@ -3074,11 +2790,6 @@ def sync_report_package_resources(conn, upload_id, extract_root, report_code, re
         file_hash=file_hash,
         find_existing_asset=find_existing_asset,
         resource_kind_for=resource_kind_for,
-        merge_tags=merge_tags,
-        resource_kinds=RESOURCE_KINDS,
-        suggest_material_tags=suggest_material_tags,
-        normalize_role_tags=normalize_role_tags,
-        apply_company_logo_metadata=apply_company_logo_metadata,
         slugify=slugify,
         next_asset_code=next_asset_code,
         now_ms=now_ms,
@@ -3097,7 +2808,6 @@ def sync_report_material_package(conn, upload_id, extract_root):
         next_asset_code=next_asset_code,
         clean_report_title=clean_report_title,
         report_material_title=report_material_title,
-        merge_tags=merge_tags,
         read_text_sample=read_text_sample,
         file_hash=file_hash,
         copy_package_preview_thumbnail=copy_package_preview_thumbnail,
@@ -3156,82 +2866,11 @@ def update_import_task(task_id, **updates):
 
 
 def list_import_tasks():
-    return list_import_task_records(IMPORT_TASK_STORE, limit=8)
+    return list_import_task_records(IMPORT_TASK_STORE, limit=24)
 
 
 def get_import_task(task_id):
     return get_import_task_record(IMPORT_TASK_STORE, task_id)
-
-
-def start_tag_analysis_task(task_id):
-    threading.Thread(
-        target=run_tag_analysis_task_record,
-        args=(DB_PATH, EXTRACTED, task_id),
-        name=f"minem-tag-analysis-{task_id}",
-        daemon=True,
-    ).start()
-
-
-def create_tag_analysis_task(asset_ids, trigger_type="manual", scope_type="assets"):
-    with db() as conn:
-        result = create_tag_analysis_task_record(conn, asset_ids, trigger_type, scope_type)
-        if result.get("ok"):
-            task = conn.execute("select * from tag_analysis_tasks where id = ?", (result["taskId"],)).fetchone()
-            result["task"] = public_tag_analysis_task(task)
-    if result.get("ok"):
-        start_tag_analysis_task(result["taskId"])
-    return result
-
-
-def list_tag_analysis_tasks(limit=20):
-    with db() as conn:
-        rows = conn.execute("select * from tag_analysis_tasks order by updated_at desc, created_at desc limit ?", (max(1, min(limit, 100)),)).fetchall()
-    return {"ok": True, "tasks": [public_tag_analysis_task(row) for row in rows]}
-
-
-def get_tag_analysis_task(task_id):
-    with db() as conn:
-        row = conn.execute("select * from tag_analysis_tasks where id = ?", (task_id,)).fetchone()
-    return {"ok": bool(row), "task": public_tag_analysis_task(row) if row else None, "error": "标签任务不存在" if not row else ""}
-
-
-def run_scheduled_tag_analysis():
-    with db() as conn:
-        ids = tag_changed_asset_ids(conn)
-    return create_tag_analysis_task(ids, trigger_type="scheduled", scope_type="changed-assets") if ids else {"ok": True, "skipped": True, "reason": "没有待分析或内容变化的素材"}
-
-
-def start_tag_scheduler():
-    global TAG_SCHEDULER_WORKER
-    if TAG_SCHEDULER_WORKER and TAG_SCHEDULER_WORKER.is_alive():
-        return
-    def loop():
-        last_date = ""
-        while True:
-            local = time.localtime()
-            today = time.strftime("%Y-%m-%d", local)
-            if local.tm_hour == 0 and local.tm_min == 0 and today != last_date:
-                last_date = today
-                try:
-                    run_scheduled_tag_analysis()
-                except Exception as error:
-                    print(f"Scheduled tag analysis skipped: {error}")
-            time.sleep(20)
-    TAG_SCHEDULER_WORKER = threading.Thread(target=loop, name="minem-tag-scheduler", daemon=True)
-    TAG_SCHEDULER_WORKER.start()
-
-
-def reject_oversized_upload(handler):
-    try:
-        length = int(handler.headers.get("Content-Length", "0") or 0)
-    except ValueError:
-        length = 0
-    try:
-        validate_upload_request_size(length)
-    except UploadLimitError as error:
-        handler.send_json({"ok": False, "error": str(error)}, 413)
-        return True
-    return False
 
 
 def import_result_for_upload(upload_id):
@@ -3297,16 +2936,41 @@ def existing_import_result_for_extract_root(extract_root):
 
 
 def generate_html_thumbnail(asset_id, html_path, source_fingerprint="", allow_text_fallback=True):
-    created = render_html_thumbnail(
-        asset_id,
-        html_path,
-        thumbnails_dir=THUMBNAILS,
-        image_module=Image,
-        image_draw_module=ImageDraw,
-        image_font_module=ImageFont,
-        read_text_sample=read_text_sample,
-        allow_text_fallback=allow_text_fallback,
-    )
+    html_path = Path(html_path)
+    with tempfile.TemporaryDirectory(prefix="minem-native-thumb-") as temporary:
+        with db() as conn:
+            asset = conn.execute("select asset_type from assets where id=?", (asset_id,)).fetchone()
+        if asset and asset["asset_type"] in {"report", "page"}:
+            result, pages = report_public_page_items(asset_id)
+            if result.get("ok") and pages:
+                first = pages[0]
+                source = extracted_url_to_path(first.get("src"))
+                if frame := first.get("nativeFrame"):
+                    html_path = Path(temporary) / "index.html"
+                    write_native_deck_export(frame[0], [frame[1]], html_path, Path(temporary), single_page=True)
+                elif source and source.is_file():
+                    html_path = source
+        if Image and (cover := packaged_page_cover_path(html_path)):
+            if render_contained_thumbnail(cover, thumbnail_path(asset_id), html_path, image_module=Image):
+                write_thumbnail_meta(asset_id, source_fingerprint)
+                return True
+        if {"_minem_pages", "_minem_normalized"}.intersection(html_path.parts) and not read_native_deck(html_path):
+            with db() as conn:
+                frame = native_control_frames(conn, [asset_id]).get(asset_id)
+            if frame:
+                package = Path(temporary)
+                html_path = package / "index.html"
+                write_native_deck_export(frame[0], [frame[1]], html_path, package, single_page=True)
+        created = render_html_thumbnail(
+            asset_id,
+            html_path,
+            thumbnails_dir=THUMBNAILS,
+            image_module=Image,
+            image_draw_module=ImageDraw,
+            image_font_module=ImageFont,
+            read_text_sample=read_text_sample,
+            allow_text_fallback=allow_text_fallback,
+        )
     if created:
         write_thumbnail_meta(asset_id, source_fingerprint)
     return created
@@ -3351,6 +3015,178 @@ def run_import_task(task_id, stored_path, original, upload_id, description, cont
         now_ms=now_ms,
         content_hash=content_hash,
     )
+
+
+def build_drive_report_package(job, stored):
+    source_root = job / "drive-source"
+    source = source_root / "index.html"
+    files = []
+    size = 0
+    for path in source_root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("飞书文件夹包含不受支持的文件链接")
+        if path.is_file():
+            files.append(path)
+            size += path.stat().st_size
+        if len(files) > MAX_ZIP_FILES or size > MAX_ZIP_TOTAL_BYTES:
+            raise ValueError("飞书文件夹超过素材包的大小或文件数量限制")
+    deck = read_native_deck(source)
+    if not deck or not deck.frames or external_deck_base(deck):
+        raise ValueError("文件夹需要包含飞书汇报入口 index.html 和对应的 assets 目录")
+    title = html_document_title(deck.source) or "飞书汇报"
+    package = job / "package"
+    pages = []
+    file_size = 0
+    file_count = 0
+    slide_index = load_deck_slides(source_root)
+    for number, (_, _, frame) in enumerate(deck.frames, 1):
+        target = package / f"pages/page-{number:03d}/index.html"
+        heading = re.search(r"<h[12]\b[^>]*>(.*?)</h[12]>", frame, re.I | re.S)
+        page_title = clean_slide_label(re.sub(r"<[^>]+>", " ", heading[1])) if heading else ""
+        page_title = page_title or external_report_page_title(number, frame, *slide_index)
+        write_native_deck_export(source, [number], target, target.parent, single_page=True, extracted_root=job)
+        try:
+            localize_drive_fonts(target.parent, package / ".font-cache")
+        except ValueError as error:
+            raise ValueError(f"第 {number} 页的{error}") from error
+        (target.parent / "manifest.json").write_text(json.dumps(
+            {"format": "minem-owned-native-page", "title": page_title, "sourcePage": number}, ensure_ascii=False
+        ), encoding="utf-8")
+        page_audit = audit_dependency_closure(target.parent, require_local=True)
+        if page_audit["missing"]:
+            sample = "、".join(item["resolved"] for item in page_audit["missing"][:3])
+            raise ValueError(f"第 {number} 页缺少本地播放资源：{sample}")
+        if page_audit["truncated"]:
+            raise ValueError(f"第 {number} 页包含过多资源引用")
+        if remote := page_audit["remote"]:
+            raise ValueError(f"第 {number} 页的 {remote['source']} 引用了未随包提供的资源（{remote['host']}）")
+        for item in target.parent.rglob("*"):
+            if item.is_file():
+                file_size += item.stat().st_size
+                file_count += 1
+        if file_size > MAX_ZIP_TOTAL_BYTES or file_count > MAX_ZIP_FILES:
+            raise ValueError("独立封装后的汇报超过素材包限制")
+        pages.append({"title": page_title, "display_page": number, "path": target.relative_to(package).as_posix()})
+    shutil.rmtree(package / ".font-cache", ignore_errors=True)
+    digest = hashlib.sha256()
+    for path in sorted(files):
+        digest.update(path.relative_to(source_root).as_posix().encode() + b"\x00")
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    viewer = report_viewer_html(title, [{"title": p["title"], "src": p["path"]} for p in pages])
+    (package / "index.html").write_text(viewer + f"\n<!-- Source bundle {digest.hexdigest()} -->\n", encoding="utf-8")
+    (package / "manifest.json").write_text(json.dumps(
+        {"asset_type": "report", "title": title, "entry": "index.html", "pages": pages}, ensure_ascii=False
+    ), encoding="utf-8")
+    # This archive is generated locally. The shared ZIP importer still checks
+    # entry count, member size and total extracted size before writing files.
+    zip_report_export_directory(package, stored)
+    return f"{title[:120]}.zip"
+
+
+def enqueue_drive_import(root, token, index, description, source_url):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    task_id = f"task-{stamp}-{secrets.token_hex(4)}"
+    upload_id = f"import-{stamp}-{secrets.token_hex(4)}"
+    job = root / task_id
+    job.mkdir(mode=0o700)
+    try:
+        task = create_import_task({
+            "id": task_id, "uploadId": upload_id, "fileName": f"飞书文件夹 {index}",
+            "status": "queued", "progress": 4, "message": "等待下载",
+            "sourceUrl": source_url,
+        })
+        write_json_atomically(job / "job.json", {"uploadId": upload_id, "token": token, "description": description})
+        return task
+    except (OSError, sqlite3.Error):
+        shutil.rmtree(job, ignore_errors=True)
+        task = update_import_task(task_id, status="failed", progress=100, message="无法保存导入任务",
+                                  error="请检查本机项目目录和存储空间")
+        if task is not None:
+            return task
+        raise
+
+
+def process_drive_import(root, job):
+    task_id = job.name
+    task = get_import_task(task_id)
+    if not task or task["status"] in {"success", "failed"}:
+        shutil.rmtree(job, ignore_errors=True)
+        return
+    metadata = read_json_file(job / "job.json")
+    upload_id = task["uploadId"]
+    stored = UPLOADS / f"{upload_id}.zip"
+    try:
+        if metadata.get("uploadId") != upload_id:
+            raise ValueError("导入任务信息不完整，请重新提交链接")
+        if task["status"] == "running" and task["progress"] >= 38:
+            with db() as conn:
+                committed = conn.execute(
+                    "select file_count, asset_count from uploads where id=? and asset_count>0", (upload_id,)
+                ).fetchone()
+            if committed and (preview := import_result_for_upload(upload_id)).get("previewUrl"):
+                update_import_task(task_id, status="success", progress=100, message="已恢复导入结果",
+                                   fileCount=committed["file_count"], assetCount=committed["asset_count"], **preview)
+                return
+
+        request_path, response = job / "request.json", job / "result.json"
+        if not request_path.is_file():
+            if not drive_worker_alive(root):
+                # Keep the queued task available while the host service restarts.
+                return
+            write_json_atomically(request_path, {
+                "token": metadata["token"], "expires": time.time() + DRIVE_QUEUE_SECONDS,
+                "max_files": MAX_ZIP_FILES, "max_bytes": MAX_ZIP_TOTAL_BYTES,
+            })
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        last_progress = None
+        while not response.is_file():
+            progress = read_json_file(job / "progress.json")
+            if progress:
+                started_at = progress.get("startedAt", request["expires"] - DRIVE_QUEUE_SECONDS)
+                deadline = started_at + DRIVE_DOWNLOAD_SECONDS + 20
+                if progress != last_progress:
+                    message = "网络传输中断，正在重试" if progress["attempt"] > 1 else "正在下载飞书文件夹"
+                    if progress["bytes"]:
+                        message += f" · 已接收 {progress['bytes'] / (1024 * 1024):.1f} MB"
+                    update_import_task(task_id, status="running", progress=8, message=message)
+                    last_progress = progress
+            else:
+                deadline = request["expires"] + 5
+            if time.time() >= deadline:
+                raise ValueError("飞书文件夹下载超时" if progress else "飞书下载排队超时，请重新导入")
+            time.sleep(1)
+
+        result = json.loads(response.read_text(encoding="utf-8"))
+        if not result.get("ok"):
+            raise ValueError(result.get("error") or "飞书文件夹下载失败")
+        update_import_task(task_id, status="running", progress=11, message="正在检查完整性并逐页封装")
+        shutil.rmtree(job / "package", ignore_errors=True)
+        filename = build_drive_report_package(job, stored)
+        update_import_task(task_id, fileName=filename, storedPath=runtime_record_path(stored, RUNTIME_ROOT))
+        run_import_task(task_id, str(stored), filename, upload_id, metadata["description"])
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        stored.unlink(missing_ok=True)
+        update_import_task(task_id, status="failed", progress=100, message="飞书链接导入失败",
+                           error=str(error) if isinstance(error, ValueError) else "文件处理失败，请重试")
+    finally:
+        current = get_import_task(task_id)
+        if current and current["status"] in {"success", "failed"}:
+            shutil.rmtree(job, ignore_errors=True)
+
+
+def drive_import_loop():
+    root = drive_import_queue(RUNTIME_ROOT)
+    while True:
+        try:
+            queued = (path for path in root.glob("*/job.json")
+                      if DRIVE_JOB_ID.fullmatch(path.parent.name) and not path.parent.is_symlink())
+            for path in sorted(queued, key=lambda path: path.stat().st_mtime_ns):
+                process_drive_import(root, path.parent)
+        except (OSError, sqlite3.Error) as error:
+            print(f"读取飞书导入队列失败：{type(error).__name__}", file=sys.stderr)
+        time.sleep(.5)
 
 
 def load_import_sources():
@@ -3430,6 +3266,15 @@ def delete_library_file(asset, conn=None):
     return False
 
 
+def history_snapshot_file(relative):
+    relative = relative.removeprefix("_history/")
+    for root in (HISTORY_DIR, LEGACY_HISTORY_DIR):
+        path = (root / relative).resolve()
+        if path.is_relative_to(root.resolve()) and path.is_file():
+            return path
+    return None
+
+
 def delete_asset_history_files(conn, asset_ids):
     if not asset_ids:
         return
@@ -3437,9 +3282,15 @@ def delete_asset_history_files(conn, asset_ids):
     rows = conn.execute(f"select id, snapshot_path from asset_history where asset_id in ({placeholders})", asset_ids).fetchall()
     for row in rows:
         if row["snapshot_path"]:
-            path = (EXTRACTED / row["snapshot_path"]).resolve()
-            if is_path_within(path, EXTRACTED) and path.exists() and path.is_file():
-                path.unlink()
+            relative = row["snapshot_path"]
+            if relative.startswith("_history/"):
+                path = history_snapshot_file(relative)
+                if path:
+                    path.unlink()
+            else:
+                path = (EXTRACTED / relative).resolve()
+                if path.is_relative_to(EXTRACTED.resolve()) and path.is_file():
+                    path.unlink()
         thumb = THUMBNAILS / f"{row['id']}.png"
         if thumb.exists() and thumb.is_file():
             thumb.unlink()
@@ -3467,7 +3318,11 @@ def cleanup_empty_created_upload(conn, upload_id):
 
 
 def delete_asset_thumbnail(asset_id):
-    thumb = THUMBNAILS / f"{asset_id}.png"
+    if not is_safe_filename_stem(asset_id):
+        return False
+    thumb = (THUMBNAILS / f"{asset_id}.png").resolve()
+    if not is_path_within(thumb, THUMBNAILS):
+        return False
     if thumb.exists() and thumb.is_file():
         thumb.unlink()
         return True
@@ -3534,33 +3389,10 @@ def add_version_counts(conn, rows, *, include_source_batches=True, include_repor
             groups,
         ).fetchall()
     }
-    asset_ids = [row["id"] for row in rows]
-    storyline_counts = {}
-    if asset_ids:
-        placeholders = ",".join("?" for _ in asset_ids)
-        for row in conn.execute(
-            f"""
-            select asset_id, sum(count) count from (
-              select source_report_id asset_id, count(*) count
-              from report_storyline_collections
-              where source_report_id in ({placeholders})
-              group by source_report_id
-              union all
-              select output_report_id asset_id, count(*) count
-              from report_storyline_collections
-              where output_report_id in ({placeholders})
-              group by output_report_id
-            )
-            group by asset_id
-            """,
-            asset_ids + asset_ids,
-        ).fetchall():
-            storyline_counts[row["asset_id"]] = row["count"]
     assets = []
     for row in rows:
         item = row_to_asset(row)
         item["versionCount"] = counts.get(row["version_group"] or row["id"], 1)
-        item["storylineCount"] = storyline_counts.get(row["id"], 0)
         assets.append(item)
     report_ids = [asset["id"] for asset in assets if asset.get("asset_type") == "report"]
     if report_ids:
@@ -3660,36 +3492,6 @@ def invalidate_stats_cache():
     STATS_CACHE["expires_at"] = 0
 
 
-def normalize_tag_payload(value):
-    if isinstance(value, list):
-        raw = value
-    else:
-        raw = re.split(r"[,，、;；\n]+", str(value or ""))
-    cleaned = []
-    for tag in raw:
-        tag = str(tag).strip().strip("#")
-        if 1 <= len(tag) <= 24 and not re.search(r"[<>={}()]", tag):
-            cleaned.append(tag)
-    return merge_tags(cleaned)[:40]
-
-
-def update_asset_tags(asset_id, tags):
-    if not LEGACY_TAGS_ENABLED:
-        return {"ok": False, "error": "旧标签体系已停用，暂不支持编辑标签"}
-    normalized = normalize_tag_payload(tags)
-    with db() as conn:
-        asset = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
-        if not asset:
-            return {"ok": False, "error": "素材不存在"}
-        conn.execute(
-            "update assets set tags = ?, tag_seeded = 1, updated_at = ? where id = ?",
-            (",".join(normalized), now_ms(), asset_id),
-        )
-        row = conn.execute("select * from assets where id = ?", (asset_id,)).fetchone()
-        updated = add_version_counts(conn, [row])[0]
-    return {"ok": True, "asset": updated}
-
-
 def normalize_asset_title(value):
     title = re.sub(r"\s+", " ", str(value or "")).strip()
     title = re.sub(r"[<>]", "", title).strip()
@@ -3713,489 +3515,40 @@ def update_asset_title(asset_id, title):
     return {"ok": True, "asset": updated}
 
 
-def normalize_storyline_entry(raw, index):
-    if not isinstance(raw, dict):
-        return None
-    directory = raw.get("directory") if isinstance(raw.get("directory"), list) else []
-    fixed_blocks = raw.get("fixedBlocks") if isinstance(raw.get("fixedBlocks"), list) else []
-    tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
-    normalized_directory = []
-    for section in directory:
-        if not isinstance(section, dict):
-            continue
-        default_content = section.get("defaultContent") if isinstance(section.get("defaultContent"), list) else []
-        normalized_directory.append({
-            "title": str(section.get("title") or "").strip(),
-            "role": str(section.get("role") or "").strip(),
-            "defaultContent": [str(item).strip() for item in default_content if str(item).strip()],
-        })
-    title = str(raw.get("title") or "").strip()
-    if not title:
-        return None
-    code = str(raw.get("code") or f"STL-{index + 1:03d}").strip()
-    return {
-        "id": str(raw.get("id") or hashlib.sha1(code.encode("utf-8")).hexdigest()[:12]).strip(),
-        "code": code,
-        "title": title,
-        "scenario": str(raw.get("scenario") or "").strip(),
-        "tone": str(raw.get("tone") or "").strip(),
-        "tags": [str(item).strip() for item in tags if str(item).strip()],
-        "fixedBlocks": [str(item).strip() for item in fixed_blocks if str(item).strip()],
-        "directory": normalized_directory,
-        "createdAt": raw.get("createdAt") or "",
-        "updatedAt": raw.get("updatedAt") or "",
-    }
-
-
-def next_storyline_code(conn):
-    prefix = f"STL-{date_key()}"
-    rows = conn.execute(
-        "select code from report_storyline_collections where code like ?",
-        (f"{prefix}-%",),
-    ).fetchall()
-    max_num = 0
-    for row in rows:
-        try:
-            max_num = max(max_num, int((row["code"] or "").rsplit("-", 1)[-1]))
-        except (TypeError, ValueError):
-            continue
-    return f"{prefix}-{max_num + 1:03d}"
-
-
-def next_storyline_version_no(conn, version_group):
-    return safe_int(conn.execute(
-        "select coalesce(max(version_no), 0) + 1 from report_storyline_collections where version_group = ?",
-        (version_group,),
-    ).fetchone()[0], 1)
-
-
-def compact_storyline_source(data):
-    source_id = data.get("source_asset_id") or data.get("source_report_id") or ""
-    if not source_id:
-        return None
-    source = {
-        "id": source_id,
-        "asset_code": data.get("source_asset_code") or data.get("source_report_code") or "",
-        "title": data.get("source_report_title") or data.get("source_report_code") or "来源汇报",
-        "media_kind": data.get("source_media_kind") or "html",
-        "asset_type": "report",
-        "preview_url": canonical_preview_url({
-            "preview_url": data.get("source_report_preview_url") or "",
-            "upload_id": data.get("source_upload_id") or "",
-            "source_path": data.get("source_source_path") or "",
-        }),
-        "thumbnail_url": "",
-        "tags": split_tags(data.get("source_tags") or ""),
-        "created_at": data.get("source_created_at") or "",
-        "updated_at": data.get("source_updated_at") or "",
-    }
-    source["thumbnail_url"] = thumbnail_url(source_id, thumbnail_source_fingerprint(source))
-    return source
-
-
-def storyline_version_summary(item):
-    return {
-        "id": item["id"],
-        "code": item["code"],
-        "title": item["title"],
-        "scenario": item.get("scenario", ""),
-        "tone": item.get("tone", ""),
-        "tags": item.get("tags", []),
-        "fixedBlocks": item.get("fixedBlocks", []),
-        "directory": item.get("directory", []),
-        "sourceReportId": item.get("sourceReportId", ""),
-        "sourceReportCode": item.get("sourceReportCode", ""),
-        "sourceReport": item.get("sourceReport"),
-        "outputReportId": item.get("outputReportId", ""),
-        "outputReportCode": item.get("outputReportCode", ""),
-        "targetReportId": item.get("targetReportId", ""),
-        "mode": item.get("mode", "collection"),
-        "note": item.get("note", ""),
-        "versionGroup": item.get("versionGroup", ""),
-        "versionNo": item.get("versionNo", 1),
-        "versionParentId": item.get("versionParentId", ""),
-        "versionLabel": item.get("versionLabel", "V1"),
-        "versionCount": item.get("versionCount", 1),
-        "createdAt": item.get("createdAt", ""),
-        "updatedAt": item.get("updatedAt", ""),
-    }
-
-
-def storyline_from_collection(row):
-    data = dict(row)
-    tags = [tag.strip() for tag in (data.get("tags") or "").split(",") if tag.strip()]
-    mode = data.get("mode") or "collection"
-    version_no = safe_int(data.get("version_no"), 1)
-    mode_label = f"故事线版本 V{version_no}"
-    fixed_blocks = [
-        f"来源汇报：{data.get('source_report_code') or ''}",
-        f"版本：V{version_no}",
-    ]
-    if data.get("version_parent_id"):
-        fixed_blocks.append("类型：已有故事线的新版本")
-    else:
-        fixed_blocks.append("类型：新建故事线")
-    if data.get("output_report_code"):
-        fixed_blocks.append(f"历史产出汇报：{data.get('output_report_code')}")
-    if data.get("note"):
-        fixed_blocks.append(f"备注：{data.get('note')}")
-    return {
-        "id": data.get("id"),
-        "code": data.get("code"),
-        "title": data.get("title"),
-        "scenario": f"由 {data.get('source_report_code') or ''} 收藏生成的故事线",
-        "tone": mode_label,
-        "tags": tags,
-        "fixedBlocks": fixed_blocks,
-        "directory": [],
-        "sourceReportId": data.get("source_report_id"),
-        "sourceReportCode": data.get("source_report_code"),
-        "sourceReport": compact_storyline_source(data),
-        "outputReportId": data.get("output_report_id"),
-        "outputReportCode": data.get("output_report_code"),
-        "targetReportId": data.get("target_report_id"),
-        "mode": mode,
-        "note": data.get("note"),
-        "versionGroup": data.get("version_group") or data.get("id"),
-        "versionNo": version_no,
-        "versionParentId": data.get("version_parent_id") or "",
-        "versionLabel": f"V{version_no}",
-        "versionCount": 1,
-        "versions": [],
-        "createdAt": data.get("created_at"),
-        "updatedAt": data.get("updated_at"),
-    }
-
-
-def load_template_storylines(search=""):
-    if not STORYLINES_PATH.exists():
-        return []
-    try:
-        payload = json.loads(STORYLINES_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        raise ValueError("故事线数据文件格式错误")
-    raw_items = payload.get("storylines", []) if isinstance(payload, dict) else payload
-    if not isinstance(raw_items, list):
-        raise ValueError("故事线数据必须是数组")
-    items = [item for item in (normalize_storyline_entry(raw, index) for index, raw in enumerate(raw_items)) if item]
-    return filter_storylines(items, search)
-
-
-def filter_storylines(items, search=""):
-    keyword = (search or "").strip().lower()
-    if not keyword:
-        return items
-
-    def matched(item):
-        text = " ".join([
-            str(item.get("id", "")),
-            str(item.get("code", "")),
-            str(item.get("title", "")),
-            str(item.get("scenario", "")),
-            str(item.get("tone", "")),
-            str(item.get("sourceReportCode", "")),
-            str(item.get("outputReportCode", "")),
-            str(item.get("versionLabel", "")),
-            " ".join(
-                " ".join([
-                    str(version.get("title", "")),
-                    str(version.get("sourceReportCode", "")),
-                    str(version.get("versionLabel", "")),
-                    str(version.get("note", "")),
-                ])
-                for version in item.get("versions", [])
-            ),
-            " ".join(item.get("tags", [])),
-            " ".join(item.get("fixedBlocks", [])),
-            " ".join(
-                " ".join([section.get("title", ""), section.get("role", ""), " ".join(section.get("defaultContent", []))])
-                for section in item.get("directory", [])
-            ),
-        ]).lower()
-        return keyword in text
-    return [item for item in items if matched(item)]
-
-
-def load_storyline_collections(conn, search=""):
-    rows = conn.execute(
-        """
-        select
-          c.*,
-          a.id source_asset_id,
-          a.asset_code source_asset_code,
-          a.title source_report_title,
-          a.preview_url source_report_preview_url,
-          a.source_path source_source_path,
-          a.upload_id source_upload_id,
-          a.media_kind source_media_kind,
-          a.tags source_tags,
-          a.created_at source_created_at,
-          a.updated_at source_updated_at
-        from report_storyline_collections c
-        left join assets a on a.id = c.source_report_id
-        order by c.version_group, c.version_no, c.created_at
-        """
-    ).fetchall()
-    grouped = {}
-    for row in rows:
-        item = storyline_from_collection(row)
-        group_id = item.get("versionGroup") or item.get("id")
-        grouped.setdefault(group_id, []).append(item)
-
-    items = []
-    for versions in grouped.values():
-        ordered = sorted(versions, key=lambda item: (safe_int(item.get("versionNo"), 1), safe_int(item.get("createdAt"), 0)))
-        latest = dict(ordered[-1])
-        summaries = [storyline_version_summary(item) for item in reversed(ordered)]
-        latest["versions"] = summaries
-        latest["versionCount"] = len(summaries)
-        latest["versionLabel"] = f"V{safe_int(latest.get('versionNo'), 1)}"
-        items.append(latest)
-    items.sort(key=lambda item: safe_int(item.get("updatedAt") or item.get("createdAt"), 0), reverse=True)
-    return filter_storylines(items, search)
-
-
-def storyline_sort_timestamp(item):
-    return safe_int(item.get("updatedAt") or item.get("createdAt"), 0)
-
-
-def load_storylines(search=""):
-    try:
-        templates = load_template_storylines(search)
-    except ValueError as error:
-        return {"ok": False, "error": str(error)}
-    with db() as conn:
-        collections = load_storyline_collections(conn, search)
-    items = collections + templates
-    items.sort(key=storyline_sort_timestamp, reverse=True)
-    return {
-        "ok": True,
-        "storylines": items,
-        "summary": {
-            "count": len(items),
-            "directoryCount": sum(len(item.get("directory", [])) for item in items),
-            "fixedBlockCount": sum(len(item.get("fixedBlocks", [])) for item in items),
-        },
-    }
-
-
-def create_report_storyline_collection(source_report_id, payload):
-    title = str(payload.get("title") or "").strip()
-    note = str(payload.get("note") or "").strip()
-    collect_mode = str(payload.get("storylineMode") or payload.get("mode") or "new").strip()
-    target_storyline_id = str(payload.get("target_storyline_id") or payload.get("targetStorylineId") or "").strip()
-    if collect_mode not in {"new", "version"}:
-        return {"ok": False, "error": "故事线收藏方式不正确"}
-    with db() as conn:
-        source = conn.execute(
-            "select * from assets where id = ? and asset_type = 'report'",
-            (source_report_id,),
-        ).fetchone()
-        if not source:
-            return {"ok": False, "error": "来源汇报不存在"}
-        timestamp = now_ms()
-        target_storyline = None
-        if collect_mode == "version":
-            if not target_storyline_id:
-                return {"ok": False, "error": "请选择要更新版本的故事线"}
-            target_storyline = conn.execute(
-                "select * from report_storyline_collections where id = ?",
-                (target_storyline_id,),
-            ).fetchone()
-            if not target_storyline:
-                return {"ok": False, "error": "目标故事线不存在"}
-        if target_storyline:
-            version_group = target_storyline["version_group"] or target_storyline["id"]
-            version_no = next_storyline_version_no(conn, version_group)
-            version_parent_id = target_storyline["id"]
-            collection_code = target_storyline["code"]
-            collection_title = title or target_storyline["title"] or clean_report_title(source["title"]) or source["title"]
-        else:
-            version_no = 1
-            version_parent_id = ""
-            collection_code = next_storyline_code(conn)
-            collection_title = title or clean_report_title(source["title"]) or source["title"]
-            version_group = ""
-        digest = hashlib.sha1(f"{source['id']}:{collection_code}:v{version_no}:{timestamp}".encode("utf-8")).hexdigest()[:10]
-        collection_id = f"storyline-{digest}"
-        if not version_group:
-            version_group = collection_id
-        tags = merge_tags(source["tags"], ["故事线收藏", "汇报材料", collection_code, f"V{version_no}"])
-        conn.execute(
-            """
-            insert into report_storyline_collections
-            (id, code, title, source_report_id, source_report_code, output_report_id, output_report_code, target_report_id, mode, note, tags, version_group, version_no, version_parent_id, created_at, updated_at)
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                collection_id,
-                collection_code,
-                collection_title,
-                source["id"],
-                source["asset_code"],
-                "",
-                "",
-                "",
-                "collection",
-                note,
-                ",".join(tags),
-                version_group,
-                version_no,
-                version_parent_id,
-                timestamp,
-                timestamp,
-            ),
-        )
-        storyline = next(
-            (item for item in load_storyline_collections(conn) if item.get("versionGroup") == version_group),
-            None,
-        )
-    return {"ok": True, "storyline": storyline}
-
-
 def report_viewer_html(title, page_items, release_url=""):
     pages = []
-    for index, item in enumerate(page_items, start=1):
-        page_title = item.get("title") or f"Page {index:02d}"
+    for index, item in enumerate(page_items, 1):
+        size = item.get("canvas") or {}
         pages.append({
-            "id": slugify(page_title) or f"page-{index:02d}",
-            "label": f"Page {index:02d}",
-            "title": page_title,
-            "code": item.get("code") or "",
-            "src": item.get("src") or "",
-            "role": "cover" if index == 1 else "content",
+            "id": item.get("code") or f"page-{index}",
+            "title": item.get("title") or f"第 {index} 页",
+            "src": item.get("displaySrc") or item.get("src") or "",
+            "copySrc": item.get("copySrc") or "",
+            "width": size.get("width") or 1920,
+            "height": size.get("height") or 1080,
         })
-    if not pages:
-        pages = [{"id": "cover", "label": "Page 01", "title": "首页", "code": "", "src": "", "role": "cover"}]
-    pages_json = json.dumps(pages, ensure_ascii=False, indent=6)
-    release_url_json = json.dumps(release_url or "", ensure_ascii=False)
+    # The script element is parsed as raw HTML text, even with type JSON.
+    payload = json.dumps({"pages": pages, "releaseUrl": release_url}, ensure_ascii=False).replace("<", "\\u003c")
+    template = (RESOURCE_ROOT / "minem/report_player.html").read_text(encoding="utf-8")
     safe_title = html.escape(title or "汇报素材", quote=True)
-    return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
-  <style>
-    :root {{ color-scheme: dark; font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; overflow: hidden; background: #02050c; color: #fff; }}
-    .viewer {{ position: relative; width: 100vw; height: 100vh; display: grid; place-items: center; }}
-    .slide-viewport {{ position: relative; width: calc(1920px * var(--deck-scale, 1)); height: calc(1080px * var(--deck-scale, 1)); }}
-    .slide-shell {{ position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #030712; transform: scale(var(--deck-scale, 1)); transform-origin: left top; }}
-    iframe {{ position: absolute; inset: 0; width: 1920px; height: 1080px; border: 0; background: #030712; }}
-    .page-pill {{ position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: inline-flex; gap: 12px; align-items: center; border: 1px solid rgba(153,180,209,.34); border-radius: 999px; padding: 10px 18px; background: rgba(2,5,12,.62); font-size: 14px; }}
-    .nav-btn {{ width: 30px; height: 30px; border: 1px solid rgba(153,180,209,.34); border-radius: 999px; color: #fff; background: rgba(255,255,255,.08); cursor: pointer; }}
-    .nav-btn:disabled {{ opacity: .35; cursor: default; }}
-    .page-tools {{ position: fixed; top: 24px; right: 24px; display: inline-flex; gap: 8px; padding: 6px; border: 1px solid rgba(153,180,209,.34); border-radius: 10px; background: rgba(2,5,12,.72); }}
-    .tool-btn {{ width: 36px; height: 36px; border: 0; border-radius: 7px; color: #fff; background: transparent; font-size: 19px; line-height: 1; cursor: pointer; }}
-    .tool-btn:hover {{ background: rgba(255,255,255,.12); }}
-    .copy-page {{ position: relative; font-size: 0; }}
-    .copy-page::before, .copy-page::after {{ content: ""; position: absolute; width: 11px; height: 12px; border: 1.5px solid currentColor; border-radius: 2px; }}
-    .copy-page::before {{ left: 10px; top: 9px; opacity: .72; }}
-    .copy-page::after {{ left: 14px; top: 13px; background: #02050c; }}
-    html[data-embed="1"] .page-tools {{ display: none; }}
-    @media (max-width: 720px) {{ .page-tools {{ top: 12px; right: 12px; }} .page-pill {{ bottom: 12px; }} }}
-  </style>
-</head>
-<body>
-  <main class="viewer" aria-label="{safe_title}">
-    <div class="slide-viewport"><section class="slide-shell"><iframe class="deck-frame" title="Page 01" src=""></iframe></section></div>
-    <div class="page-tools" aria-label="页面工具"><button class="tool-btn copy-page" type="button" title="复制当前页链接" aria-label="复制当前页链接"></button><button class="tool-btn refresh-page" type="button" title="刷新当前页" aria-label="刷新当前页">↻</button><button class="tool-btn fullscreen-page" type="button" title="全屏" aria-label="全屏">⛶</button></div>
-    <div class="page-pill"><button class="nav-btn prev" type="button" aria-label="上一页">‹</button><span class="page-count">1 / 1</span><span>·</span><span class="page-title">Page 01</span><button class="nav-btn next" type="button" aria-label="下一页">›</button></div>
-  </main>
-  <script>
-	    const pages = {pages_json};
-	    const embedded = new URLSearchParams(window.location.search).get("embed") === "1";
-	    if (embedded) document.documentElement.dataset.embed = "1";
-	    const releaseUrl = {release_url_json};
-	    const heartbeatUrl = releaseUrl ? releaseUrl.replace(new RegExp("/release$"), "/heartbeat") : "";
-	    let currentIndex = 0;
-	    let released = false;
-	    let heartbeatTimer = 0;
-	    const frame = document.querySelector(".deck-frame");
-    const pageCount = document.querySelector(".page-count");
-    const pageTitle = document.querySelector(".page-title");
-    const prevButton = document.querySelector(".prev");
-    const nextButton = document.querySelector(".next");
-    const copyButton = document.querySelector(".copy-page");
-    const refreshButton = document.querySelector(".refresh-page");
-    const fullscreenButton = document.querySelector(".fullscreen-page");
-    function updateDeckScale() {{
-      const scale = Math.min((window.innerWidth - 96) / 1920, (window.innerHeight - 72) / 1080, 1);
-      document.documentElement.style.setProperty("--deck-scale", String(scale));
-    }}
-    function showPage(index) {{
-      currentIndex = Math.max(0, Math.min(index, pages.length - 1));
-      const page = pages[currentIndex] || pages[0];
-      frame.src = page.src ? `${{page.src}}${{page.src.includes("?") ? "&" : "?"}}embed=1&v=${{Date.now()}}` : "";
-      frame.title = `${{page.label}} - ${{page.title}}`;
-      pageCount.textContent = `${{currentIndex + 1}} / ${{pages.length}}`;
-      pageTitle.textContent = page.label;
-      prevButton.disabled = currentIndex === 0;
-      nextButton.disabled = currentIndex >= pages.length - 1;
-    }}
-    updateDeckScale();
-    showPage(0);
-    window.addEventListener("resize", updateDeckScale);
-	    prevButton.addEventListener("click", () => showPage(currentIndex - 1));
-	    nextButton.addEventListener("click", () => showPage(currentIndex + 1));
-	    copyButton.addEventListener("click", async () => {{
-	      const page = pages[currentIndex] || pages[0];
-	      if (!page || !page.src) return;
-	      const url = new URL(page.src, window.location.origin).toString();
-	      try {{
-	        await navigator.clipboard.writeText(url);
-	        copyButton.setAttribute("data-copied", "true");
-	        window.setTimeout(() => {{ copyButton.removeAttribute("data-copied"); }}, 1200);
-	      }} catch (_) {{
-	        window.prompt("复制当前页链接", url);
-	      }}
-	    }});
-	    refreshButton.addEventListener("click", () => showPage(currentIndex));
-	    fullscreenButton.addEventListener("click", async () => {{
-	      try {{
-	        if (document.fullscreenElement) {{
-	          await document.exitFullscreen();
-	        }} else {{
-	          await document.documentElement.requestFullscreen();
-	        }}
-	      }} catch (_) {{
-	        // The browser can deny fullscreen until a direct user gesture.
-	      }}
-	    }});
-	    document.addEventListener("fullscreenchange", () => {{
-	      const active = Boolean(document.fullscreenElement);
-	      fullscreenButton.setAttribute("aria-label", active ? "退出全屏" : "全屏");
-	      fullscreenButton.setAttribute("title", active ? "退出全屏" : "全屏");
-	      fullscreenButton.textContent = active ? "⛶" : "⛶";
-	    }});
-	    function releaseTempReport() {{
-	      if (!releaseUrl || released) return;
-	      released = true;
-	      if (heartbeatTimer) window.clearInterval(heartbeatTimer);
-	      const payload = new Blob(["{{}}"], {{ type: "application/json" }});
-	      if (navigator.sendBeacon) {{
-	        navigator.sendBeacon(releaseUrl, payload);
-	        return;
-	      }}
-	      fetch(releaseUrl, {{ method: "POST", headers: {{ "Content-Type": "application/json" }}, body: "{{}}", keepalive: true }}).catch(() => {{}});
-	    }}
-	    function heartbeatTempReport() {{
-	      if (!heartbeatUrl || released) return;
-	      fetch(heartbeatUrl, {{ method: "POST", keepalive: true }}).catch(() => {{}});
-	    }}
-	    heartbeatTempReport();
-	    if (heartbeatUrl) heartbeatTimer = window.setInterval(heartbeatTempReport, 5000);
-	    window.addEventListener("pagehide", releaseTempReport);
-	    window.addEventListener("keydown", (event) => {{
-      if (event.key === "ArrowLeft") showPage(currentIndex - 1);
-      if (event.key === "ArrowRight") showPage(currentIndex + 1);
-    }});
-  </script>
-</body>
-	</html>
-	"""
+    return re.sub(r"\{\{(TITLE|DATA)\}\}", lambda match: {"TITLE": safe_title, "DATA": payload}[match[1]], template)
+
+
+def packaged_page_cover_path(source):
+    if not source or not source.is_file():
+        return None
+    manifest = read_json_file(source.parent / "manifest.json")
+    if manifest.get("format") != "minem-owned-page":
+        return None
+    resources = manifest.get("resources") or []
+    if not isinstance(resources, list) or not resources or not isinstance(resources[0], str):
+        return None
+    cover = (source.parent / resources[0]).resolve()
+    if not cover.is_relative_to(source.parent.resolve()) or not cover.is_file():
+        return None
+    if cover.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return None
+    return cover
 
 
 def cleanup_temp_report_sessions():
@@ -4236,6 +3589,7 @@ def create_temp_report(payload):
             f"select * from assets where id in ({placeholders}) and asset_type = 'control'",
             control_ids,
         ).fetchall()
+        native_frames = native_control_frames(conn, control_ids)
     controls_by_id = {row["id"]: row for row in rows}
     missing = [control_id for control_id in control_ids if control_id not in controls_by_id]
     if missing:
@@ -4252,6 +3606,9 @@ def create_temp_report(payload):
             "title": control["title"] or f"Page {index:02d}",
             "code": control["asset_code"] or "",
             "src": preview_url,
+            "displaySrc": control_public_url(control_id) if control_id in native_frames else "",
+            "copySrc": control_public_url(control_id),
+            "canvas": None if control_id in native_frames else preview_meta_for_asset(control),
         })
 
     timestamp = now_ms()
@@ -4304,18 +3661,48 @@ def release_temp_report(token):
     return {"ok": True, "released": existed, "id": token}
 
 
-def copy_control_as_report_page(control, target_root, page_number=1):
+def copy_control_as_report_page(control, target_root, page_number=1, conn=None):
     source = asset_library_path(control)
     if not source or not source.exists():
         raise ValueError("页面素材文件不存在")
+    if has_online_spark_storage(source):
+        raise ValueError(UNPACKAGED_ERROR)
     target_dir = target_root / "pages" / f"page-{int(page_number):02d}"
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    if source.name == "index.html":
-        shutil.copytree(source.parent, target_dir, dirs_exist_ok=True)
+    with (db() if conn is None else nullcontext(conn)) as reader:
+        frame = native_control_frames(reader, [control["id"]]).get(control["id"])
+    if read_json_file(source.parent / "manifest.json").get("format") in {"minem-owned-page", "minem-owned-native-page"}:
+        shutil.copytree(source.parent, target_dir)
+        return (target_dir / source.name).relative_to(target_root).as_posix()
+    if frame:
+        native_source, number = frame
+        write_native_deck_export(native_source, [number], target_dir / "index.html", target_dir, single_page=True)
     else:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target_dir / "index.html")
+        bundle = OfflineBundle(EXTRACTED, target_dir, excluded=report_export_excluded_path)
+        return bundle.add(source).relative_to(target_root).as_posix()
     return f"pages/page-{int(page_number):02d}/index.html"
+
+
+def copy_page_for_arrangement(conn, report, source, timestamp, staged):
+    upload_root = (EXTRACTED / report["upload_id"]).resolve()
+    if not report["upload_id"] or not upload_root.is_relative_to(EXTRACTED.resolve()):
+        raise ValueError("汇报素材目录无效")
+    token = secrets.token_hex(8)
+    target = upload_root / "page-copies" / token
+    staged.append(target)
+    relative = copy_control_as_report_page(source, target, conn=conn)
+    path = target / relative
+    source_path = path.relative_to(upload_root).as_posix()
+    control_id = f"{report['id']}-page-{token}"
+    insert_control_asset(
+        conn, asset_id=control_id, title=source["title"], usage="独立封装的汇报页面",
+        tags=split_tags(source["tags"]), snippet=source["snippet"],
+        asset_code=next_asset_code(conn, "control", "page", "html"), source_type="created-report-page",
+        source_path=source_path, preview_url=f"/extracted/{report['upload_id']}/{source_path}",
+        upload_id=report["upload_id"], source_hash=f"owned-page:{token}:{file_hash(path)}", created_at=timestamp,
+    )
+    refresh_upload_count(conn, report["upload_id"])
+    return control_id
 
 
 def created_report_page_asset_id(report_id, page_number, source_hash):
@@ -4357,11 +3744,7 @@ def register_created_report_pages(conn, *, report_id, report_code, report_title,
                 control_code = next_asset_code(conn, "control", "page", "html")
             page_title = str(item.get("title") or "").strip() or f"{clean_report_title(report_title)} 第 {page_number} 页"
             source_code = str(item.get("control_asset_code") or item.get("source_code") or "").strip()
-            tags = merge_tags(
-                ["页面素材", "汇报页面", "创建汇报", report_code, f"第{page_number}页"],
-                [source_code] if source_code else [],
-                item.get("tags") or [],
-            )
+            tags = []
             usage = f"从汇报素材 {report_code} 自动登记的第 {page_number} 页"
             if source_code:
                 usage += f"；来源页面素材：{source_code}"
@@ -4404,22 +3787,6 @@ def copy_report_thumbnail(source_id, target_id, source_fingerprint=""):
         write_thumbnail_meta(target_id, source_fingerprint)
 
 
-def control_codes_from_conversation(text):
-    codes = []
-    seen = set()
-    for match in re.findall(r"CTRL-[A-Z0-9-]+", text or "", flags=re.I):
-        code = match.upper()
-        if code not in seen:
-            seen.add(code)
-            codes.append(code)
-    return codes
-
-
-def title_from_conversation(text):
-    match = re.search(r"标题(?:是|为)\s*[「《“\"]([^」》”\"\n。]+)[」》”\"]?", text or "")
-    return match.group(1).strip() if match else ""
-
-
 def insert_created_report_asset(conn, *, report_id, title, usage, tags, asset_code, source_type, source_path, preview_url, upload_id, source_hash, timestamp):
     conn.execute(
         """
@@ -4446,254 +3813,133 @@ def insert_created_report_asset(conn, *, report_id, title, usage, tags, asset_co
     )
 
 
-def create_storyline_report(payload):
-    conversation = str(payload.get("conversation") or payload.get("prompt") or payload.get("message") or "").strip()
-    mode = str(payload.get("mode") or ("chat" if conversation else "manual")).strip()
-    title = str(payload.get("title") or "").strip() or title_from_conversation(conversation) or f"新建汇报素材 {time.strftime('%Y%m%d-%H%M')}"
-    note = str(payload.get("note") or "").strip()
+def report_cover_path(cover_id):
+    if cover_id not in REPORT_COVER_IDS:
+        raise ValueError("请选择可用的封面模板")
+    private_root = RUNTIME_ROOT / "config" / "report-covers"
+    custom = private_root / f"{cover_id}.webp"
+    if custom.is_file() and custom.resolve().is_relative_to(private_root.resolve()):
+        return custom
+    return REPORT_COVERS / f"{cover_id}.webp"
+
+
+def write_report_cover(target_root, cover_id):
+    target = target_root / "pages" / "page-01"
+    target.mkdir(parents=True)
+    shutil.copyfile(report_cover_path(cover_id), target / "cover.webp")
+    path = target / "index.html"
+    path.write_text(
+        '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>封面</title>'
+        '<style>html,body{margin:0;width:100%;height:100%;background:#080f1d}'
+        'img{display:block;width:100%;height:100%;object-fit:contain}</style>'
+        '<img src="cover.webp" width="1920" height="1080" alt="封面"></html>',
+        encoding="utf-8",
+    )
+    (target / "manifest.json").write_text(json.dumps({
+        "format": "minem-owned-page", "title": "封面", "resources": ["cover.webp"], "coverTemplate": cover_id,
+    }, ensure_ascii=False), encoding="utf-8")
+    return path.relative_to(target_root).as_posix()
+
+
+def create_report_from_pages(page_ids, title="", note="", cover_id=DEFAULT_REPORT_COVER):
+    if cover_id not in REPORT_COVER_IDS:
+        return {"ok": False, "error": "请选择可用的封面模板"}
+    with db() as conn:
+        placeholders = ", ".join("?" for _ in page_ids)
+        rows = conn.execute(
+            f"select * from assets where asset_type = 'control' and id in ({placeholders})", page_ids
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        missing_ids = [page_id for page_id in page_ids if page_id not in by_id]
+        if missing_ids:
+            return {"ok": False, "error": f"页面素材不存在：{'、'.join(missing_ids[:3])}"}
+        controls = [by_id[page_id] for page_id in page_ids]
+
+    title = clean_report_title(title or controls[0]["title"])
     timestamp = now_ms()
-    digest = hashlib.sha1(f"{title}:{mode}:{timestamp}".encode("utf-8")).hexdigest()[:10]
-    upload_id = f"created-report-{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
-    report_id = f"created-report-{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
-    target_root = EXTRACTED / upload_id
-    if target_root.exists():
-        shutil.rmtree(target_root)
-    target_root.mkdir(parents=True, exist_ok=True)
-
-    def fail(message):
-        if target_root.exists():
-            shutil.rmtree(target_root, ignore_errors=True)
-        return {"ok": False, "error": message}
-
-    with db() as conn:
-      asset_code = next_asset_code(conn, "report", "report", "html")
-      source_type = "storyline-report-manual"
-      source_hash = f"created-report:{mode}:{digest}"
-      tags = merge_tags(["汇报素材", "故事线新增", "独立汇报", asset_code])
-      source_path = "index.html"
-      copied_thumbnail_from = ""
-      manifest_pages = []
-
-      if mode in ("manual", "chat"):
-          raw_control_ids = payload.get("controlIds") or payload.get("control_ids") or []
-          if isinstance(raw_control_ids, str):
-              raw_control_ids = [raw_control_ids]
-          control_ids = [str(item).strip() for item in raw_control_ids if str(item).strip()]
-          first_control_id = str(payload.get("firstControlId") or payload.get("first_control_id") or "").strip()
-          if not control_ids and first_control_id:
-              control_ids = [first_control_id]
-          if not control_ids and conversation:
-              control_codes = control_codes_from_conversation(conversation)
-              if control_codes:
-                  placeholders = ",".join("?" for _ in control_codes)
-                  code_rows = conn.execute(f"select id, asset_code from assets where asset_type = 'control' and upper(asset_code) in ({placeholders})", control_codes).fetchall()
-                  ids_by_code = {row["asset_code"].upper(): row["id"] for row in code_rows}
-                  missing_codes = [code for code in control_codes if code not in ids_by_code]
-                  if missing_codes:
-                      return fail(f"页面素材编号不存在：{'、'.join(missing_codes[:3])}")
-                  control_ids = [ids_by_code[code] for code in control_codes]
-          if not control_ids:
-              return fail("请在快捷公式里填写页面素材编号")
-          placeholders = ",".join("?" for _ in control_ids)
-          rows = conn.execute(f"select * from assets where asset_type = 'control' and id in ({placeholders})", control_ids).fetchall()
-          controls_by_id = {row["id"]: row for row in rows}
-          missing_control_ids = [control_id for control_id in control_ids if control_id not in controls_by_id]
-          if missing_control_ids:
-              return fail(f"页面素材不存在：{'、'.join(missing_control_ids[:3])}")
-          controls = [controls_by_id.get(control_id) for control_id in control_ids if control_id in controls_by_id]
-          if not controls:
-              return fail("没有找到可用的页面素材")
-          page_items = []
-          for index, control in enumerate(controls, start=1):
-              try:
-                  page_src = copy_control_as_report_page(control, target_root, index)
-              except (OSError, ValueError) as error:
-                  return fail(str(error) or "页面素材复制失败")
-              page_items.append({
-                  "title": control["title"],
-                  "code": control["asset_code"],
-                  "src": page_src,
-              })
-              manifest_pages.append({
-                  "sequence": index - 1,
-                  "display_page": index,
-                  "role": "cover" if index == 1 else "content",
-                  "title": control["title"],
-                  "control_asset_code": control["asset_code"],
-                  "source_control_id": control["id"],
-                  "control_path": page_src,
-              })
-          (target_root / "index.html").write_text(report_viewer_html(title, page_items), encoding="utf-8")
-          manifest = {
-              "asset_type": "report",
-              "asset_code": asset_code,
-              "title": title,
-              "entry": "index.html",
-              "preview_url": "",
-              "pages": manifest_pages,
-              "created_by": "MineM",
-              "created_at": timestamp,
-          }
-          (target_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-          copied_thumbnail_from = controls[0]["id"]
-          if mode == "chat":
-              source_type = "storyline-report-chat"
-              tags = merge_tags(tags, ["AI对话创建"])
-              control_codes = "、".join(control["asset_code"] for control in controls)
-              usage = f"从故事线模块通过快捷公式新增；页面素材：{control_codes}。"
-              if conversation:
-                  usage += f" 对话公式：{conversation[:500]}"
-          else:
-              usage = f"从故事线模块人工新增；首页页面素材：{controls[0]['asset_code']}。"
-          if note:
-              usage += f" 备注：{note}"
-      elif mode == "copy":
-          version_id = str(payload.get("storylineVersionId") or payload.get("storyline_version_id") or "").strip()
-          if not version_id:
-              return fail("请选择要复制的故事线版本")
-          version = conn.execute("select * from report_storyline_collections where id = ?", (version_id,)).fetchone()
-          if not version:
-              return fail("故事线版本不存在")
-          source_report_id = version["output_report_id"] or version["source_report_id"]
-          source_report = conn.execute("select * from assets where id = ? and asset_type = 'report'", (source_report_id,)).fetchone()
-          if not source_report:
-              return fail("故事线版本没有可复制的来源汇报")
-          source_root = EXTRACTED / source_report["upload_id"]
-          if not source_root.exists():
-              return fail("来源汇报目录不存在")
-          try:
-              shutil.copytree(source_root, target_root, dirs_exist_ok=True)
-          except OSError as error:
-              return fail(str(error) or "故事线版本复制失败")
-          source_path = source_report["source_path"] or "index.html"
-          source_type = "storyline-report-copy"
-          copied_thumbnail_from = source_report["id"]
-          tags = merge_tags(tags, [version["code"], f"复制自:{source_report['asset_code']}"])
-          usage = f"从故事线 {version['code']} 的 V{version['version_no']} 复制为独立汇报素材。"
-          if note:
-              usage += f" 备注：{note}"
-      else:
-          return fail("创建方式不正确")
-
-      report_file = target_root / source_path
-      if not report_file.exists():
-          return fail("汇报入口生成失败")
-      preview_url = f"/extracted/{upload_id}/{source_path}"
-      conn.execute(
-          "insert or replace into uploads (id, filename, stored_path, extract_path, file_count, asset_count, created_at) values (?, ?, ?, ?, ?, ?, ?)",
-          (upload_id, title, str(target_root), str(target_root), sum(1 for path in target_root.rglob("*") if path.is_file()), 1, timestamp),
-      )
-      insert_created_report_asset(
-          conn,
-          report_id=report_id,
-          title=report_material_title(title),
-          usage=usage,
-          tags=tags,
-          asset_code=asset_code,
-          source_type=source_type,
-          source_path=source_path,
-          preview_url=preview_url,
-          upload_id=upload_id,
-          source_hash=source_hash,
-          timestamp=timestamp,
-      )
-      if mode in ("manual", "chat"):
-          created_page_ids = register_created_report_pages(
-              conn,
-              report_id=report_id,
-              report_code=asset_code,
-              report_title=title,
-              target_root=target_root,
-              manifest_pages=manifest_pages,
-              timestamp=timestamp,
-          )
-          for page_id, control in zip(created_page_ids, controls):
-              copy_report_thumbnail(control["id"], page_id, source_hash)
-      copy_report_thumbnail(copied_thumbnail_from, report_id, source_hash)
-      try:
-          if not (THUMBNAILS / f"{report_id}.png").exists():
-              generate_html_thumbnail(report_id, report_file, source_hash)
-      except Exception:
-          pass
-      trusted_entry = validate_report_trusted_entry(conn, report_id, refresh=True)
-      row = conn.execute("select * from assets where id = ?", (report_id,)).fetchone()
-      asset = add_version_counts(conn, [row])[0]
-      asset["trustedEntry"] = trusted_entry
-      invalidate_stats_cache()
-    return {"ok": True, "asset": asset, "url": preview_url}
-
-
-def js_value_span(text, const_name, opener, closer):
-    markers = [f"const {const_name}", f"let {const_name}", f"var {const_name}"]
-    start = -1
-    for marker in markers:
-        start = text.find(marker)
-        if start >= 0:
-            break
-    if start < 0:
-        return None
-    equal_at = text.find("=", start)
-    if equal_at < 0:
-        return None
-    value_start = text.find(opener, equal_at)
-    if value_start < 0:
-        return None
-    depth = 0
-    quote = ""
-    escaped = False
-    for index in range(value_start, len(text)):
-        char = text[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = ""
-            continue
-        if char in ("'", '"', "`"):
-            quote = char
-            continue
-        if char == opener:
-            depth += 1
-        elif char == closer:
-            depth -= 1
-            if depth == 0:
-                return value_start, index + 1
-    return None
-
-
-def js_const_json_value(text, const_name, opener, closer, default):
-    span = js_value_span(text, const_name, opener, closer)
-    if not span:
-        return default
+    report_id = f"created-report-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(5)}"
+    target_root = EXTRACTED / report_id
+    preview_url = report_public_url(report_id)
+    report_file = target_root / "index.html"
+    page_items = []
+    manifest_pages = []
+    owns_directory = False
     try:
-        return json.loads(text[span[0]:span[1]])
-    except json.JSONDecodeError:
-        return default
+        target_root.mkdir()
+        owns_directory = True
+        cover_path = write_report_cover(target_root, cover_id)
+        page_items.append({"title": "封面", "src": cover_path})
+        manifest_pages.append({"display_page": 1, "title": "封面", "control_path": cover_path})
+        with db() as conn:
+            for number, control in enumerate(controls, 2):
+                path = copy_control_as_report_page(control, target_root, number, conn=conn)
+                page_items.append({"title": control["title"], "code": control["asset_code"], "src": path})
+                manifest_pages.append({
+                    "display_page": number, "title": control["title"], "control_asset_code": control["asset_code"],
+                    "source_control_id": control["id"], "control_path": path,
+                })
 
+        audit = audit_dependency_closure(target_root)
+        if audit["missing"] or audit["truncated"]:
+            missing = "、".join(item["resolved"] for item in audit["missing"][:3])
+            raise ValueError(f"页面素材缺少播放资源：{missing}" if missing else "页面素材的资源完整性检查未通过")
 
-def replace_js_const_json(text, const_name, value, opener, closer):
-    span = js_value_span(text, const_name, opener, closer)
-    dumped = json.dumps(value, ensure_ascii=False, indent=6)
-    if span:
-        return f"{text[:span[0]]}{dumped}{text[span[1]:]}"
-    insert_at = text.find("let currentIndex")
-    if insert_at < 0:
-        return f"{text}\nconst {const_name} = {dumped};\n"
-    return f"{text[:insert_at]}const {const_name} = {dumped};\n    {text[insert_at:]}"
+        report_file.write_text(report_viewer_html(title, page_items), encoding="utf-8")
+        usage = f"正文来源：{controls[0]['asset_code']}。"
+        if note:
+            usage += f" 备注：{note}"
+        with db() as conn:
+            conn.execute("begin immediate")
+            asset_code = next_asset_code(conn, "report", "report", "html")
+            manifest = {
+                "asset_type": "report", "asset_code": asset_code, "title": title, "entry": "index.html",
+                "pages": manifest_pages, "cover_template": cover_id, "created_by": "MineM", "created_at": timestamp,
+            }
+            (target_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            relative = runtime_record_path(target_root, RUNTIME_ROOT)
+            conn.execute(
+                "insert into uploads (id, filename, stored_path, extract_path, file_count, asset_count, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+                (report_id, title, relative, relative, sum(1 for path in target_root.rglob("*") if path.is_file()), 1, timestamp),
+            )
+            digest = f"trusted-report:{report_id}:{file_hash(report_file)}"
+            insert_created_report_asset(
+                conn, report_id=report_id, title=report_material_title(title), usage=usage, tags=[],
+                asset_code=asset_code, source_type="created-report", source_path="index.html",
+                preview_url=preview_url, upload_id=report_id, source_hash=digest, timestamp=timestamp,
+            )
+            page_ids = register_created_report_pages(
+                conn, report_id=report_id, report_code=asset_code, report_title=title,
+                target_root=target_root, manifest_pages=manifest_pages, timestamp=timestamp,
+            )
+            if len(page_ids) != len(manifest_pages):
+                raise ValueError("汇报页面登记不完整")
+            entry = validate_report_trusted_entry(conn, report_id, refresh=True)
+            if not entry["ok"]:
+                raise ValueError("汇报入口检查未通过")
+    except (OSError, ValueError, sqlite3.Error) as error:
+        if owns_directory:
+            shutil.rmtree(target_root, ignore_errors=True)
+        return {"ok": False, "error": str(error) if isinstance(error, ValueError) else "创建汇报失败，请重试"}
 
-
-def load_report_asset(report_id):
+    invalidate_stats_cache()
     with db() as conn:
-        row = conn.execute("select * from assets where id = ?", (report_id,)).fetchone()
-    if not row:
-        return None, {"ok": False, "error": "汇报素材不存在"}
-    asset = dict(row)
-    if asset.get("asset_type") not in ("report", "page"):
-        return None, {"ok": False, "error": "只有汇报素材支持 AI 演讲台"}
-    asset["preview_url"] = canonical_preview_url(asset)
-    return asset, None
+        rows = conn.execute("select * from assets where upload_id = ?", (report_id,)).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    cover_page_id = page_ids[0]
+    try:
+        if generate_html_thumbnail(cover_page_id, target_root / cover_path, thumbnail_source_fingerprint(by_id[cover_page_id]), allow_text_fallback=False):
+            copy_report_thumbnail(cover_page_id, report_id, thumbnail_source_fingerprint(by_id[report_id]))
+    except OSError:
+        pass
+    for source, target_id in zip(controls, page_ids[1:]):
+        try:
+            copy_report_thumbnail(source["id"], target_id, thumbnail_source_fingerprint(by_id[target_id]))
+        except OSError:
+            pass
+    with db() as conn:
+        asset = add_version_counts(conn, [by_id[report_id]])[0]
+    asset["trustedEntry"] = entry
+    return {"ok": True, "asset": asset, "url": preview_url}
 
 
 def extracted_url_to_path(url):
@@ -4707,740 +3953,12 @@ def extracted_url_to_path(url):
     return path
 
 
-def presenter_url_for_path(path):
-    try:
-        rel = path.resolve().relative_to(EXTRACTED.resolve())
-    except ValueError:
-        return ""
-    return f"/extracted/{rel.as_posix()}?v={AI_PRESENTER_VERSION}"
-
-
-def report_preview_path(asset):
-    return extracted_url_to_path(asset.get("preview_url") or "")
-
-
-def report_presenter_candidates(asset):
-    candidates = []
-    preview_path = report_preview_path(asset)
-    if preview_path:
-        candidates.append(preview_path.with_name("ai-presenter.html"))
-        try:
-            rel = preview_path.relative_to(EXTRACTED.resolve())
-            if rel.parts:
-                candidates.append(EXTRACTED / rel.parts[0] / "ai-presenter.html")
-        except ValueError:
-            pass
-    upload_id = asset.get("upload_id") or ""
-    if upload_id:
-        candidates.append(EXTRACTED / upload_id / "ai-presenter.html")
-    unique = []
-    seen = set()
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if is_path_within(resolved, EXTRACTED) and resolved not in seen:
-            unique.append(resolved)
-            seen.add(resolved)
-    return unique
-
-
-def existing_report_presenter_path(asset):
-    for candidate in report_presenter_candidates(asset):
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    return None
-
-
-def sanitize_presenter_pages(raw_pages, asset, preview_path=None):
-    pages = []
-    if isinstance(raw_pages, list):
-        for index, page in enumerate(raw_pages, start=1):
-            if not isinstance(page, dict):
-                continue
-            page_id = str(page.get("id") or f"page-{index:02d}").strip()
-            src = str(page.get("src") or "").strip()
-            item = {
-                "id": page_id,
-                "label": str(page.get("label") or f"Page {index:02d}").strip(),
-                "title": str(page.get("title") or page.get("label") or asset.get("title") or f"Page {index:02d}").strip(),
-                "code": str(page.get("code") or "").strip(),
-                "src": src,
-            }
-            for optional_key in ("chapter", "role"):
-                if page.get(optional_key):
-                    item[optional_key] = str(page.get(optional_key)).strip()
-            pages.append(item)
-    if pages:
-        return pages
-    fallback_src = preview_path.name if preview_path else "index.html"
-    return [{
-        "id": "report-page-01",
-        "label": "Page 01",
-        "title": asset.get("title") or "汇报素材",
-        "code": asset.get("asset_code") or "",
-        "src": fallback_src,
-        "role": "page",
-    }]
-
-
-def read_presenter_pages_from_path(path, asset):
-    if not path or not path.exists() or not path.is_file():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    return sanitize_presenter_pages(js_const_json_value(text, "pages", "[", "]", []), asset, path)
-
-
-def read_pages_from_report_preview(asset):
-    preview_path = report_preview_path(asset)
-    if not preview_path or not preview_path.exists() or not preview_path.is_file():
-        return sanitize_presenter_pages([], asset, preview_path)
-    try:
-        text = preview_path.read_text(encoding="utf-8")
-    except OSError:
-        return sanitize_presenter_pages([], asset, preview_path)
-    return sanitize_presenter_pages(js_const_json_value(text, "pages", "[", "]", []), asset, preview_path)
-
-
-def strip_html_text(text):
-    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
-    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def page_expression_base_path(asset, presenter_path=None):
-    if presenter_path:
-        return presenter_path.parent
-    preview_path = report_preview_path(asset)
-    return preview_path.parent if preview_path else None
-
-
-def page_expression_text(page_path):
-    if not page_path or not page_path.exists() or not page_path.is_file():
-        return ""
-    try:
-        text = page_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return ""
-    return strip_html_text(text)[:5000]
-
-
-def attach_page_expression(asset, pages, presenter_path=None):
-    base_path = page_expression_base_path(asset, presenter_path)
-    enriched = []
-    for page in pages or []:
-        item = dict(page)
-        src = str(page.get("src") or "").strip()
-        page_text = ""
-        if base_path and src and not re.match(r"^https?://", src, flags=re.I):
-            candidate = (base_path / src).resolve()
-            if is_path_within(candidate, EXTRACTED):
-                page_text = page_expression_text(candidate)
-        item["expressionText"] = " ".join(
-            str(value or "")
-            for value in (
-                item.get("label"),
-                item.get("title"),
-                item.get("chapter"),
-                item.get("role"),
-                page_text,
-            )
-            if str(value or "").strip()
-        )
-        enriched.append(item)
-    return enriched
-
-
-def read_presenter_notes(path):
-    if not path or not path.exists() or not path.is_file():
-        return {}
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    notes = js_const_json_value(text, "defaultSpeakerNotes", "{", "}", {})
-    return notes if isinstance(notes, dict) else {}
-
-
-def presenter_note_count(notes):
-    return sum(1 for value in (notes or {}).values() if str(value or "").strip())
-
-
-def presenter_script_text(notes, pages):
-    chunks = []
-    for index, page in enumerate(pages or [], start=1):
-        note = str((notes or {}).get(page.get("id") or "") or "").strip()
-        if note:
-            chunks.append(f"Page {index:02d}: {note}")
-    if chunks:
-        return "\n\n".join(chunks)
-    return "\n\n".join(str(value or "").strip() for value in (notes or {}).values() if str(value or "").strip())
-
-
-def report_presenter_status(report_id):
-    asset, error = load_report_asset(report_id)
-    if error:
-        return error
-    presenter_path = existing_report_presenter_path(asset)
-    pages = read_presenter_pages_from_path(presenter_path, asset) if presenter_path else read_pages_from_report_preview(asset)
-    notes = read_presenter_notes(presenter_path)
-    count = presenter_note_count(notes)
-    candidate_paths = report_presenter_candidates(asset)
-    target_path = presenter_path or (candidate_paths[0] if candidate_paths else None)
-    return {
-        "ok": True,
-        "hasScript": count > 0,
-        "scriptCount": count,
-        "pageCount": len(pages),
-        "missingPresenter": presenter_path is None,
-        "presenterUrl": presenter_url_for_path(target_path) if target_path else "",
-        "scriptText": presenter_script_text(notes, pages),
-    }
-
-
-def ensure_report_presenter_file(asset):
-    existing = existing_report_presenter_path(asset)
-    if existing:
-        return existing, read_presenter_pages_from_path(existing, asset), ""
-    candidates = report_presenter_candidates(asset)
-    if not candidates:
-        return None, [], "当前汇报没有可写入的本地预览路径"
-    if not AI_PRESENTER_TEMPLATE.exists():
-        return None, [], "缺少 AI 演讲台模板"
-    target = candidates[0]
-    try:
-        template = AI_PRESENTER_TEMPLATE.read_text(encoding="utf-8")
-    except OSError:
-        return None, [], "AI 演讲台模板读取失败"
-    pages = read_pages_from_report_preview(asset)
-    html_text = replace_js_const_json(template, "pages", pages, "[", "]")
-    html_text = replace_js_const_json(html_text, "defaultSpeakerNotes", {}, "{", "}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        target.write_text(html_text, encoding="utf-8")
-    except OSError:
-        return None, [], "AI 演讲台页面写入失败"
-    return target, pages, ""
-
-
-def parse_marked_script_chunks(script):
-    marker = re.compile(r"^\s*(?:#{1,4}\s*)?(?:page|p|第)\s*0*(\d{1,3})(?:\s*页)?\s*[：:.\-、]?\s*(.*)$", re.I)
-    chunks = []
-    current = None
-    for raw_line in script.splitlines():
-        match = marker.match(raw_line)
-        if match:
-            if current is not None:
-                chunks.append("\n".join(current).strip())
-            current = []
-            rest = match.group(2).strip()
-            if rest:
-                current.append(rest)
-            continue
-        if current is not None:
-            current.append(raw_line.rstrip())
-    if current is not None:
-        chunks.append("\n".join(current).strip())
-    return [chunk for chunk in chunks if chunk]
-
-
-def parse_marked_script_notes(script, pages):
-    marker = re.compile(r"^\s*(?:#{1,4}\s*)?(?:page|p|第)\s*0*(\d{1,3})(?:\s*页)?\s*[：:.\-、]?\s*(.*)$", re.I)
-    notes = {}
-    current_page = None
-    current_lines = []
-
-    def flush():
-        if current_page is None:
-            return
-        if current_page < 1 or current_page > len(pages or []):
-            return
-        chunk = "\n".join(current_lines).strip()
-        if not chunk:
-            return
-        page = pages[current_page - 1]
-        page_id = str(page.get("id") or f"page-{current_page:02d}").strip()
-        if page_id:
-            notes[page_id] = chunk
-
-    for raw_line in script.splitlines():
-        match = marker.match(raw_line)
-        if match:
-            flush()
-            current_page = int(match.group(1))
-            current_lines = []
-            rest = match.group(2).strip()
-            if rest:
-                current_lines.append(rest)
-            continue
-        if current_page is not None:
-            current_lines.append(raw_line.rstrip())
-    flush()
-    return notes
-
-
-def text_keyword_tokens(text):
-    tokens = set()
-    lowered = str(text or "").lower()
-    for seq in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9_-]{1,}", lowered):
-        if re.search(r"[\u4e00-\u9fff]", seq):
-            max_size = 4 if len(seq) >= 4 else len(seq)
-            for size in range(2, max_size + 1):
-                for index in range(0, len(seq) - size + 1):
-                    tokens.add(seq[index:index + size])
-        else:
-            tokens.add(seq.strip("_-"))
-    return {token for token in tokens if token}
-
-
-def script_auto_units(script, page_count):
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", script) if part.strip()]
-    sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;])\s*", script) if part.strip()]
-    if len(sentences) > len(paragraphs) and (len(paragraphs) <= 1 or len(paragraphs) < max(3, page_count // 3)):
-        return sentences
-    if paragraphs:
-        return paragraphs
-    lines = [line.strip() for line in script.splitlines() if line.strip()]
-    return lines or ([script.strip()] if script.strip() else [])
-
-
-def distribute_units_by_order(units, pages):
-    page_count = max(1, len(pages or []))
-    if not units:
-        return {}
-    notes = {}
-    if len(units) <= page_count:
-        for index, unit in enumerate(units):
-            page = pages[index] if index < len(pages) else {}
-            page_id = str(page.get("id") or f"page-{index + 1:02d}").strip()
-            if page_id:
-                notes[page_id] = unit.strip()
-        return notes
-    group_size = max(1, (len(units) + page_count - 1) // page_count)
-    for index in range(page_count):
-        chunk = "\n".join(units[index * group_size:(index + 1) * group_size]).strip()
-        if not chunk:
-            continue
-        page = pages[index] if index < len(pages) else {}
-        page_id = str(page.get("id") or f"page-{index + 1:02d}").strip()
-        if page_id:
-            notes[page_id] = chunk
-    return notes
-
-
-def auto_paginate_script_notes(script, pages):
-    page_list = pages or []
-    page_count = max(1, len(page_list))
-    units = script_auto_units(script, page_count)
-    if not units:
-        return {}
-    if not page_list:
-        return {"page-01": "\n".join(units).strip()}
-
-    page_contexts = []
-    for page in page_list:
-        expression = " ".join(str(page.get(key) or "") for key in ("label", "title", "chapter", "role", "expressionText"))
-        page_contexts.append(text_keyword_tokens(expression))
-
-    notes_by_page = [[] for _ in page_list]
-    matched_count = 0
-    for unit_index, unit in enumerate(units):
-        unit_tokens = text_keyword_tokens(unit)
-        base_index = min(page_count - 1, int(unit_index * page_count / max(1, len(units))))
-        best_index = base_index
-        best_score = 0.0
-        if unit_tokens:
-            for page_index, page_tokens in enumerate(page_contexts):
-                overlap = len(unit_tokens & page_tokens)
-                if not overlap:
-                    continue
-                order_penalty = abs(page_index - base_index) * 0.18
-                score = overlap - order_penalty
-                if score > best_score:
-                    best_score = score
-                    best_index = page_index
-        if best_score >= 1.5:
-            matched_count += 1
-            notes_by_page[best_index].append(unit)
-        else:
-            notes_by_page[base_index].append(unit)
-
-    notes = {}
-    for index, chunks in enumerate(notes_by_page):
-        if not chunks:
-            continue
-        page = page_list[index]
-        page_id = str(page.get("id") or f"page-{index + 1:02d}").strip()
-        if page_id:
-            notes[page_id] = "\n".join(chunks).strip()
-
-    if len(units) >= page_count and matched_count < max(2, len(units) // 8):
-        return distribute_units_by_order(units, page_list)
-    return notes or distribute_units_by_order(units, page_list)
-
-
-def clean_expression_snippet(part):
-    part = re.sub(r"\b(?:cover|toc|contents|chapter-divider|page|role|html[_-]?preview)\b", " ", str(part), flags=re.I)
-    part = re.sub(r"\b(?:CTRL|RPT|RES)-[A-Z0-9-]+\b", " ", part, flags=re.I)
-    part = re.sub(r"\bPage\s*\d+[A-Z]?\b", " ", part, flags=re.I)
-    part = re.sub(r"\s+", " ", part).strip(" -_·•｜|:：")
-    return part
-
-
-def expression_snippets(text, limit=3):
-    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
-    parts = [
-        clean_expression_snippet(part)
-        for part in re.split(r"[。！？!?；;\n\r]+", cleaned)
-    ]
-    seen = set()
-    snippets = []
-    for part in parts:
-        if not (8 <= len(part) <= 120):
-            continue
-        compact = re.sub(r"\s+", "", part.lower())
-        if compact in seen:
-            continue
-        if re.fullmatch(r"(page|ctrl|rpt|html|preview|slide)[\w\s:-]*", part, flags=re.I):
-            continue
-        seen.add(compact)
-        snippets.append(part)
-        if len(snippets) >= limit:
-            break
-    return snippets
-
-
-TIME_NODE_PATTERN = re.compile(
-    r"("
-    r"\d{4}\s*[年/-]\s*\d{1,2}\s*(?:[月/-]\s*\d{1,2}\s*日?)?"
-    r"|\d{4}\s*年"
-    r"|\d{4}\s*[-–—]\s*\d{2,4}"
-    r"|(?:19|20)\d{2}"
-    r"|Q[1-4]"
-    r"|[一二三四五六七八九十]+季度"
-    r"|第[一二三四五六七八九十\d]+阶段"
-    r"|过去[一二三四五六七八九十\d]+年"
-    r"|未来[一二三四五六七八九十\d]+年"
-    r"|近[一二三四五六七八九十\d]+年"
-    r"|下一阶段"
-    r")",
-    re.I,
-)
-
-
-TRANSCRIPT_TIMESTAMP_PATTERN = re.compile(
-    r"(?:[\[【(（]\s*)?"
-    r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?"
-    r"(?:\s*[\]】)）])?"
-)
-
-
-def strip_transcript_timestamps(text):
-    return TRANSCRIPT_TIMESTAMP_PATTERN.sub("\n", str(text or ""))
-
-
-def extract_time_nodes(text, limit=4):
-    seen = set()
-    nodes = []
-    for match in TIME_NODE_PATTERN.findall(str(text or "")):
-        value = re.sub(r"\s+", "", str(match)).strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        nodes.append(value)
-        if len(nodes) >= limit:
-            break
-    return nodes
-
-
-def time_nodes_sentence(nodes):
-    if not nodes:
-        return ""
-    if len(nodes) == 1:
-        return f"时间节点上，这里要特别留意「{nodes[0]}」。"
-    return "时间线上，可以按照" + "、".join(f"「{node}」" for node in nodes[:4]) + "来理解这页内容。"
-
-
-def generated_note_for_page(page, index, total):
-    title = str(page.get("title") or page.get("label") or f"第{index}页").strip()
-    role = str(page.get("role") or "").strip().lower()
-    chapter = str(page.get("chapter") or "").strip()
-    expression_text = page.get("expressionText") or title
-    snippets = expression_snippets(expression_text, 3)
-    time_nodes = extract_time_nodes(" ".join([title, str(expression_text)]), 4)
-    useful = [item for item in snippets if item and item not in {title, page.get("label", "")}]
-    lead = f"这一页我们看「{title}」。"
-    if index == 1 or role == "cover":
-        lead = f"各位好，今天我们围绕「{title}」展开。"
-    elif role in {"toc", "contents"} or "目录" in title:
-        lead = "这一页先建立今天的汇报结构。"
-    elif "chapter" in role or chapter:
-        lead = f"接下来进入{chapter or '下一部分'}，主题是「{title}」。"
-    elif role == "ending" or index == total:
-        lead = f"最后回到「{title}」做一个收束。"
-
-    if useful:
-        body = "重点可以从" + "、".join(f"「{item[:52]}」" for item in useful[:2]) + "切入。"
-    else:
-        body = "讲解时先点出页面核心观点，再结合业务场景说明它为什么重要。"
-    time_body = time_nodes_sentence(time_nodes)
-    if time_body:
-        body = f"{body}{time_body}"
-
-    if index == 1 or role == "cover":
-        close = "我会先交代背景和目标，再带大家进入后面的具体内容。"
-    elif role in {"toc", "contents"} or "目录" in title:
-        close = "接下来我会按照这个顺序，逐步展开关键观点。"
-    elif role == "ending" or index == total:
-        close = "以上就是这一部分的核心结论，也作为今天汇报的最终落点。"
-    else:
-        close = "这一页的目的，是让大家先形成共同理解，再进入下一页。"
-    return f"{lead}{body}{close}"
-
-
-def generate_presenter_script_from_pages(pages):
-    chunks = []
-    total = len(pages or [])
-    for index, page in enumerate(pages or [], start=1):
-        chunks.append(f"Page {index:02d}: {generated_note_for_page(page, index, total)}")
-    return "\n\n".join(chunks).strip()
-
-
-def optimize_imported_speech_text(text):
-    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    text = strip_transcript_timestamps(text)
-    text = re.sub(r"```[\s\S]*?```", " ", text)
-    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.M)
-    text = re.sub(r"^\s{0,3}[-*+]\s+", "", text, flags=re.M)
-    text = re.sub(r"^\s{0,3}\d+[.)、]\s+", "", text, flags=re.M)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"(?<=[\u4e00-\u9fff])\n(?=[\u4e00-\u9fff])", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def extract_pdf_text(data):
-    try:
-        from pypdf import PdfReader
-    except Exception:
-        return "", "PDF 解析依赖不可用"
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        parts = []
-        for index, page in enumerate(reader.pages[:80], start=1):
-            text = page.extract_text() or ""
-            if text.strip():
-                parts.append(f"第{index}页\n{text.strip()}")
-        return "\n\n".join(parts).strip(), ""
-    except Exception as error:
-        return "", f"PDF 解析失败：{error}"
-
-
-def extract_presenter_script_file(file_item, filename):
-    suffix = Path(filename or "").suffix.lower()
-    if suffix not in {".pdf", ".md", ".markdown", ".txt"}:
-        return {"ok": False, "error": "仅支持 PDF、MD、Markdown 或 TXT"}
-    data = file_item.file.read()
-    if suffix == ".pdf":
-        text, error = extract_pdf_text(data)
-        if error:
-            return {"ok": False, "error": error}
-    else:
-        for encoding in ("utf-8", "utf-8-sig", "gb18030"):
-            try:
-                text = data.decode(encoding)
-                break
-            except UnicodeDecodeError:
-                text = ""
-        if not text:
-            return {"ok": False, "error": "文本编码无法识别"}
-    optimized = optimize_imported_speech_text(text)
-    if not optimized:
-        return {"ok": False, "error": "没有提取到可用文本"}
-    return {"ok": True, "scriptText": optimized, "sourceType": "script", "fileName": Path(filename).name}
-
-
-def report_presenter_pages_with_expression(asset, presenter_path=None):
-    pages = read_presenter_pages_from_path(presenter_path, asset) if presenter_path else read_pages_from_report_preview(asset)
-    if not pages:
-        pages = read_pages_from_report_preview(asset)
-    return attach_page_expression(asset, pages, presenter_path)
-
-
-def generate_report_presenter_script(report_id):
-    asset, error = load_report_asset(report_id)
-    if error:
-        return error
-    presenter_path = existing_report_presenter_path(asset)
-    pages = report_presenter_pages_with_expression(asset, presenter_path)
-    script_text = generate_presenter_script_from_pages(pages)
-    if not script_text:
-        return {"ok": False, "error": "没有可用于生成演讲稿的页面信息"}
-    return {"ok": True, "scriptText": script_text, "pageCount": len(pages), "sourceType": "script"}
-
-
-def split_plain_script_chunks(script, page_count):
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", script) if part.strip()]
-    if len(paragraphs) <= 1:
-        lines = [line.strip() for line in script.splitlines() if line.strip()]
-        if len(lines) > 1:
-            paragraphs = lines
-    if len(paragraphs) <= 1:
-        sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;])\s*", script) if part.strip()]
-        paragraphs = sentences if len(sentences) > 1 else [script.strip()]
-    if len(paragraphs) <= page_count:
-        return paragraphs
-    group_size = max(1, (len(paragraphs) + page_count - 1) // page_count)
-    return ["\n".join(paragraphs[index:index + group_size]).strip() for index in range(0, len(paragraphs), group_size)]
-
-
-def normalize_sentence_end(text):
-    text = str(text or "").strip()
-    if not text:
-        return ""
-    return text if re.search(r"[。！？!?]$", text) else f"{text}。"
-
-
-def clean_presenter_note_text(text):
-    text = optimize_imported_speech_text(text)
-    text = re.sub(r"^\s*(?:Page|P|第)\s*\d+(?:\s*页)?\s*[：:.\-、]?\s*", "", text, flags=re.I)
-    text = re.sub(r"\n{2,}", "\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    parts = [part.strip() for part in re.split(r"\n+", text) if part.strip()]
-    cleaned = " ".join(parts)
-    cleaned = re.sub(r"\s*([，。！？；：、])\s*", r"\1", cleaned)
-    cleaned = re.sub(r"([。！？]){2,}", r"\1", cleaned)
-    return normalize_sentence_end(cleaned)
-
-
-def page_transition_title(page):
-    title = clean_expression_snippet(page.get("title") or page.get("label") or "")
-    if len(title) > 34:
-        title = f"{title[:34]}..."
-    return title or "下一页"
-
-
-def has_transition_tail(text):
-    tail = str(text or "")[-80:]
-    return bool(re.search(r"(下一页|接下来|下面|再进入|继续看|转向|最后)", tail))
-
-
-def refine_presenter_notes(notes, pages):
-    if not notes:
-        return {}
-    page_list = pages or []
-    next_title_by_id = {}
-    ordered_ids = []
-    for page in page_list:
-        page_id = str(page.get("id") or "").strip()
-        if page_id and str(notes.get(page_id) or "").strip():
-            ordered_ids.append(page_id)
-    for index, page_id in enumerate(ordered_ids[:-1]):
-        next_page_id = ordered_ids[index + 1]
-        next_page = next((page for page in page_list if page.get("id") == next_page_id), {})
-        next_title_by_id[page_id] = page_transition_title(next_page)
-
-    refined = {}
-    for page in page_list:
-        page_id = str(page.get("id") or "").strip()
-        raw = str(notes.get(page_id) or "").strip()
-        if not page_id or not raw:
-            continue
-        text = clean_presenter_note_text(raw)
-        time_nodes = extract_time_nodes(" ".join([
-            str(page.get("title") or ""),
-            str(page.get("chapter") or ""),
-            str(page.get("expressionText") or ""),
-            raw,
-        ]), 4)
-        missing_time_nodes = [node for node in time_nodes if node not in text]
-        if missing_time_nodes:
-            text = f"{text} {time_nodes_sentence(missing_time_nodes)}"
-        next_title = next_title_by_id.get(page_id, "")
-        if next_title and next_title not in text and not has_transition_tail(text):
-            text = f"{text} 讲完这一点，我们再进入「{next_title}」。"
-        refined[page_id] = text
-    for page_id, raw in notes.items():
-        if page_id not in refined and str(raw or "").strip():
-            refined[page_id] = clean_presenter_note_text(raw)
-    return refined
-
-
-def presenter_notes_from_script(script, pages):
-    page_list = pages or []
-    page_count = max(1, len(page_list))
-    marked_notes = parse_marked_script_notes(script, page_list)
-    if marked_notes:
-        return marked_notes
-    auto_notes = auto_paginate_script_notes(script, page_list)
-    if auto_notes:
-        return auto_notes
-    chunks = parse_marked_script_chunks(script) or split_plain_script_chunks(script, page_count)
-    notes = {}
-    for index, chunk in enumerate(chunks[:page_count]):
-        page = page_list[index] if index < len(page_list) else {}
-        page_id = str(page.get("id") or f"page-{index + 1:02d}").strip()
-        if page_id and chunk.strip():
-            notes[page_id] = chunk.strip()
-    return notes
-
-
-def save_report_presenter_script(report_id, payload):
-    asset, error = load_report_asset(report_id)
-    if error:
-        return error
-    script = str(payload.get("script") or payload.get("content") or "").strip()
-    source_type = str(payload.get("sourceType") or payload.get("source_type") or "script").strip()
-    minutes_url = str(payload.get("minutesUrl") or payload.get("minutes_url") or "").strip()
-    if source_type == "minutes" and not minutes_url:
-        return {"ok": False, "error": "请先填写飞书妙记链接"}
-    if not script:
-        return {"ok": False, "error": "请粘贴飞书妙记整理后的内容或演讲稿正文"}
-    script = optimize_imported_speech_text(script)
-    if not script:
-        return {"ok": False, "error": "清洗后没有可写入的演讲稿内容"}
-    presenter_path, pages, ensure_error = ensure_report_presenter_file(asset)
-    if ensure_error:
-        return {"ok": False, "error": ensure_error}
-    if not pages:
-        pages = read_presenter_pages_from_path(presenter_path, asset) or read_pages_from_report_preview(asset)
-    pages = attach_page_expression(asset, pages, presenter_path)
-    notes = presenter_notes_from_script(script, pages)
-    notes = refine_presenter_notes(notes, pages)
-    if not notes:
-        return {"ok": False, "error": "没有解析到可写入的演讲稿内容"}
-    try:
-        html_text = presenter_path.read_text(encoding="utf-8")
-        html_text = replace_js_const_json(html_text, "defaultSpeakerNotes", notes, "{", "}")
-        presenter_path.write_text(html_text, encoding="utf-8")
-    except OSError:
-        return {"ok": False, "error": "演讲稿写入失败"}
-    status = report_presenter_status(report_id)
-    status.update({
-        "sourceType": source_type,
-        "minutesUrl": minutes_url,
-    })
-    return status
-
-
-
-
-
-
-
-
-
-
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = f"MineM/{PRODUCT_VERSION['version']}"
+
+    def setup(self):
+        self.request.settimeout(30)
+        super().setup()
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
@@ -5451,13 +3969,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self.write_response_body(body)
 
     def send_binary(self, data, filename, content_type="application/zip"):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Disposition", f'attachment; filename="{safe_download_name(filename)}"; filename*=UTF-8\'\'{quote(download_name(filename))}')
         self.end_headers()
         self.write_response_body(data)
 
@@ -5468,10 +3986,18 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return False
 
-    def stream_response_file(self, path):
+    def stream_response_file(self, path, byte_range=None):
         try:
             with Path(path).open("rb") as source:
-                shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+                if byte_range is None:
+                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+                else:
+                    start, end = byte_range
+                    source.seek(start)
+                    remaining = end - start + 1
+                    while remaining and (block := source.read(min(remaining, 1024 * 1024))):
+                        self.wfile.write(block)
+                        remaining -= len(block)
             return True
         except (BrokenPipeError, ConnectionResetError):
             return False
@@ -5485,15 +4011,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(path.stat().st_size))
-        self.send_header("Content-Disposition", f'attachment; filename="{safe_download_name(filename)}"')
+        self.send_header("Content-Disposition", f'attachment; filename="{safe_download_name(filename)}"; filename*=UTF-8\'\'{quote(download_name(filename))}')
         self.end_headers()
         self.stream_response_file(path)
 
     def send_html(self, html_text, status=200, cache_control=""):
         body = html_text.encode("utf-8")
+        use_compression = len(body) >= 4096
+        compressed = use_compression and bool(re.search(
+            r"(?:^|,)\s*gzip\s*(?:;\s*q\s*=\s*(?:1(?:\.0+)?|0\.\d*[1-9]\d*))?\s*(?:,|$)",
+            self.headers.get("Accept-Encoding", ""),
+            re.IGNORECASE,
+        ))
+        if compressed:
+            body = gzip.compress(body, compresslevel=3)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
+        if use_compression:
+            self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
         if cache_control:
             self.send_header("Cache-Control", cache_control)
         self.end_headers()
@@ -5503,29 +4042,44 @@ class Handler(BaseHTTPRequestHandler):
         if not path.exists() or not path.is_file():
             self.send_error(404)
             return
-        ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        ctype = "image/webp" if path.suffix.lower() == ".webp" else mimetypes.guess_type(str(path))[0]
+        ctype = ctype or "application/octet-stream"
         if embedded_preview and path.suffix.lower() in {".html", ".htm"}:
             try:
                 html_text = path.read_text(encoding="utf-8")
-                if embedded_preview:
-                    html_text = inject_embedded_preview_style(html_text)
-                body = html_text.encode("utf-8")
             except (OSError, UnicodeDecodeError):
-                body = None
-            if body is not None:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.write_response_body(body)
+                pass
+            else:
+                self.send_html(inject_embedded_preview_style(html_text))
                 return
-        self.send_response(200)
+        size = path.stat().st_size
+        byte_range = None
+        media = ctype.startswith(("video/", "audio/"))
+        requested = self.headers.get("Range") if media else None
+        if requested:
+            match = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", requested.strip())
+            if match and (match[1] or match[2]):
+                start = int(match[1]) if match[1] else max(0, size - int(match[2]))
+                end = min(size - 1, int(match[2])) if match[1] and match[2] else size - 1
+                if 0 <= start <= end:
+                    byte_range = (start, end)
+            if byte_range is None:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        self.send_response(206 if byte_range else 200)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(path.stat().st_size))
+        if media:
+            self.send_header("Accept-Ranges", "bytes")
+        if byte_range:
+            start, end = byte_range
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Content-Length", str(end - start + 1 if byte_range else size))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.stream_response_file(path)
+        self.stream_response_file(path, byte_range)
 
     def authorize_agent_api(self):
         if not agent_internal_api_enabled():
@@ -5565,6 +4119,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/version":
             self.send_json({"ok": True, "release": PRODUCT_VERSION})
             return
+        if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/exports"):
+            report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/exports").strip("/"))
+            self.send_json({"ok": True, "tasks": REPORT_EXPORT_TASK_STORE.list(report_id)})
+            return
+
         if parsed.path.startswith("/api/report-exports/") and parsed.path.endswith("/download"):
             task_id = unquote(parsed.path.removeprefix("/api/report-exports/").removesuffix("/download").strip("/"))
             task = REPORT_EXPORT_TASK_STORE.get(task_id, include_private=True)
@@ -5601,8 +4160,18 @@ class Handler(BaseHTTPRequestHandler):
                     "select * from assets where id = ? and asset_type = 'control'",
                     (control_id,),
                 ).fetchone()
+                frame = native_control_frames(conn, [control_id]).get(control_id) if control else None
             if not control:
                 self.send_error(404)
+                return
+            source = asset_library_path(control)
+            manifest = read_json_file(source.parent / "manifest.json") if source else {}
+            if manifest.get("format") == "minem-owned-native-page" and read_native_deck(source):
+                frame = (source, 1)
+            if frame:
+                source, number = frame
+                cover_title = control["title"] if parse_qs(parsed.query).get("cover") == ["1"] else None
+                self.send_html(online_native_deck(source, [number], single_page=True, cover_title=cover_title), cache_control="no-store")
                 return
             source_url = canonical_preview_url(control)
             self.send_html(
@@ -5610,6 +4179,7 @@ class Handler(BaseHTTPRequestHandler):
                     "title": control["title"],
                     "code": control["asset_code"],
                     "src": source_url,
+                    "canvas": preview_meta_for_asset(dict(control)),
                 }]),
                 cache_control="no-store, max-age=0",
             )
@@ -5627,7 +4197,23 @@ class Handler(BaseHTTPRequestHandler):
             with db() as conn:
                 report = conn.execute("select title from assets where id = ? and asset_type = 'report'", (report_id,)).fetchone()
             title = report["title"] if report else f"汇报 · {report_id}"
-            self.send_html(report_viewer_html(title, page_items), cache_control="no-store, max-age=0")
+            if parse_qs(parsed.query).get("cover") == ["1"]:
+                cover = page_items[:1]
+                image = packaged_page_cover_path(extracted_url_to_path(cover[0]["src"])) if cover else None
+                if image:
+                    url = "/extracted/" + quote(image.relative_to(EXTRACTED.resolve()).as_posix(), safe="/")
+                    document = (
+                        '<!doctype html><meta charset=utf-8><style>html,body{margin:0;height:100%;background:#0b1020}'
+                        'img{display:block;width:100%;height:100%;object-fit:contain}</style>'
+                        f'<img src="{html.escape(url, quote=True)}" alt="{html.escape(title, quote=True)}">'
+                    )
+                elif native := native_deck_view(cover):
+                    document = online_native_deck(*native, single_page=True, cover_title=title)
+                else:
+                    document = report_viewer_html(title, cover)
+            else:
+                document = online_native_deck(*native) if (native := native_deck_view(page_items)) else report_viewer_html(title, page_items)
+            self.send_html(document, cache_control="no-store, max-age=0")
             return
 
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/arrangement/viewer"):
@@ -5636,7 +4222,8 @@ class Handler(BaseHTTPRequestHandler):
             if not result.get("ok"):
                 self.send_html(f"<!doctype html><meta charset='utf-8'><body>{html.escape(result.get('error') or '无法加载汇报编排')}</body>", 404)
                 return
-            self.send_html(report_viewer_html(f"汇报编排 · {result['reportId']}", page_items), cache_control="no-store, max-age=0")
+            document = online_native_deck(*native) if (native := native_deck_view(page_items)) else report_viewer_html(f"汇报编排 · {result['reportId']}", page_items)
+            self.send_html(document, cache_control="no-store, max-age=0")
             return
 
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/arrangement"):
@@ -5694,18 +4281,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(result, 200 if result.get("ok") else 404)
             return
 
-        if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/presenter-script"):
-            report_id = parsed.path.removeprefix("/api/reports/").removesuffix("/presenter-script").strip("/")
-            result = report_presenter_status(unquote(report_id))
-            self.send_json(result, 200 if result.get("ok") else 404)
-            return
-
-        if parsed.path == "/api/storylines":
-            query = parse_qs(parsed.query)
-            search = query.get("q", [""])[0].strip()
-            self.send_json(load_storylines(search))
-            return
-
         if parsed.path == "/api/case-groups":
             roots, _, _ = load_import_sources()
             with db() as conn:
@@ -5746,6 +4321,8 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json({"ok": False, "error": "素材不存在"}, 404)
                         return
                     asset = add_version_counts(conn, [row])[0]
+                    if has_online_spark_storage(asset_library_path(row)):
+                        asset["packageIssue"] = UNPACKAGED_ERROR
                     if asset.get("asset_type") == "report":
                         needs_refresh = not (row["trusted_checked_at"] if "trusted_checked_at" in row.keys() else 0)
                         asset["trustedEntry"] = validate_report_trusted_entry(conn, asset["id"], refresh=needs_refresh)
@@ -5763,22 +4340,8 @@ class Handler(BaseHTTPRequestHandler):
                     categories=CATEGORIES,
                     asset_types=ASSET_TYPES,
                     resource_kinds=RESOURCE_KINDS,
-                    tag_taxonomy={},
                 )
             self.send_json(payload)
-            return
-        if parsed.path == "/api/tag-taxonomy":
-            self.send_json({"taxonomy": {}, "status": "legacy-tags-disabled"})
-            return
-        if parsed.path == "/api/tag-analysis/tasks":
-            query = parse_qs(parsed.query)
-            limit = int(query.get("limit", ["20"])[0] or 20)
-            self.send_json(list_tag_analysis_tasks(limit))
-            return
-        if parsed.path.startswith("/api/tag-analysis/tasks/"):
-            task_id = unquote(parsed.path.removeprefix("/api/tag-analysis/tasks/").strip("/"))
-            result = get_tag_analysis_task(task_id)
-            self.send_json(result, 200 if result.get("ok") else 404)
             return
         if parsed.path == "/api/stats":
             with db() as conn:
@@ -5842,6 +4405,13 @@ class Handler(BaseHTTPRequestHandler):
             # after an arrangement is confirmed.  Only exact report source
             # entries redirect; linked page assets remain untouched.
             decoded_rel = unquote(rel).strip("/")
+            if decoded_rel.startswith("_history/"):
+                snapshot = history_snapshot_file(decoded_rel)
+                if snapshot:
+                    self.serve_file(snapshot, embedded_preview=parse_qs(parsed.query).get("embed", [""])[0] == "1")
+                else:
+                    self.send_error(404)
+                return
             parts = decoded_rel.split("/", 1)
             source_preview_url = f"/extracted/{decoded_rel}"
             if len(parts) == 2:
@@ -5903,6 +4473,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
 
+        if parsed.path.startswith("/report-covers/"):
+            name = parsed.path.removeprefix("/report-covers/")
+            if name.endswith(".webp") and name.removesuffix(".webp") in REPORT_COVER_IDS:
+                self.serve_file(report_cover_path(name.removesuffix(".webp")))
+            else:
+                self.send_error(404)
+            return
+
         rel = parsed.path.lstrip("/") or "index.html"
         path = (PUBLIC / rel).resolve()
         if is_path_within(path, PUBLIC):
@@ -5911,24 +4489,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(403)
 
     def do_POST(self):
+        try:
+            self.handle_post()
+        except RequestBodyError as error:
+            self.close_connection = True
+            self.send_json({"ok": False, "error": str(error)}, error.status)
+
+    def handle_post(self):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/exports"):
             report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/exports").strip("/"))
             if not report_id or "/" in report_id:
                 self.send_json({"ok": False, "error": "汇报地址无效"}, 400)
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                self.send_json({"ok": False, "error": "导出参数格式无效"}, 400)
-                return
+            payload = read_json_request(self.headers, self.rfile)
             result = create_report_export_task(report_id, payload.get("format"))
             self.send_json(result, 202 if result.get("ok") else 400)
             return
         if parsed.path == "/api/temp-reports":
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             result = create_temp_report(payload)
             self.send_json(result, 200 if result.get("ok") else 400)
             return
@@ -5945,37 +4524,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/assets":
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            asset_id = payload.get("id") or f"{slugify(payload.get('title', 'asset'))}-{now_ms()}"
-            asset_type = payload.get("asset_type", "control")
-            category = payload.get("category", "code")
-            media_kind = payload.get("media_kind", "none")
-            with db() as conn:
-                existing = conn.execute("select asset_code from assets where id = ?", (asset_id,)).fetchone()
-                asset_code = existing["asset_code"] if existing and existing["asset_code"] else next_asset_code(conn, asset_type, category, media_kind)
-                conn.execute(
-                    """
-                    insert or replace into assets
-                    (id, title, category, usage, tags, snippet, asset_type, asset_code, media_kind, source_type, source_path, preview_url, upload_id, created_at, updated_at)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', '', '', null, coalesce((select created_at from assets where id = ?), ?), ?)
-                    """,
-                    (
-                        asset_id,
-                        payload.get("title", "未命名素材"),
-                        category,
-                        payload.get("usage", ""),
-                        ",".join(payload.get("tags", [])) if isinstance(payload.get("tags"), list) else payload.get("tags", ""),
-                        payload.get("snippet", ""),
-                        asset_type,
-                        asset_code,
-                        media_kind,
-                        asset_id,
-                        now_ms(),
-                        now_ms(),
-                    ),
-                )
-            self.send_json({"ok": True, "id": asset_id, "assetCode": asset_code})
+            payload = read_json_request(self.headers, self.rfile)
+            timestamp = now_ms()
+            try:
+                with db() as conn:
+                    result = save_asset_metadata(
+                        conn, payload, timestamp=timestamp,
+                        make_id=lambda title: f"{slugify(title)}-{timestamp}-{secrets.token_hex(4)}",
+                        next_asset_code=next_asset_code, asset_types=ASSET_TYPES, media_kinds=MEDIA_KINDS,
+                    )
+            except ValueError as error:
+                self.send_json({"ok": False, "error": str(error)}, 400)
+                return
+            invalidate_stats_cache()
+            self.send_json(result)
             return
 
         if parsed.path == "/api/auto-import":
@@ -5987,37 +4549,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "changed": changed})
             return
 
-        if parsed.path == "/api/ai-tag":
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            self.send_json(ai_tag_assets(payload.get("asset_type", "control")))
-            return
-
-        if parsed.path == "/api/tag-analysis/tasks":
-            length = int(self.headers.get("Content-Length", "0"))
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                self.send_json({"ok": False, "error": "标签任务参数格式无效"}, 400)
-                return
-            asset_ids = payload.get("assetIds") or []
-            if not isinstance(asset_ids, list):
-                self.send_json({"ok": False, "error": "assetIds 必须是数组"}, 400)
-                return
-            result = create_tag_analysis_task([str(item) for item in asset_ids if str(item).strip()])
-            self.send_json(result, 202 if result.get("ok") else 400)
-            return
-        if parsed.path == "/api/tag-analysis/scheduled-run":
-            self.send_json(run_scheduled_tag_analysis())
-            return
-
         if parsed.path == "/api/merge-similar":
             self.send_json(merge_similar_resource_versions())
             return
 
         if parsed.path == "/api/assets/manual-merge":
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             result = manual_merge_asset_versions(payload)
             self.send_json(result, 200 if result.get("ok") else 400)
             return
@@ -6025,8 +4562,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/internal/agent/analyze":
             if not self.authorize_agent_api():
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             task = str(payload.get("task") or "").strip()
             if not task:
                 self.send_json({"ok": False, "error": "缺少 task"}, 400)
@@ -6037,8 +4573,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/internal/agent/checkpoint":
             if not self.authorize_agent_api():
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             self.send_json(AGENT_RUNTIME.checkpoint(
                 label=str(payload.get("label") or ""),
                 task=str(payload.get("task") or ""),
@@ -6048,8 +4583,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/internal/agent/validate":
             if not self.authorize_agent_api():
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             checks = payload.get("checks")
             if isinstance(checks, str):
                 checks = [checks]
@@ -6062,16 +4596,68 @@ class Handler(BaseHTTPRequestHandler):
             ))
             return
 
-        if parsed.path == "/api/storyline-reports":
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            result = create_storyline_report(payload)
-            self.send_json(result, 200 if result.get("ok") else 400)
+        if parsed.path == "/api/reports":
+            try:
+                payload = read_json_request(self.headers, self.rfile)
+                page_ids = payload.get("pageIds", [payload.get("pageId")])
+                if not isinstance(page_ids, list) or not page_ids or any(
+                    not isinstance(page_id, str) or not page_id.strip() for page_id in page_ids
+                ):
+                    raise ValueError
+                title, note = payload.get("title", ""), payload.get("note", "")
+                cover_id = payload.get("coverTemplateId", DEFAULT_REPORT_COVER)
+                if not isinstance(title, str) or not isinstance(note, str) or not isinstance(cover_id, str):
+                    raise ValueError
+            except ValueError:
+                self.send_json({"ok": False, "error": "请提供有效的页面素材与汇报信息"}, 400)
+                return
+            result = create_report_from_pages([page_id.strip() for page_id in page_ids], title.strip(), note.strip(), cover_id)
+            self.send_json(result, 201 if result.get("ok") else 400)
+            return
+
+        if parsed.path == "/api/import-tasks/drive":
+            if self.headers.get_content_type() != "application/json":
+                self.send_json({"ok": False, "error": "请以 JSON 格式提交飞书链接"}, 415)
+                return
+            origin = self.headers.get("Origin")
+            if origin and origin not in {f"http://{self.headers.get('Host')}", f"https://{self.headers.get('Host')}"}:
+                self.send_json({"ok": False, "error": "请在 MineM 内提交飞书链接"}, 403)
+                return
+            try:
+                payload = read_json_request(self.headers, self.rfile, max_bytes=24_000)
+                links = payload.get("links")
+                if not isinstance(links, list) or not 1 <= len(links) <= MAX_DRIVE_LINKS:
+                    raise ValueError(f"每次可添加 1 至 {MAX_DRIVE_LINKS} 个飞书文件夹链接")
+                tokens = {}
+                for index, link in enumerate(links, 1):
+                    try:
+                        token = parse_drive_folder_link(link)
+                        address = urlparse(link.strip())
+                        source_url = f"https://{address.netloc}/drive/folder/{token}"
+                        tokens.setdefault(token, (index, source_url))
+                    except ValueError:
+                        raise ValueError(f"第 {index} 条链接需为飞书云空间文件夹的 HTTPS 链接") from None
+            except (TypeError, ValueError) as error:
+                self.send_json({"ok": False, "error": str(error)}, 400)
+                return
+            root = drive_import_queue(RUNTIME_ROOT)
+            if not drive_worker_alive(root):
+                self.send_json({"ok": False, "error": "本机飞书导入服务未启动，请启动后重试"}, 503)
+                return
+            description = str(payload.get("description") or "").strip()[:1000]
+            try:
+                tasks = [
+                    enqueue_drive_import(root, token, index, description, source_url)
+                    for token, (index, source_url) in tokens.items()
+                ]
+            except (OSError, sqlite3.Error):
+                self.send_json({"ok": False, "error": "无法写入后台导入队列，请检查本机存储"}, 503)
+                return
+            self.send_json({"ok": True, "tasks": tasks}, 202)
             return
 
         if parsed.path == "/api/import-tasks":
-            if reject_oversized_upload(self):
-                return
+            request_content_length(self.headers, MAX_UPLOAD_REQUEST_BYTES)
             form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
                 "REQUEST_METHOD": "POST",
                 "CONTENT_TYPE": self.headers.get("Content-Type"),
@@ -6108,6 +4694,12 @@ class Handler(BaseHTTPRequestHandler):
             if existing_upload:
                 result = import_result_for_upload(existing_upload["id"])
                 stored.unlink(missing_ok=True)
+                spark_root = spark_package_root(EXTRACTED / existing_upload["id"]) if suffix in ZIP_SUFFIXES else None
+                if has_online_spark_storage(extracted_url_to_path(result.get("previewUrl"))) or (
+                    spark_root and has_online_spark_storage(spark_root / "index.html")
+                ):
+                    self.send_json({"ok": False, "error": UNPACKAGED_ERROR}, 400)
+                    return
                 timestamp = now_ms()
                 task = create_import_task({
                     "id": task_id,
@@ -6159,32 +4751,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/arrangement"):
             report_id = parsed.path.removeprefix("/api/reports/").removesuffix("/arrangement").strip("/")
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             result = update_report_arrangement(unquote(report_id), payload)
-            self.send_json(result, 200 if result.get("ok") else 400)
-            return
-
-        if parsed.path.startswith("/api/assets/") and parsed.path.endswith("/tags"):
-            asset_id = unquote(parsed.path.removeprefix("/api/assets/").removesuffix("/tags").strip("/"))
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            result = update_asset_tags(asset_id, payload.get("tags", []))
-            self.send_json(result, 200 if result.get("ok") else 404)
+            status = 200 if result.get("ok") else 409 if result.get("code") == "ARRANGEMENT_CONFLICT" else 400
+            self.send_json(result, status)
             return
 
         if parsed.path.startswith("/api/assets/") and parsed.path.endswith("/title"):
             asset_id = unquote(parsed.path.removeprefix("/api/assets/").removesuffix("/title").strip("/"))
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             result = update_asset_title(asset_id, payload.get("title", ""))
             self.send_json(result, 200 if result.get("ok") else 400)
             return
 
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/pages"):
             report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/pages").strip("/"))
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             pages = payload.get("pages") or payload.get("page_numbers") or payload.get("page_number")
             result = upsert_report_page_slots(
                 report_id,
@@ -6195,39 +4777,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(result, 200 if result.get("ok") else 400)
             return
 
-        if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/presenter-script/generate"):
-            report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/presenter-script/generate").strip("/"))
-            result = generate_report_presenter_script(report_id)
-            self.send_json(result, 200 if result.get("ok") else 400)
-            return
-
-        if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/presenter-script/extract"):
-            if reject_oversized_upload(self):
-                return
-            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type"),
-            })
-            file_item = form["file"] if "file" in form else None
-            if file_item is None or not file_item.filename:
-                self.send_json({"ok": False, "error": "没有收到文件"}, 400)
-                return
-            result = extract_presenter_script_file(file_item, file_item.filename)
-            self.send_json(result, 200 if result.get("ok") else 400)
-            return
-
-        if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/presenter-script"):
-            report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/presenter-script").strip("/"))
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            result = save_report_presenter_script(report_id, payload)
-            self.send_json(result, 200 if result.get("ok") else 400)
-            return
-
         if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/controls"):
             report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/controls").strip("/"))
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = read_json_request(self.headers, self.rfile)
             if payload.get("page_numbers") is not None or payload.get("pages") is not None:
                 pages = payload.get("page_numbers") if payload.get("page_numbers") is not None else payload.get("pages")
                 result = import_report_pages_as_controls(report_id, pages, payload.get("title_prefix", ""))
@@ -6238,20 +4790,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "页码必须是数字"}, 400)
                     return
                 result = import_report_page_as_control(report_id, page_number, payload.get("title", ""))
-            self.send_json(result, 200 if result.get("ok") else 400)
-            return
-
-        if parsed.path.startswith("/api/reports/") and parsed.path.endswith("/storyline-collections"):
-            report_id = unquote(parsed.path.removeprefix("/api/reports/").removesuffix("/storyline-collections").strip("/"))
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            result = create_report_storyline_collection(report_id, payload)
-            self.send_json(result, 200 if result.get("ok") else 400)
-            return
-
-        if parsed.path.startswith("/api/report-page-candidates/") and parsed.path.endswith("/adopt"):
-            candidate_id = unquote(parsed.path.removeprefix("/api/report-page-candidates/").removesuffix("/adopt").strip("/"))
-            result = adopt_report_page_candidate(candidate_id)
             self.send_json(result, 200 if result.get("ok") else 400)
             return
 
@@ -6282,7 +4820,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "素材不存在"}, 404)
                     return
                 group_id = asset["version_group"] or asset["id"]
-                targets = conn.execute("select * from assets where version_group = ?", (group_id,)).fetchall() if not asset["version_parent_id"] else [asset]
+                targets = conn.execute("select * from assets where version_group = ? or id = ?", (group_id, asset_id)).fetchall() if not asset["version_parent_id"] else [asset]
                 target_ids = [target["id"] for target in targets]
                 affected_report_ids = set()
                 if target_ids:
@@ -6315,7 +4853,6 @@ class Handler(BaseHTTPRequestHandler):
                 conn.executemany("delete from report_page_slots where report_id = ?", [(target["id"],) for target in targets])
                 conn.executemany("delete from report_page_candidates where report_id = ?", [(target["id"],) for target in targets])
                 conn.executemany("delete from report_page_candidates where control_id = ?", [(target["id"],) for target in targets])
-                conn.executemany("delete from report_storyline_collections where source_report_id = ? or output_report_id = ? or target_report_id = ?", [(target["id"], target["id"], target["id"]) for target in targets])
                 conn.executemany(
                     "update report_page_slots set control_id = '', status = 'planned', updated_at = ? where control_id = ?",
                     [(now_ms(), target["id"]) for target in targets],
@@ -6415,7 +4952,7 @@ def main():
         print(f"MineM 启动失败：{error}", file=sys.stderr)
         raise SystemExit(2) from error
     init_db()
-    start_tag_scheduler()
+    threading.Thread(target=drive_import_loop, name="minem-drive-import", daemon=True).start()
     if os.environ.get("AUTO_IMPORT_ON_START", "0") != "0":
         result = auto_import_sources()
         print(f"Auto import: scanned {result['scanned']} files, added {result['assetCount']} assets")

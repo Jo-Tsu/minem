@@ -271,7 +271,7 @@ fn healthcheck() -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     if stream
-        .write_all(b"GET /api/stats HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /api/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .is_err()
     {
         return false;
@@ -320,7 +320,14 @@ fn start_service(app: &tauri::AppHandle) -> Result<Child, String> {
         .map_err(|error| error.to_string())?;
     let mut command = if cfg!(debug_assertions) {
         let root = project_root();
-        let python = env::var("MINEM_DESKTOP_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let python = env::var("MINEM_DESKTOP_PYTHON").unwrap_or_else(|_| {
+            let project_python = root.join(".venv/bin/python");
+            if project_python.is_file() {
+                project_python.to_string_lossy().into_owned()
+            } else {
+                "python3".to_string()
+            }
+        });
         let mut command = Command::new(python);
         command.arg(root.join("server.py")).current_dir(root);
         command

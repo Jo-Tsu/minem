@@ -71,13 +71,13 @@ class ReportExportTaskStore:
     def __init__(self, db_path):
         self.db_path = Path(db_path)
         self.lock = threading.RLock()
+        self._schema_ready = False
 
     @contextmanager
     def connect(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("pragma busy_timeout = 30000")
         try:
             with conn:
                 yield conn
@@ -88,8 +88,12 @@ class ReportExportTaskStore:
         if conn is not None:
             conn.executescript(REPORT_EXPORT_TASKS_SCHEMA)
             return
-        with self.connect() as local:
-            local.executescript(REPORT_EXPORT_TASKS_SCHEMA)
+        with self.lock:
+            if self._schema_ready:
+                return
+            with self.connect() as local:
+                self.ensure_schema(local)
+            self._schema_ready = True
 
     def create(self, task):
         created = task.get("createdAt") or now_ms()
@@ -98,14 +102,19 @@ class ReportExportTaskStore:
         return public_report_export_task(payload)
 
     def update(self, task_id, **updates):
-        with self.lock:
-            current = self.get(task_id, include_private=True)
-            if not current:
+        self.ensure_schema()
+        fields = {key: value for key, value in updates.items() if key in COLUMN_BY_KEY and key != "id"}
+        fields["updatedAt"] = now_ms()
+        assignments = ", ".join(f"{COLUMN_BY_KEY[key]} = ?" for key in fields)
+        with self.lock, self.connect() as conn:
+            changed = conn.execute(
+                f"update report_export_tasks set {assignments} where id = ?",
+                [*fields.values(), task_id],
+            )
+            if not changed.rowcount:
                 return None
-            current.update(updates)
-            current["updatedAt"] = now_ms()
-            self._save(current)
-            return public_report_export_task(current)
+            row = conn.execute("select * from report_export_tasks where id = ?", (task_id,)).fetchone()
+            return public_report_export_task(self._row_to_task(row))
 
     def get(self, task_id, include_private=False):
         self.ensure_schema()
@@ -115,6 +124,15 @@ class ReportExportTaskStore:
             return None
         task = self._row_to_task(row)
         return task if include_private else public_report_export_task(task)
+
+    def list(self, report_id, limit=12):
+        self.ensure_schema()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "select * from report_export_tasks where report_id=? order by created_at desc, id desc limit ?",
+                (report_id, limit),
+            ).fetchall()
+        return [public_report_export_task(self._row_to_task(row)) for row in rows]
 
     def _save(self, task):
         if not task.get("id"):

@@ -1,9 +1,17 @@
 import hashlib
+from html import unescape
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from .paths import is_path_within
+from .spark_package import spark_package_root
+
+
+def html_document_title(content):
+    match = re.search(r"<title\b[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+    return re.sub(r"\s+", " ", unescape(match.group(1))).strip() if match else ""
 
 
 def safe_int(value, default=0):
@@ -68,6 +76,26 @@ def load_report_package_manifest(extract_root, *, read_json_file):
         manifest = read_json_file(report_path)
         if manifest.get("asset_type") == "report" or isinstance(manifest.get("pages"), list):
             return manifest, "report"
+    exported_path = extract_root / "minem-export-manifest.json"
+    if exported_path.is_file():
+        exported = read_json_file(exported_path)
+        pages = exported.get("pages") if isinstance(exported.get("pages"), list) else []
+        if exported.get("schemaVersion") != 1 or exported.get("format") != "html" or not pages or len(pages) != exported.get("pageCount"):
+            raise ValueError("导出汇报清单不完整或格式不支持")
+        restored = []
+        for index, page in enumerate(pages, 1):
+            source = page.get("source") if isinstance(page, dict) else None
+            if not isinstance(source, str):
+                raise ValueError(f"导出汇报第 {index} 页缺少页面路径")
+            rel = unquote(urlparse(source).path)
+            path = (extract_root / rel).resolve()
+            if not path.is_relative_to(extract_root.resolve()) or not path.is_file():
+                raise ValueError(f"导出汇报第 {index} 页文件缺失：{rel}")
+            restored.append({"display_page": index, "path": rel, "title": page.get("title") or f"第 {index} 页"})
+        # A native one-document Deck continues through the native page splitter.
+        if any(page["path"] != "index.html" for page in restored):
+            report = exported.get("report") if isinstance(exported.get("report"), dict) else {}
+            return {"asset_type": "report", "format": "minem-export", "entry": "index.html", "title": report.get("title") or "导入汇报", "pages": restored}, "report"
     if (extract_root / "report" / "index.html").exists() or any((extract_root / "controls").glob("slide-*/index.html")):
         return {}, "legacy"
 
@@ -102,9 +130,11 @@ def load_report_package_manifest(extract_root, *, read_json_file):
             ))
     if inline_candidates:
         _, _, _, entry, inline_html, content = min(inline_candidates)
-        title_match = re.search(r"<title\b[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
-        title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else inline_html.stem.replace("-", " ")
-        return {"entry": entry, "title": title}, "html-report"
+        title = html_document_title(content) or inline_html.stem.replace("-", " ")
+        manifest = {"entry": entry, "title": title}
+        if spark_package_root(extract_root) == inline_html.parent:
+            manifest["format"] = "spark-code"
+        return manifest, "html-report"
 
     if (extract_root / "index.html").exists():
         package_manifest = read_json_file(extract_root / "package-manifest.json")
@@ -159,7 +189,7 @@ def report_package_entry_path(extract_root, manifest, manifest_kind):
     return None, ""
 
 
-def report_manifest_page_items(extract_root, manifest, manifest_kind, *, read_json_file, merge_tags):
+def report_manifest_page_items(extract_root, manifest, manifest_kind, *, read_json_file):
     extract_root = Path(extract_root)
     if manifest_kind == "report" and isinstance(manifest.get("pages"), list):
         items = []
@@ -180,7 +210,6 @@ def report_manifest_page_items(extract_root, manifest, manifest_kind, *, read_js
                 "page": display_page,
                 "title": page_manifest.get("title") or item.get("title") or f"第 {display_page} 页",
                 "role": page_manifest.get("role") or item.get("role") or "",
-                "tags": merge_tags(item.get("tags") or [], page_manifest.get("tags") or []),
                 "source_code": item.get("control_asset_code") or page_manifest.get("asset_code") or "",
                 "preview": item.get("preview_url") or page_manifest.get("preview_url") or "",
                 "note": item.get("update_note") or page_manifest.get("notes") or "",
@@ -210,7 +239,6 @@ def report_manifest_page_items(extract_root, manifest, manifest_kind, *, read_js
             "page": page_number,
             "title": ingestion.get("title") or info.get("title") or f"{page_number:02d} 汇报页面",
             "role": ingestion.get("role") or info.get("role") or "",
-            "tags": merge_tags(ingestion.get("tags") or [], info.get("tags") or []),
             "source_code": ingestion.get("asset_code") or info.get("asset_code") or "",
             "preview": info.get("preview_url") or "",
             "note": ingestion.get("notes") or info.get("note") or "",

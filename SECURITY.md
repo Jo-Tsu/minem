@@ -35,3 +35,16 @@ MineM binds its development services to localhost by default. Operators who
 expose it to a network are responsible for authentication, TLS, access
 control, backups, and data-retention policy. The internal Agent API remains
 disabled unless explicitly configured.
+
+## 构建依赖审计 / Build dependency audit
+
+2026-11-18：`npm audit` 报告构建工具 Vite 所依赖的 Picomatch 存在
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)，
+上游尚无修复版本。该依赖用于源码构建，Docker 最终运行镜像不包含 Node 或
+`node_modules`；不要把不可信输入作为开发构建的 glob 表达式。保留当前可验证的
+构建版本，避免为消除审计提示而强制降级工具链。
+
+As of 2026-11-18, the build toolchain has an unresolved Picomatch advisory
+listed above. It is not included in the final Python runtime image. Do not
+use untrusted glob expressions in development builds. No patched upstream
+version is currently available; the tested toolchain is retained.

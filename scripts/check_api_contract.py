@@ -7,11 +7,14 @@ import urllib.parse
 import urllib.request
 
 
-def fetch_json(base_url, path, query=None):
+def fetch_json(base_url, path, query=None, *, method="GET"):
     url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
     if query:
         url = f"{url}?{urllib.parse.urlencode(query)}"
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    request = urllib.request.Request(
+        url, method=method, data=b"{}" if method == "POST" else None,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             payload = response.read().decode("utf-8")
@@ -73,8 +76,16 @@ def main():
         require_keys(group, ["code", "title", "reportUrl", "controls"], "case group")
         require(group["controls"] and all(item.get("code") and item.get("controlUrl") for item in group["controls"]), "case group controls must be imported and previewable")
 
-    status, retired_graph = fetch_json(base_url, "/api/graph")
-    require(status == 404, f"retired /api/graph must return 404, got {status}: {retired_graph}")
+    for method, path in (
+        ("GET", "/api/graph"),
+        ("GET", "/api/storylines"),
+        ("POST", "/api/storyline-reports"),
+        ("POST", "/api/reports/example/storyline-collections"),
+        ("POST", "/api/ai-tag"),
+        ("POST", "/api/assets/example/tags"),
+    ):
+        status, _ = fetch_json(base_url, path, method=method)
+        require(status == 404, f"retired {method} {path} must return 404, got {status}")
 
     status, reports = fetch_json(
         base_url,

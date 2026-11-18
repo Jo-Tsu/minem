@@ -1,0 +1,66 @@
+.report-cover-picker {
+  min-inline-size: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.report-cover-picker legend {
+  padding: 0;
+  margin-block-end: 8px;
+  font-weight: 650;
+}
+
+.report-cover-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.report-cover-option {
+  display: grid;
+  gap: 6px;
+  padding: 5px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.3;
+  cursor: pointer;
+  border: 1px solid #d5e1e9;
+  border-radius: 8px;
+}
+
+.report-cover-option:has(:checked) {
+  border-color: #188acf;
+  background: #e8f5ff;
+  color: #0c578c;
+}
+
+.report-cover-option:has(:focus-visible) {
+  outline: 2px solid #188acf;
+  outline-offset: 2px;
+}
+
+.report-cover-picker:disabled .report-cover-option {
+  cursor: default;
+}
+
+.report-cover-option span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.report-cover-option input {
+  margin: 0;
+  accent-color: #188acf;
+}
+
+.report-cover-option img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  border-radius: 5px;
+  background: #080f1d;
+}

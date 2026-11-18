@@ -16,6 +16,7 @@ import argparse
 import hashlib
 from http.client import HTTPException
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -29,7 +30,12 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT / "data" / "materials.db"
+sys.path.insert(0, str(ROOT))
+
+from minem.runtime_layout import history_root, maintenance_runtime_root, validation_root
+
+RUNTIME_ROOT = maintenance_runtime_root(ROOT)
+DEFAULT_DB = RUNTIME_ROOT / "data" / "materials.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:8790"
 
 
@@ -68,6 +74,11 @@ def preview_file(root: Path, preview_url: str) -> Path | None:
     path = urlparse(preview_url or "").path
     if not path.startswith("/extracted/"):
         return None
+    if path.startswith("/extracted/_history/"):
+        snapshots = (history_root(root) / "asset-snapshots").resolve()
+        candidate = (snapshots / path.removeprefix("/extracted/_history/")).resolve()
+        if candidate.is_relative_to(snapshots) and candidate.is_file():
+            return candidate
     candidate = (root / path.lstrip("/")).resolve()
     extracted = (root / "extracted").resolve()
     return candidate if candidate.is_relative_to(extracted) else None
@@ -79,6 +90,17 @@ def file_sha1(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def has_scaled_viewer(document: str) -> bool:
+    if "requestFullscreen" not in document:
+        return False
+    compact = "".join(document.split())
+    fixed_canvas = "width:1920px" in compact and "height:1080px" in compact
+    legacy = fixed_canvas and "updateDeckScale" in document and "fullscreen-page" in document
+    shared = "player-data" in document and "fitPage" in document and "Math.min" in document
+    native = fixed_canvas and "minem-native-deck" in document and "slide-frame" in document and "Math.min" in document
+    return legacy or shared or native
 
 
 def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
@@ -109,7 +131,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
             if not row["preview_url"]:
                 blank_previews.append(code)
             else:
-                target = preview_file(ROOT, row["preview_url"])
+                target = preview_file(RUNTIME_ROOT, row["preview_url"])
                 public_report_entry = asset_type == "report" and (row["preview_url"] or "").startswith("/reports/")
                 if not public_report_entry and (not target or not target.is_file() or target.stat().st_size == 0):
                     missing_previews.append((code, row["preview_url"]))
@@ -138,6 +160,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "MINEM_DATA_DIR": str(RUNTIME_ROOT)},
     )
     try:
         governance_payload = json.loads(governance_result.stdout)
@@ -231,16 +254,12 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
     legacy_history_tags = conn.execute(
         "select asset_code, tags from asset_history where trim(coalesce(tags, '')) <> '' limit 30"
     ).fetchall()
-    legacy_storyline_tags = conn.execute(
-        "select code, tags from report_storyline_collections where trim(coalesce(tags, '')) <> '' limit 30"
-    ).fetchall()
-    if legacy_asset_tags or legacy_history_tags or legacy_storyline_tags:
+    if legacy_asset_tags or legacy_history_tags:
         reporter.fail(
             "DATA-017",
             "旧标签重置期仍存在标签数据",
             assets=[dict(row) for row in legacy_asset_tags],
             history=[dict(row) for row in legacy_history_tags],
-            storylines=[dict(row) for row in legacy_storyline_tags],
         )
     else:
         reporter.passed("DATA-017", "旧标签已清空，未发现自动回填")
@@ -280,7 +299,7 @@ def run_data_checks(conn: sqlite3.Connection, reporter: Reporter) -> None:
     else:
         reporter.passed("DATA-020", "导入批次路径可迁移，且不存在零产物垃圾记录")
 
-    backup_files = sorted((ROOT / "data").glob("materials.db.before-*"))
+    backup_files = sorted((RUNTIME_ROOT / "data").glob("materials.db.before-*"))
     if backup_files:
         reporter.fail("DATA-021", "项目运行目录仍含历史数据库副本", files=[path.name for path in backup_files[:30]])
     else:
@@ -388,7 +407,7 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
             status, content_type = future.result()
             if status != 200 or "text/html" not in content_type:
                 link_issues.append({"group": code, "url": url, "status": status, "contentType": content_type})
-    if case_status != 200 or not case_groups or len(case_codes) != len(set(case_codes)) or case_issues or link_issues:
+    if case_status != 200 or not isinstance(case_payload.get("caseGroups"), list) or len(case_codes) != len(set(case_codes)) or case_issues or link_issues:
         reporter.fail(
             "CLICK-017",
             "案例清单含重复、未入库页面或不可访问入口",
@@ -396,6 +415,8 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
             groups=len(case_groups),
             issues=(case_issues + link_issues)[:30],
         )
+    elif not case_groups:
+        reporter.warning("CLICK-017", "当前素材库没有案例，真实案例点击需使用隔离样例验证", groups=0)
     else:
         reporter.passed("CLICK-017", "案例清单来自真实入库页面，组入口均可访问", groups=len(case_groups))
 
@@ -479,14 +500,7 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
     control = next((row for row in selected if row["asset_type"] == "control" and row["media_kind"] == "html"), None)
     if report:
         status, body = request_text(urljoin(base_url, report["preview_url"]), timeout)
-        if (
-            status != 200
-            or "updateDeckScale" not in body
-            or "width: 1920px" not in body
-            or "height: 1080px" not in body
-            or "fullscreen-page" not in body
-            or "requestFullscreen" not in body
-        ):
+        if status != 200 or not has_scaled_viewer(body):
             layout_issues.append({"assetCode": report["asset_code"], "surface": "public-report", "status": status})
     if control:
         separator = "&" if "?" in control["preview_url"] else "?"
@@ -494,12 +508,12 @@ def run_click_checks(conn: sqlite3.Connection, reporter: Reporter, base_url: str
         if status != 200 or "minem-embedded-preview-style" not in body or "--fs-scale: 1" not in body:
             layout_issues.append({"assetCode": control["asset_code"], "surface": "embedded-page", "status": status})
         status, body = request_text(urljoin(base_url, control["preview_url"]), timeout)
-        if status != 200 or "updateDeckScale" not in body or "width: 1920px" not in body or "fullscreen-page" not in body or "requestFullscreen" not in body:
+        if status != 200 or not has_scaled_viewer(body):
             layout_issues.append({"assetCode": control["asset_code"], "surface": "direct-page", "status": status})
     if layout_issues:
         reporter.fail("CLICK-011", "预览画布未应用统一等比适配", issues=layout_issues)
     else:
-        reporter.passed("CLICK-011", "公开汇报与嵌入页面均应用统一 1920×1080 等比画布，并提供全屏入口")
+        reporter.passed("CLICK-011", "公开汇报和页面采用可识别的等比缩放与全屏查看器，实际尺寸由浏览器走查验证")
 
     versioned = conn.execute(
         """
@@ -588,7 +602,7 @@ def run_full_link_checks(conn: sqlite3.Connection, reporter: Reporter, base_url:
 
 
 def write_report(payload: dict, output: Path | None) -> Path:
-    target = output or ROOT / "artifacts" / "test-reports" / f"core-{int(time.time())}.json"
+    target = output or validation_root(RUNTIME_ROOT) / "reports" / f"core-{time.time_ns()}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return target

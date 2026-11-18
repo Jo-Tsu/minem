@@ -4,11 +4,15 @@ import os
 import re
 import shutil
 import time
+import tempfile
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from minem.html_dependencies import audit_dependency_closure, write_dependency_audit
+from minem.html_dependencies import audit_dependency_closure, normalize_reference, write_dependency_audit
+from minem.hosted_deck_media import localize_hosted_deck_media
+from minem.hosted_deck_assets import localize_hosted_deck_assets
+from minem.spark_package import prepare_spark_zip
 
 
 HTML_RESOURCE_DIRS = {
@@ -66,7 +70,7 @@ def _path_within(path, root):
 
 
 def _clean_local_html_reference(reference):
-    value = str(reference or "").strip()
+    value = normalize_reference(reference)
     if not value or value.startswith("#"):
         return ""
     parsed = urlparse(value)
@@ -292,15 +296,24 @@ def run_import_task(
                 safe_extract(stored_path, extract_root)
             except zipfile.BadZipFile:
                 raise ValueError("压缩包无法解压")
+            prepare_spark_zip(extract_root)
         elif suffix in {".html", ".htm"}:
             extract_root.mkdir(parents=True, exist_ok=True)
-            copy_html_dependency_bundle(stored_path, extract_root, "upload-html")
+            entry, _ = copy_html_dependency_bundle(stored_path, extract_root, "upload-html")
+            update_task(task_id, progress=16, message="正在检查并封装播放素材")
+            localize_hosted_deck_media(entry)
         else:
             extract_root.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(stored_path, extract_root / original)
 
+        with tempfile.TemporaryDirectory(prefix="minem-import-assets-") as cache:
+            for entry in list(extract_root.rglob("*")):
+                if entry.is_file() and entry.suffix.lower() in {".html", ".htm"}:
+                    localize_hosted_deck_assets(entry, Path(cache))
         dependency_audit = audit_dependency_closure(extract_root)
         write_dependency_audit(extract_root, dependency_audit)
+        if dependency_audit["truncated"]:
+            raise ValueError("素材资源过多，完整性检查未完成")
         if dependency_audit["missing"]:
             sample = ", ".join(item["resolved"] for item in dependency_audit["missing"][:3])
             raise ValueError(f"导入包缺少 {len(dependency_audit['missing'])} 个本地资源：{sample}")
@@ -358,6 +371,13 @@ def run_import_task(
                 )
                 return
         if asset_count <= 0 or not result.get("previewUrl"):
+            with connect() as conn:
+                committed = conn.execute("select count(*) from assets where upload_id=?", (upload_id,)).fetchone()[0]
+                if not committed:
+                    conn.execute("delete from uploads where id=?", (upload_id,))
+            if not committed:
+                shutil.rmtree(extract_root, ignore_errors=True)
+                stored_path.unlink(missing_ok=True)
             update_task(
                 task_id,
                 status="failed",
@@ -375,6 +395,7 @@ def run_import_task(
             status="success",
             progress=100,
             message="导入成功，可点击预览",
+            error="",
             fileCount=file_count,
             assetCount=asset_count,
             thumbnailCount=thumbnail_count,
@@ -382,6 +403,19 @@ def run_import_task(
             **result,
         )
     except Exception as error:
+        with connect() as conn:
+            committed = conn.execute("select count(*) from assets where upload_id=?", (upload_id,)).fetchone()[0]
+            if not committed:
+                conn.execute("delete from uploads where id=? and coalesce(asset_count,0)=0", (upload_id,))
+        if not committed:
+            shutil.rmtree(extract_root, ignore_errors=True)
+            stored_path.unlink(missing_ok=True)
+        elif (result := import_result_for_upload(upload_id)).get("previewUrl"):
+            update_task(
+                task_id, status="success", progress=100, message="素材已入库，预览将在打开时刷新",
+                error="", uploadId=upload_id, **result,
+            )
+            return
         update_task(
             task_id,
             status="failed",

@@ -96,7 +96,6 @@ def _normalize_control(
         str(raw.get("reportPageUrl") or raw.get("report_page") or raw.get("preview_path") or ""),
         extracted_root,
     ) or control_url
-    ai = raw.get("ai") if isinstance(raw.get("ai"), dict) else None
     return {
         "id": str(raw.get("id") or raw.get("case_id") or code),
         "code": code,
@@ -108,7 +107,6 @@ def _normalize_control(
         "thumbnailUrl": str(asset.get("thumbnailUrl") or ""),
         "reportPageUrl": report_page_url,
         "summary": str(raw.get("summary") or "该案例页面已作为页面素材入库，可单独预览或插入汇报。"),
-        "ai": ai,
     }
 
 

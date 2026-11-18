@@ -64,8 +64,27 @@ jobs:
       - name: Run isolated regression tests
         run: |
           python3 scripts/test_html_dependencies.py
+          python3 scripts/test_export_integrity.py
           python3 scripts/test_import_pipeline.py
           python3 scripts/test_report_canvas_normalization.py
+          python3 scripts/test_task_stores.py
+          python3 scripts/test_http_requests.py
+          python3 scripts/test_cli_commands.py
+          python3 scripts/test_material_audit.py
+          python3 scripts/test_agent_workspace.py
+          python3 scripts/test_task_recovery.py
+          python3 scripts/test_preview_audit.py
+          python3 scripts/test_asset_safety.py
+          node --test scripts/test_frontend_contract.mjs
+          node --test scripts/test_import_task_polling.mjs
+
+      - name: Install browser test dependencies
+        run: |
+          python3 -m pip install -r scripts/requirements-test.txt
+          python3 -m playwright install --with-deps chromium
+
+      - name: Run browser product regressions
+        run: python3 scripts/test_product_browser.py
 
       - name: Run empty-library API smoke test
         shell: bash
@@ -103,3 +122,8 @@ jobs:
         run: |
           MINEM_VERSION=$(python3 -c 'import json; print(json.load(open("product-version.json"))["version"])')
           docker build --build-arg MINEM_VERSION="$MINEM_VERSION" -t minem:ci .
+
+      - name: Verify product workflows in the built image
+        run: |
+          docker run --rm --entrypoint sh minem:ci -c \
+            'python -m pip install -r scripts/requirements-test.txt && python scripts/test_product_browser.py'

@@ -1,5 +1,5 @@
 export type AssetType = "report" | "control" | "resource";
-export type ViewKey = "workbench" | "materials" | "caseControl" | "storyline";
+export type ViewKey = "workbench" | "materials" | "caseControl";
 
 export type Pagination = {
   page: number;
@@ -70,7 +70,6 @@ export type Asset = {
     longPage?: boolean;
   };
   versionCount: number;
-  storylineCount: number;
   isPrimaryVersion: boolean;
   versionLabel: string;
   sourceBatch?: SourceBatch;
@@ -197,6 +196,7 @@ export type ReportArrangementPage = {
   code: string;
   previewUrl: string;
   thumbnailUrl: string;
+  canvas?: Asset["preview_meta"];
   hidden: boolean;
 };
 
@@ -207,19 +207,9 @@ export type ReportArrangement = {
   previewUrl: string;
 };
 
-export type PresenterScriptStatus = {
-  hasScript: boolean;
-  scriptCount: number;
-  pageCount: number;
-  missingPresenter: boolean;
-  presenterUrl: string;
-  scriptText?: string;
-  sourceType?: string;
-  minutesUrl?: string;
-};
-
 export type ImportTask = {
   id: string;
+  sourceUrl?: string;
   status: "queued" | "running" | "success" | "failed";
   fileName: string;
   message: string;
@@ -229,48 +219,6 @@ export type ImportTask = {
   previewUrl?: string;
   createdAt?: number;
   updatedAt?: number;
-};
-
-export type Storyline = {
-  id: string;
-  code: string;
-  title: string;
-  scenario: string;
-  tone: string;
-  tags: string[];
-  fixedBlocks: string[];
-  directory: Array<{
-    title: string;
-    role: string;
-    defaultContent: string[];
-  }>;
-  sourceReportId?: string;
-  sourceReportCode?: string;
-  sourceReport?: {
-    id: string;
-    asset_code: string;
-    title: string;
-    asset_type: string;
-    media_kind: string;
-    preview_url: string;
-    thumbnail_url: string;
-    tags: string[];
-    created_at?: number | string;
-    updated_at?: number | string;
-  } | null;
-  outputReportId?: string;
-  outputReportCode?: string;
-  targetReportId?: string;
-  mode?: "collection" | "new" | "version";
-  note?: string;
-  versionGroup?: string;
-  versionNo?: number;
-  versionParentId?: string;
-  versionLabel?: string;
-  versionCount?: number;
-  versions?: Storyline[];
-  createdAt?: number | string;
-  updatedAt?: number | string;
 };
 
 export type LineageItem = {

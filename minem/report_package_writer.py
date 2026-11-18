@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+from urllib.parse import quote
 
 
 def sync_report_material_package(
@@ -14,7 +15,6 @@ def sync_report_material_package(
     next_asset_code,
     clean_report_title,
     report_material_title,
-    merge_tags,
     read_text_sample,
     file_hash,
     copy_package_preview_thumbnail,
@@ -104,11 +104,11 @@ def sync_report_material_package(
                 report_material_title(report_title),
                 existing_report["category"] if existing_report else "report",
                 f"由素材包内 {report_rel} 与页面素材自动同步的完整汇报素材。",
-                ",".join(merge_tags(existing_report["tags"] if existing_report else "", ["汇报素材", "完整汇报", "HTML 汇报", "自动同步"])),
+                "",
                 read_text_sample(report_html),
                 report_code,
                 report_rel,
-                f"/extracted/{upload_id}/{report_rel}",
+                f"/reports/{quote(report_asset_id, safe='')}/index.html",
                 upload_id,
                 f"sync-report:{upload_id}:{report_content_hash}",
                 existing_report["version_group"] if existing_report else report_asset_id,
@@ -125,22 +125,6 @@ def sync_report_material_package(
         )
         changed += 1
 
-    existing_controls_by_content_hash = {}
-    for control_row in conn.execute(
-        """
-        select * from assets
-        where asset_type = 'control'
-          and source_path <> ''
-        order by
-          case when version_parent_id = '' then 0 else 1 end,
-          created_at,
-          asset_code
-        """
-    ).fetchall():
-        control_path = asset_library_path(control_row)
-        if control_path and control_path.exists():
-            existing_controls_by_content_hash.setdefault(file_hash(control_path), control_row)
-
     pages_to_sync_index = []
     for page_item in report_manifest_page_items(extract_root, manifest, manifest_kind):
         control_html = page_item["path"]
@@ -149,19 +133,12 @@ def sync_report_material_package(
         asset_code = report_code_to_control_code(report_code, page_number)
         existing = find_existing_asset(conn, upload_id, rel, "control") or find_existing_asset_by_code(conn, asset_code, "control")
         title = str(page_item.get("title") or (existing["title"] if existing else "") or f"{page_number:02d} 汇报页面").strip()
-        display_title = control_display_title(title, page_number)
+        display_title = title if manifest.get("format") == "minem-export" else control_display_title(title, page_number)
         asset_id = existing["id"] if existing else f"{upload_id}-control-{page_number:02d}"
         if not asset_code:
             asset_code = next_asset_code(conn, "control", "page", "html")
-        tags = merge_tags(
-            existing["tags"] if existing else "",
-            page_item.get("tags") or [],
-            ["页面素材", "汇报页面", "单页素材", f"页码:{page_number:02d}", "自动同步"],
-            [f"原页面:{page_item.get('source_code')}"] if page_item.get("source_code") else [],
-            [page_item.get("role")] if page_item.get("role") else [],
-        )
         control_content_hash = file_hash(control_html)
-        control_source_hash = f"sync-control:{control_content_hash}"
+        control_source_hash = f"sync-control:{upload_id}:{page_number}:{control_content_hash}"
         slot = conn.execute(
             "select * from report_page_slots where report_id = ? and page_number = ?",
             (report_asset_id, page_number),
@@ -172,24 +149,13 @@ def sync_report_material_package(
                 "select * from assets where id = ? and asset_type = 'control'",
                 (slot["control_id"],),
             ).fetchone()
-        same_hash_asset = conn.execute(
-            "select * from assets where source_hash = ? and asset_type = 'control' limit 1",
-            (control_source_hash,),
-        ).fetchone()
-        if not same_hash_asset:
-            same_hash_asset = existing_controls_by_content_hash.get(control_content_hash)
-
         incoming_asset_id = ""
         incoming_asset_code = ""
         incoming_path = None
         existing_path = asset_library_path(existing) if existing else None
         existing_content_matches = bool(existing_path and existing_path.exists() and file_hash(existing_path) == control_content_hash)
         can_update_existing = existing and (existing["source_hash"] == control_source_hash or existing_content_matches)
-        if same_hash_asset:
-            incoming_asset_id = same_hash_asset["id"]
-            incoming_asset_code = same_hash_asset["asset_code"]
-            incoming_path = asset_library_path(same_hash_asset)
-        elif can_update_existing:
+        if can_update_existing:
             incoming_asset_id = existing["id"]
             incoming_asset_code = existing["asset_code"]
             incoming_path = asset_library_path(existing)
@@ -203,7 +169,7 @@ def sync_report_material_package(
                     display_title,
                     existing["category"] if existing else "page",
                     f"从汇报素材 {report_code or upload_id} 自动同步的第 {page_number} 页页面素材。",
-                    ",".join(tags),
+                    "",
                     read_text_sample(control_html),
                     control_source_hash,
                     rel,
@@ -222,17 +188,18 @@ def sync_report_material_package(
                 incoming_asset_code = next_candidate_asset_code(conn, (current_asset or existing)["asset_code"] or asset_code)
             else:
                 incoming_asset_code = asset_code or next_asset_code(conn, "control", "page", "html")
-            variant = "candidate" if current_asset else "current"
-            variant_path, variant_rel = copy_page_variant(extract_root, rel, variant, control_source_hash)
-            if not variant_path:
-                variant_path, variant_rel = control_html, rel
+            variant_path, variant_rel = control_html, rel
+            if current_asset:
+                candidate_path, candidate_rel = copy_page_variant(extract_root, rel, "candidate", control_source_hash)
+                if candidate_path:
+                    variant_path, variant_rel = candidate_path, candidate_rel
             version_group = (parent_asset["version_group"] or parent_asset["id"]) if parent_asset else incoming_asset_id
             insert_control_asset(
                 conn,
                 asset_id=incoming_asset_id,
                 title=display_title,
                 usage=f"从汇报素材 {report_code or upload_id} 自动同步的第 {page_number} 页页面素材。",
-                tags=tags,
+                tags=[],
                 snippet=read_text_sample(control_html),
                 asset_code=incoming_asset_code,
                 source_type="report-material-candidate" if current_asset else "report-material-sync",
@@ -263,10 +230,11 @@ def sync_report_material_package(
     # page controls. Rewriting that source makes the next startup scan observe
     # different page hashes and create a fresh candidate version for every
     # page. Manifest-driven packages can still synchronize their viewer entry.
-    if pages_to_sync_index and manifest_kind != "html-report":
+    if pages_to_sync_index and manifest_kind != "html-report" and manifest.get("format") != "image-deck":
         sync_report_index_from_slots(conn, report_asset_id, pages_to_sync_index, "自动同步页面素材后更新最新汇报 index")
 
-    changed += sync_report_package_resources(conn, upload_id, extract_root, report_code, report_title)
+    if manifest.get("format") not in {"image-deck", "spark-code"}:
+        changed += sync_report_package_resources(conn, upload_id, extract_root, report_code, report_title)
 
     file_count = sum(1 for path in extract_root.rglob("*") if path.is_file())
     asset_count = conn.execute("select count(*) from assets where upload_id = ?", (upload_id,)).fetchone()[0]

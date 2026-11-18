@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import html
 import importlib.metadata
 import json
-import tempfile
 import time
 import urllib.parse
 import webbrowser
@@ -83,7 +81,7 @@ def config_command(ctx: CommandContext, args) -> dict:
 
 
 def completion(ctx: CommandContext, args) -> dict:
-    commands = "version status doctor config completion asset import page report case task agent"
+    commands = "version status doctor config completion asset import page report task agent"
     if args.shell == "zsh":
         script = f"#compdef minem\n_arguments '1:command:({commands})' '*::arg:->args'\n"
     elif args.shell == "fish":
@@ -252,28 +250,6 @@ def import_material(ctx: CommandContext, args, expected_type: str) -> dict:
     return {"task": task, "asset": resource, "reused": bool(created.get("reused")), "warnings": warnings}
 
 
-def case_import(ctx: CommandContext, args) -> dict:
-    source = _source(args)
-    if source.suffix.lower() not in {".md", ".markdown", ".txt"}:
-        raise CliError("INVALID_ARGUMENT", "case import currently accepts Markdown or TXT", exit_code=2)
-    title = args.name or getattr(args, "title", None) or source.stem
-    text = source.read_text(encoding="utf-8", errors="replace")
-    lines = [line.strip("# -*\t ") for line in text.splitlines() if line.strip()]
-    body = "\n".join(f"<p>{html.escape(line)}</p>" for line in lines[:80]) or "<p>Content pending.</p>"
-    document = f"""<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>{html.escape(title)}</title><style>html,body{{margin:0;width:100%;height:100%;background:#071727;color:#edf5ff}}main{{box-sizing:border-box;width:1600px;height:900px;padding:76px 112px;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}h1{{font-size:56px;margin:0 0 42px}}p{{font-size:26px;line-height:1.65;max-width:1220px;margin:12px 0;color:#d4e4f4}}</style></head><body><main class=\"slide-frame\"><h1>{html.escape(title)}</h1>{body}</main></body></html>"""
-    with tempfile.NamedTemporaryFile("w", suffix="-case.html", encoding="utf-8", delete=False) as handle:
-        handle.write(document)
-        generated = Path(handle.name)
-    original_source = args.source
-    try:
-        args.source = str(generated)
-        args.description = f"case import,{args.industry or ''}"
-        return import_material(ctx, args, "page")
-    finally:
-        args.source = original_source
-        generated.unlink(missing_ok=True)
-
-
 def report_create(ctx: CommandContext, args) -> dict:
     references = list(args.page or [])
     if args.controls:
@@ -281,7 +257,7 @@ def report_create(ctx: CommandContext, args) -> dict:
     pages = resolve_assets(ctx.client, references, "page")
     if not pages:
         raise CliError("INVALID_ARGUMENT", "A report requires at least one --page", exit_code=2)
-    payload = ctx.client.request("POST", "/api/storyline-reports", {"mode": "manual", "title": args.name or args.title, "controlIds": [item["id"] for item in pages], "note": args.note or ""})
+    payload = ctx.client.request("POST", "/api/reports", {"title": args.name or args.title or "", "pageIds": [item["id"] for item in pages], "note": args.note or ""})
     asset = normalize_asset(payload.get("asset"), ctx.base_url)
     return {"asset": asset, "url": absolute_url(ctx.base_url, payload.get("url")), "pages": [normalize_asset(item, ctx.base_url) for item in pages]}
 
@@ -294,7 +270,12 @@ def report_pages(ctx: CommandContext, args) -> dict:
     report = resolve_asset(ctx.client, args.report, "report")
     payload = ctx.client.request("GET", f"/api/reports/{urllib.parse.quote(report['id'])}/pages")
     slots = payload.get("slots") or []
-    rows = [{"position": index + 1, "code": slot.get("asset_code") or slot.get("assetCode") or "", "title": slot.get("title") or "", "id": slot.get("control_id") or slot.get("controlId") or ""} for index, slot in enumerate(slots)]
+    rows = [{
+        "position": index + 1,
+        "code": slot.get("asset_code") or slot.get("assetCode") or (slot.get("control") or {}).get("asset_code") or "",
+        "title": slot.get("title") or "",
+        "id": slot.get("control_id") or slot.get("controlId") or "",
+    } for index, slot in enumerate(slots)]
     return {"report": normalize_asset(report, ctx.base_url), "items": slots, "rows": rows, "columns": [{"key": "position", "label": "#"}, {"key": "code", "label": "CODE"}, {"key": "title", "label": "TITLE"}, {"key": "id", "label": "ID"}]}
 
 
@@ -317,7 +298,7 @@ def _arrangement(ctx: CommandContext, report_id: str) -> tuple[dict, list[str], 
 
 def report_page_mutation(ctx: CommandContext, args) -> dict:
     report = resolve_asset(ctx.client, args.report, "report")
-    _, order, hidden = _arrangement(ctx, report["id"])
+    arrangement, order, hidden = _arrangement(ctx, report["id"])
     original_order = list(order)
     original_hidden = list(hidden)
     inserted = []
@@ -374,6 +355,8 @@ def report_page_mutation(ctx: CommandContext, args) -> dict:
 
     _require_confirm(args, "Updating the formal report requires --confirm")
     plan = {"pageOrder": order, "hiddenPageIds": hidden, "insertedControlIds": inserted, "removedPageIds": removed}
+    if isinstance(arrangement.get("updatedAt"), int):
+        plan["expectedUpdatedAt"] = arrangement["updatedAt"]
     if args.dry_run:
         return {"report": normalize_asset(report, ctx.base_url), "dryRun": True, "before": {"pageOrder": original_order, "hiddenPageIds": original_hidden}, "after": plan}
     updated = ctx.client.request("POST", f"/api/reports/{urllib.parse.quote(report['id'])}/arrangement", plan)
@@ -417,7 +400,6 @@ CAPABILITIES = [
     {"name": "import.report", "input": "HTML or ZIP", "async": True},
     {"name": "import.page", "input": "HTML or ZIP", "async": True},
     {"name": "page.import", "input": "HTML or ZIP", "async": True},
-    {"name": "case.import", "input": "Markdown or TXT", "aiGenerated": False},
     {"name": "task.list", "readOnly": True},
     {"name": "task.get", "readOnly": True},
     {"name": "task.wait", "readOnly": True},
@@ -442,7 +424,6 @@ SCHEMAS = {
     "report.create": {"required": ["name", "page"], "properties": {"name": {"type": "string"}, "page": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "note": {"type": "string"}}},
     "report.export": {"required": ["report"], "properties": {"report": {"type": "string"}, "format": {"enum": ["html", "pdf"]}, "destination": {"type": "string"}, "wait": {"type": "boolean"}}},
     "page.import": {"required": ["source"], "properties": {"source": {"type": "string"}, "name": {"type": "string"}, "wait": {"type": "boolean"}}},
-    "case.import": {"required": ["source"], "properties": {"source": {"type": "string"}, "name": {"type": "string"}, "industry": {"type": "string"}, "wait": {"type": "boolean"}}},
 }
 
 

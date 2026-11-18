@@ -23,6 +23,7 @@ create table if not exists import_tasks (
   preview_url text not null default '',
   error text not null default '',
   stored_path text not null default '',
+  source_url text not null default '',
   created_at integer not null,
   updated_at integer not null
 );
@@ -46,6 +47,7 @@ PUBLIC_KEYS = [
     "previewUrl",
     "error",
     "storedPath",
+    "sourceUrl",
     "createdAt",
     "updatedAt",
 ]
@@ -68,6 +70,7 @@ COLUMN_BY_KEY = {
     "previewUrl": "preview_url",
     "error": "error",
     "storedPath": "stored_path",
+    "sourceUrl": "source_url",
     "createdAt": "created_at",
     "updatedAt": "updated_at",
 }
@@ -89,6 +92,7 @@ DEFAULT_TASK = {
     "previewUrl": "",
     "error": "",
     "storedPath": "",
+    "sourceUrl": "",
 }
 
 
@@ -106,13 +110,13 @@ class ImportTaskStore:
     def __init__(self, db_path):
         self.db_path = Path(db_path)
         self.lock = threading.RLock()
+        self._schema_ready = False
 
     @contextmanager
     def connect(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("pragma busy_timeout = 30000")
         try:
             with conn:
                 yield conn
@@ -120,11 +124,18 @@ class ImportTaskStore:
             conn.close()
 
     def ensure_schema(self, conn=None):
-        if conn is not None:
-            conn.executescript(IMPORT_TASKS_SCHEMA)
+        if conn is None:
+            with self.lock:
+                if self._schema_ready:
+                    return
+                with self.connect() as local:
+                    self.ensure_schema(local)
+                self._schema_ready = True
             return
-        with self.connect() as local:
-            local.executescript(IMPORT_TASKS_SCHEMA)
+        conn.executescript(IMPORT_TASKS_SCHEMA)
+        columns = {row[1] for row in conn.execute("pragma table_info(import_tasks)")}
+        if "source_url" not in columns:
+            conn.execute("alter table import_tasks add column source_url text not null default ''")
 
     def create(self, task):
         created = task.get("createdAt") or now_ms()
@@ -133,14 +144,19 @@ class ImportTaskStore:
         return public_import_task(payload)
 
     def update(self, task_id, **updates):
-        with self.lock:
-            current = self.get(task_id, include_private=True)
-            if not current:
+        self.ensure_schema()
+        fields = {key: value for key, value in updates.items() if key in COLUMN_BY_KEY and key != "id"}
+        fields["updatedAt"] = now_ms()
+        assignments = ", ".join(f"{COLUMN_BY_KEY[key]} = ?" for key in fields)
+        with self.lock, self.connect() as conn:
+            changed = conn.execute(
+                f"update import_tasks set {assignments} where id = ?",
+                [*fields.values(), task_id],
+            )
+            if not changed.rowcount:
                 return None
-            current.update(updates)
-            current["updatedAt"] = now_ms()
-            self._save(current)
-            return public_import_task(current)
+            row = conn.execute("select * from import_tasks where id = ?", (task_id,)).fetchone()
+            return public_import_task(self._row_to_task(row))
 
     def list(self, limit=8):
         self.ensure_schema()

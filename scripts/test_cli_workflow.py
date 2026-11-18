@@ -78,16 +78,9 @@ def main() -> int:
         page_a = root / "page-a.html"
         page_b = root / "page-b.html"
         page_c = root / "page-c.html"
-        case_doc = root / "case.md"
         page_a.write_text(page_html("AI 创建页面素材", "模型生成页面，MineM 负责入库与追溯。", "#07111f"), encoding="utf-8")
         page_b.write_text(page_html("AI 管理汇报", "模型可以创建并编排完整汇报。", "#101827"), encoding="utf-8")
         page_c.write_text(page_html("版本与来源", "页面替换后仍保留原始素材。", "#071b18"), encoding="utf-8")
-        case_doc.write_text(
-            "# 制造业协同案例\n\n## 挑战\n页面重复且来源难追踪。\n\n"
-            "## 方案\n通过 MineM 和 CLI 创建、管理并编排素材。\n",
-            encoding="utf-8",
-        )
-
         version = invoke(base_url, config, "version")
         assert version["data"]["schemaVersion"] == "minem.cli/v1", version
         assert invoke(base_url, config, "status")["data"]["connected"] is True
@@ -105,24 +98,9 @@ def main() -> int:
         first = import_page(base_url, config, page_a, "AI 创建页面素材")
         second = import_page(base_url, config, page_b, "AI 管理汇报")
         replacement = import_page(base_url, config, page_c, "版本与来源")
-
-        case_result = invoke(
-            base_url,
-            config,
-            "case",
-            "import",
-            str(case_doc),
-            "--name",
-            "制造业协同案例",
-            "--industry",
-            "制造业",
-            "--wait",
-        )
-        case = case_result["resource"]
-        assert case["type"] == "page", case_result
-        assert case["title"] == "制造业协同案例", case_result
-        assert case_result["data"]["task"]["status"] == "success", case_result
-        assert_url(case["previewUrl"])
+        page_d = root / "page-d.html"
+        page_d.write_text(page_html("交付成果", "可复用的普通页面素材。", "#122631"), encoding="utf-8")
+        additional = import_page(base_url, config, page_d, "交付成果")
 
         by_id = invoke(base_url, config, "asset", "get", first["id"])["resource"]
         by_code = invoke(base_url, config, "asset", "get", first["code"])["resource"]
@@ -156,9 +134,11 @@ def main() -> int:
 
         initial_pages = invoke(base_url, config, "report", "pages", report["code"])
         rows = initial_pages["data"]["rows"]
-        assert len(rows) == 2, initial_pages
-        first_member = rows[0]["code"] or rows[0]["id"]
-        second_member = rows[1]["code"] or rows[1]["id"]
+        assert len(rows) == 3 and rows[0]["title"] == "封面", initial_pages
+        assert all(row["code"].startswith("CTRL-") for row in rows), initial_pages
+        first_member = rows[1]["code"]
+        second_member = rows[2]["code"]
+        assert rows[1]["id"] != first["id"] and rows[2]["id"] != second["id"], initial_pages
 
         dry_run = invoke(
             base_url,
@@ -168,14 +148,14 @@ def main() -> int:
             "add",
             report["code"],
             "--page",
-            case["code"],
+            additional["code"],
             "--after",
             first_member,
             "--dry-run",
         )
         assert dry_run["data"]["dryRun"] is True
         unchanged = invoke(base_url, config, "report", "pages", report["id"])
-        assert len(unchanged["data"]["rows"]) == 2
+        assert len(unchanged["data"]["rows"]) == 3
 
         confirmation = invoke(
             base_url,
@@ -185,15 +165,18 @@ def main() -> int:
             "add",
             report["code"],
             "--page",
-            case["code"],
+            additional["code"],
             "--after",
             first_member,
             expected=4,
         )
         assert confirmation["error"]["code"] == "CONFIRMATION_REQUIRED", confirmation
 
-        added = invoke(base_url, config, "report", "page", "add", report["code"], "--page", case["code"], "--after", first_member, "--confirm")
-        assert len(added["data"]["arrangement"]["pages"]) == 3, added
+        added = invoke(base_url, config, "report", "page", "add", report["code"], "--page", additional["code"], "--after", first_member, "--confirm")
+        assert len(added["data"]["arrangement"]["pages"]) == 4, added
+        additional_member = next(item for item in added["data"]["arrangement"]["pages"] if item["title"] == "交付成果")
+        assert additional_member["id"] == additional["id"], added
+        assert_url(additional_member["previewUrl"] if additional_member["previewUrl"].startswith("http") else base_url + additional_member["previewUrl"])
 
         duplicate_replace = invoke(base_url, config, "report", "page", "replace", report["code"], "--page", second_member, "--with", first_member, "--confirm", expected=1)
         assert duplicate_replace["error"]["code"] == "CONFLICT", duplicate_replace
@@ -201,21 +184,24 @@ def main() -> int:
         assert self_move["error"]["code"] == "INVALID_ARGUMENT", self_move
 
         replaced = invoke(base_url, config, "report", "page", "replace", report["code"], "--page", second_member, "--with", replacement["code"], "--confirm")
-        replaced_codes = [item.get("code") for item in replaced["data"]["arrangement"]["pages"]]
-        assert replacement["code"] in replaced_codes, replaced
+        replacement_member = next(item for item in replaced["data"]["arrangement"]["pages"] if item["title"] == "版本与来源")
+        assert replacement_member["id"] == replacement["id"], replaced
+        assert second_member not in [item["code"] for item in replaced["data"]["arrangement"]["pages"]], replaced
 
-        invoke(base_url, config, "report", "page", "move", report["code"], "--page", replacement["code"], "--before", first_member, "--confirm")
-        hidden = invoke(base_url, config, "report", "page", "hide", report["code"], "--page", case["code"], "--confirm")
-        assert any(item["id"] == case["id"] and item["hidden"] for item in hidden["data"]["arrangement"]["pages"]), hidden
-        shown = invoke(base_url, config, "report", "page", "show", report["code"], "--page", case["code"], "--confirm")
-        assert not any(item["id"] == case["id"] and item["hidden"] for item in shown["data"]["arrangement"]["pages"]), shown
-        removed = invoke(base_url, config, "report", "page", "remove", report["code"], "--page", case["code"], "--confirm")
-        assert len(removed["data"]["arrangement"]["pages"]) == 2, removed
-        final = invoke(base_url, config, "report", "page", "add", report["code"], "--page", case["code"], "--after", first_member, "--confirm")
-        assert len(final["data"]["arrangement"]["pages"]) == 3, final
+        moved = invoke(base_url, config, "report", "page", "move", report["code"], "--page", replacement_member["code"], "--before", first_member, "--confirm")
+        moved_codes = [item["code"] for item in moved["data"]["arrangement"]["pages"]]
+        assert moved_codes.index(replacement_member["code"]) < moved_codes.index(first_member), moved
+        hidden = invoke(base_url, config, "report", "page", "hide", report["code"], "--page", additional_member["code"], "--confirm")
+        assert any(item["id"] == additional_member["id"] and item["hidden"] for item in hidden["data"]["arrangement"]["pages"]), hidden
+        shown = invoke(base_url, config, "report", "page", "show", report["code"], "--page", additional_member["code"], "--confirm")
+        assert not any(item["id"] == additional_member["id"] and item["hidden"] for item in shown["data"]["arrangement"]["pages"]), shown
+        removed = invoke(base_url, config, "report", "page", "remove", report["code"], "--page", additional_member["code"], "--confirm")
+        assert len(removed["data"]["arrangement"]["pages"]) == 3, removed
+        final = invoke(base_url, config, "report", "page", "add", report["code"], "--page", additional["code"], "--after", first_member, "--confirm")
+        assert len(final["data"]["arrangement"]["pages"]) == 4, final
         assert_url(final["links"]["preview"])
 
-        for source in (first, second, replacement, case):
+        for source in (first, second, replacement, additional):
             assert invoke(base_url, config, "asset", "get", source["code"])["resource"]["id"] == source["id"]
 
         legacy = invoke(base_url, config, "page", "create", "--file", str(page_a), "--wait", "--json")
@@ -232,7 +218,7 @@ def main() -> int:
             "schemaVersion": "minem.cli/v1",
             "reportId": report["id"],
             "reportCode": report["code"],
-            "pageCount": 3,
+            "pageCount": 4,
             "previewUrl": final["links"]["preview"],
         }, ensure_ascii=False))
     return 0

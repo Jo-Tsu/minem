@@ -36,3 +36,13 @@ desktop/src-tauri/gen/
 desktop/src-tauri/target/
 desktop/*.app/
 desktop/*.dmg
+
+# Local project data
+/runtime/
+
+# Local product audits, fixtures and validation output
+/work/
+
+# Private material-specific audit notes
+/docs/MineM_CODE_AUDIT_2026-11-17.md
+/docs/MineM_PRODUCT_WALKTHROUGH_2026-11-18.md

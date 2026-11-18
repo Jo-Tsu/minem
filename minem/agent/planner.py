@@ -19,18 +19,11 @@ TASK_RULES = [
         "risk": "high",
     },
     {
-        "name": "report_storyline",
-        "keywords": ["storyline", "collection", "version", "故事线", "收藏", "版本"],
+        "name": "report_arrangement",
+        "keywords": ["report", "arrangement", "version", "汇报", "编排", "版本"],
         "files": ["minem/reports.py", "minem/lineage.py", "server.py", "frontend/src/App.tsx", "frontend/src/types.ts"],
         "validations": ["python_compile", "frontend_build", "api_contract"],
         "risk": "high",
-    },
-    {
-        "name": "presenter_script",
-        "keywords": ["presenter", "speech", "script", "演讲", "讲稿", "妙记", "时间戳"],
-        "files": ["server.py", "templates/ai-presenter.html", "frontend/src/App.tsx", "frontend/src/styles.css"],
-        "validations": ["python_compile", "frontend_build"],
-        "risk": "medium",
     },
     {
         "name": "design_frontend",

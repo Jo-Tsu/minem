@@ -11,7 +11,8 @@ const binariesDir = join(desktopDir, "src-tauri", "binaries");
 const target = process.env.TAURI_ENV_TARGET_TRIPLE
   || (process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin");
 const output = join(binariesDir, `minem-server-${target}`);
-const python = process.env.MINEM_DESKTOP_PYTHON || "python3";
+const projectPython = join(projectRoot, ".venv", "bin", "python");
+const python = process.env.MINEM_DESKTOP_PYTHON || (existsSync(projectPython) ? projectPython : "python3");
 
 rmSync(buildRoot, { recursive: true, force: true });
 mkdirSync(buildRoot, { recursive: true });
@@ -28,7 +29,7 @@ const result = spawnSync(python, [
   "--workpath", join(buildRoot, "work"),
   "--specpath", join(buildRoot, "spec"),
   "--collect-all", "minem",
-  "--add-data", addData("product-version.json", "product-version.json"),
+  "--add-data", addData("product-version.json", "."),
   "--add-data", addData("public", "public"),
   "--add-data", addData("templates", "templates"),
   join(projectRoot, "server.py")

@@ -10,6 +10,7 @@ their filenames remain stable and all repository links are relative.
 ## 产品与设计 / Product and design
 
 - [产品需求文档 / Product requirements](MineM_PRD.md)
+- [HTML 文档交付标准 / HTML delivery standard](MineM_EXPORT_STANDARD.md)
 - [本地 AI 客户端需求 / Local AI client requirements](MineM_LOCAL_AI_CLIENT_PRD.md)
 - [设计系统 / Design system](DESIGN_SYSTEM.md)
 - [标签系统需求 / Tag system requirements](MineM_TAG_SYSTEM_PRD.md)
@@ -18,6 +19,7 @@ their filenames remain stable and all repository links are relative.
 ## 技术与运行 / Engineering and runtime
 
 - [技术文档 / Technical documentation](MineM_TECHNICAL.md)
+- [导入接口与验收 / Import API and acceptance checks](MineM_IMPORT_API.md)
 - [本地 AI 客户端技术设计 / Local AI client technical design](MineM_LOCAL_AI_CLIENT_TECHNICAL.md)
 - [Agent 运行时 / Agent runtime](MineM_AGENT_RUNTIME.md)
 - [CLI 能力范围 / CLI capability boundary](MineM_CLI_%E8%83%BD%E5%8A%9B%E8%8C%83%E5%9B%B4.md)

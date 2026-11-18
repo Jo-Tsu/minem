@@ -25,14 +25,3 @@ services:
       - ./thumbnails:/app/thumbnails
       - ./report-exports:/app/report-exports
     restart: unless-stopped
-
-  ai-presenter-tts:
-    profiles: ["speech"]
-    build:
-      context: ./local-tts
-    image: ai-presenter-tts:latest
-    ports:
-      - "127.0.0.1:8765:8765"
-    volumes:
-      - ./local-tts/models:/app/models:ro
-    restart: unless-stopped

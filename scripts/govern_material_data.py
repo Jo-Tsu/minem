@@ -16,42 +16,16 @@ import json
 import re
 import sqlite3
 import sys
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import server
-ROOT = Path(__file__).resolve().parents[1]
-EXTRACTED = ROOT / "extracted"
+from minem.html_dependencies import DependencyParser as RefParser, normalize_reference
 
-
-class RefParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.refs: list[tuple[str, str]] = []
-        self.base_href = ""
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        attrs_dict = dict(attrs)
-        if tag == "base" and attrs_dict.get("href"):
-            self.base_href = attrs_dict["href"]
-        for name in ("src", "poster"):
-            value = attrs_dict.get(name)
-            if value:
-                self.refs.append((name, value))
-        if tag == "link":
-            value = attrs_dict.get("href")
-            if value:
-                self.refs.append(("href", value))
-        srcset = attrs_dict.get("srcset")
-        if srcset:
-            for part in srcset.split(","):
-                value = part.strip().split(" ")[0]
-                if value:
-                    self.refs.append(("srcset", value))
+ROOT = server.RUNTIME_ROOT
+EXTRACTED = server.EXTRACTED
 
 
 def file_sha1(path: Path) -> str:
@@ -83,7 +57,7 @@ def asset_path(row) -> Path | None:
 
 
 def is_external_reference(value: str) -> bool:
-    value = (value or "").strip()
+    value = normalize_reference(value)
     if not value or value in {".", "..", "...", "location.href"} or value.startswith(("#", "data:", "mailto:", "tel:", "javascript:", "var(")):
         return True
     parsed = urlparse(value)
@@ -102,11 +76,12 @@ def base_dir_for_html(html_path: Path, parser: RefParser) -> Path:
 
 
 def local_ref_path(html_path: Path, base_dir: Path, value: str) -> Path | None:
+    value = normalize_reference(value)
     if is_external_reference(value):
         return None
     parsed = urlparse(value)
     path_text = unquote(parsed.path or value)
-    if not path_text:
+    if not path_text or path_text.startswith("#"):
         return None
     if path_text.startswith("/"):
         candidate = (ROOT / path_text.lstrip("/")).resolve()
@@ -131,15 +106,19 @@ def html_missing_refs(row) -> list[str]:
         return []
     parser = RefParser()
     parser.feed(text[:2_000_000])
-    refs = list(parser.refs)
-    css_text = re.sub(r"/\*.*?\*/", "", text[:2_000_000], flags=re.S)
-    refs.extend(("css-url", match.group(1).strip("'\"")) for match in re.finditer(r"url\(([^)]+)\)", css_text, re.I))
+    parser.finish()
+    refs = parser.references
     base_dir = base_dir_for_html(path, parser)
     missing = []
     for _, value in refs[:1000]:
         candidate = local_ref_path(path, base_dir, value)
-        if candidate and not candidate.exists():
-            missing.append(value)
+        if candidate:
+            try:
+                exists = candidate.exists()
+            except OSError:
+                exists = False
+            if not exists:
+                missing.append(value[:2048])
     return missing
 
 
@@ -217,10 +196,7 @@ def repair_superclub_report_entries(conn) -> tuple[int, list[str]]:
         ).fetchone()
         if conflict:
             source_hash = f"{source_hash}:{row['id']}"
-        tags = server.merge_tags(
-            row["tags"],
-            ["汇报素材", "完整汇报", "HTML 汇报", "案例素材"] if "HENGAN" in code else ["汇报素材", "完整汇报", "HTML 汇报"],
-        )
+        tags = []
         conn.execute(
             """
             update assets

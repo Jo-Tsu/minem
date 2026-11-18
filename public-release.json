@@ -7,8 +7,6 @@
     "desktop",
     "docs",
     "frontend",
-    "local-tts/Dockerfile",
-    "local-tts/server.py",
     "minem",
     "scripts",
     "templates",
@@ -38,7 +36,9 @@
     "server.py",
     "start.sh",
     "tsconfig.json",
-    "vite.config.ts"
+    "vite.config.ts",
+    "AGENTS.md",
+    "Dockerfile.recovered"
   ],
   "exclude": [
     ".DS_Store",
@@ -66,6 +66,10 @@
     "desktop/src-tauri/binaries",
     "desktop/src-tauri/gen",
     "desktop/src-tauri/target",
-    "docs/MineM_PROJECT_AUDIT_2026-07-18.md"
+    "docs/MineM_PROJECT_AUDIT_2026-07-18.md",
+    "runtime",
+    "work",
+    "docs/MineM_CODE_AUDIT_2026-11-17.md",
+    "docs/MineM_PRODUCT_WALKTHROUGH_2026-11-18.md"
   ]
 }

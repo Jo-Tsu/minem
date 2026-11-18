@@ -31,8 +31,7 @@ not remain accessible through public history.
   validation, version, and CLI scripts under `scripts/`.
 - `desktop/` 下的 macOS 客户端源码与打包脚本。macOS client source and
   packaging scripts under `desktop/`.
-- `local-tts/` 下的可选本地语音服务源码。Optional local speech service
-  source under `local-tts/`.
+- 已下线的故事、演讲和语音模块不属于当前发布源码。Retired story, presenter and speech modules are excluded from the current source release.
 - `templates/` 下的运行时 HTML 模板。Runtime HTML templates under
   `templates/`.
 - 产品、技术、设计、测试、安全和贡献文档。Product, technical, design,
@@ -117,3 +116,9 @@ must not be used as a demonstration package.
   empty library and no private source mount.
 - 公开 README 同时说明轻量本地启动和可选 Docker 启动。The public README
   explains both lightweight local startup and optional Docker.
+
+## 后续源码更新 / Subsequent updates
+
+当前仓库已公开，后续更新沿用现有 Git 历史，仅提交公开边界内的源码、通用模板、文档和测试。内部走查记录、运行目录和本地定制素材继续排除。默认封面为本项目原创几何背景；个人封面可保存在运行目录的 `config/report-covers/`。
+
+The public repository keeps its published history for subsequent updates. Only source, generic templates, documentation and tests are committed. Private audits, runtime data and custom artwork remain excluded. Default covers are original geometric artwork; personal overrides belong in `config/report-covers/` under the runtime directory.

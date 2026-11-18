@@ -8,17 +8,23 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "data" / "materials.db"
-UPLOADS = ROOT / "uploads"
-EXTRACTED = ROOT / "extracted"
+sys.path.insert(0, str(ROOT))
+
+from minem.runtime_layout import history_root, maintenance_runtime_root
+
+RUNTIME_ROOT = maintenance_runtime_root(ROOT)
+DB_PATH = RUNTIME_ROOT / "data" / "materials.db"
+UPLOADS = RUNTIME_ROOT / "uploads"
+EXTRACTED = RUNTIME_ROOT / "extracted"
 
 
 def relative_runtime_path(path: Path) -> str:
-    return path.resolve().relative_to(ROOT.resolve()).as_posix()
+    return path.resolve().relative_to(RUNTIME_ROOT.resolve()).as_posix()
 
 
 def upload_files(upload_id: str) -> list[Path]:
@@ -89,11 +95,10 @@ def main() -> int:
             })
 
     zero_uploads = zero_asset_uploads(conn)
-    backup_files = sorted((ROOT / "data").glob("materials.db.before-*"))
+    backup_files = sorted((RUNTIME_ROOT / "data").glob("materials.db.before-*"))
     legacy_tag_counts = {
         "assets": conn.execute("select count(*) from assets where trim(coalesce(tags, '')) <> ''").fetchone()[0],
         "assetHistory": conn.execute("select count(*) from asset_history where trim(coalesce(tags, '')) <> ''").fetchone()[0],
-        "storylines": conn.execute("select count(*) from report_storyline_collections where trim(coalesce(tags, '')) <> ''").fetchone()[0],
     }
     hash_updates = []
     for row in conn.execute("select id from uploads order by created_at").fetchall():
@@ -137,12 +142,18 @@ def main() -> int:
                     conn.execute("update uploads set content_hash = ? where id = ?", (update["contentHash"], update["id"]))
                 conn.execute("update assets set tags = '' where trim(coalesce(tags, '')) <> ''")
                 conn.execute("update asset_history set tags = '' where trim(coalesce(tags, '')) <> ''")
-                conn.execute("update report_storyline_collections set tags = '' where trim(coalesce(tags, '')) <> ''")
                 for upload in zero_uploads:
                     conn.execute("delete from import_tasks where upload_id = ?", (upload["id"],))
                     conn.execute("delete from uploads where id = ?", (upload["id"],))
-            for path in removable_files + backup_files:
+            for path in removable_files:
                 path.unlink(missing_ok=True)
+            if backup_files:
+                archive = history_root(RUNTIME_ROOT) / "database-backups"
+                archive.mkdir(parents=True, exist_ok=True)
+                for path in backup_files:
+                    destination = archive / path.name
+                    if not destination.exists():
+                        path.rename(destination)
             for path in removable_dirs:
                 shutil.rmtree(path)
         finally:

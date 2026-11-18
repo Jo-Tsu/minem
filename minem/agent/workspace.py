@@ -3,21 +3,24 @@ from pathlib import Path
 
 EXCLUDED_DIRS = {
     ".git",
+    ".venv",
     "__pycache__",
     "node_modules",
     "dist",
     "build",
     "data",
+    "runtime",
     "uploads",
     "extracted",
     "thumbnails",
+    "report-exports",
     "backups",
-    "local-tts/models",
     "frontend/dist",
+    "desktop/node_modules",
+    "desktop/src-tauri/target",
     "public",
     "work",
     "realdoc",
-    "local-tts",
 }
 
 EXCLUDED_FILES = {
@@ -55,9 +58,7 @@ def is_excluded(rel_path):
     if Path(rel).name in EXCLUDED_FILES:
         return True
     parts = rel.split("/")
-    prefixes = {parts[0]}
-    if len(parts) >= 2:
-        prefixes.add("/".join(parts[:2]))
+    prefixes = {"/".join(parts[:length]) for length in range(1, len(parts) + 1)}
     return bool(prefixes & EXCLUDED_DIRS)
 
 
@@ -81,15 +82,25 @@ def classify_file(rel_path):
 
 def iter_source_files(root, *, max_files=2000):
     root = Path(root)
+
+    def visit(directory):
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            if is_excluded(relative_path(root, path)):
+                continue
+            if path.is_dir():
+                if not path.is_symlink():
+                    yield from visit(path)
+            elif path.is_file() and is_source_file(path):
+                yield path
+
     count = 0
-    for path in sorted(root.rglob("*")):
+    for path in visit(root):
         if count >= max_files:
             break
-        if not path.is_file():
-            continue
-        rel = relative_path(root, path)
-        if is_excluded(rel) or not is_source_file(path):
-            continue
         count += 1
         yield path
 
